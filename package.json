@@ -1,0 +1,40 @@
+{
+  "name": "@rachittshah/tasc",
+  "version": "0.1.0",
+  "description": "Eval-gated inference policy optimization with deterministic replay and holdout confirmation.",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "tasc": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "tasc": "tsx src/cli.ts"
+  },
+  "dependencies": {
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.22.4",
+    "typescript": "^5.6.0",
+    "vitest": "^4.1.9"
+  }
+}
