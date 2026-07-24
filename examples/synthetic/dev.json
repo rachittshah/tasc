@@ -1,0 +1,146 @@
+{
+  "version": "tasc-measurements-v1",
+  "dataset": {
+    "id": "fictional-orbit-dev",
+    "version": "1",
+    "source": "SYNTHETIC / DEMO ONLY — fictional measurements",
+    "split": "dev",
+    "synthetic": true
+  },
+  "evaluator": {
+    "id": "fictional-orbit-rubric",
+    "version": "1",
+    "kind": "deterministic",
+    "validated": true
+  },
+  "cases": [
+    {
+      "id": "dev-short-01",
+      "groupId": "dev-fictional-thread-01",
+      "inputTokens": 120,
+      "outputTokens": 60,
+      "repeatedPrefixTokens": 0,
+      "concurrency": 1,
+      "mode": "short-interactive",
+      "critical": false,
+      "trafficWeight": 1,
+      "slices": ["routine"],
+      "observations": [
+        {"profileId": "expert", "replicates": [{"status": "success", "taskScore": 0.96, "confidence": 0.99, "ttftMs": 300, "endToEndLatencyMs": 1700, "outputTokens": 60, "perceivedTokensPerSecond": 45, "totalTokensPerSecond": 60, "costUsd": 0.04, "cacheHit": false}]},
+        {"profileId": "fast", "replicates": [{"status": "success", "taskScore": 0.94, "confidence": 0.96, "ttftMs": 80, "endToEndLatencyMs": 800, "outputTokens": 60, "perceivedTokensPerSecond": 90, "totalTokensPerSecond": 100, "costUsd": 0.008, "cacheHit": false}]}
+      ]
+    },
+    {
+      "id": "dev-short-concurrent-02",
+      "groupId": "dev-fictional-thread-02",
+      "inputTokens": 220,
+      "outputTokens": 80,
+      "repeatedPrefixTokens": 0,
+      "concurrency": 8,
+      "mode": "short-interactive",
+      "critical": false,
+      "trafficWeight": 1,
+      "slices": ["routine", "concurrent"],
+      "observations": [
+        {"profileId": "expert", "replicates": [{"status": "success", "taskScore": 0.96, "confidence": 0.99, "ttftMs": 340, "endToEndLatencyMs": 2300, "outputTokens": 80, "perceivedTokensPerSecond": 42, "totalTokensPerSecond": 90, "costUsd": 0.04, "cacheHit": false}]},
+        {"profileId": "fast", "replicates": [{"status": "success", "taskScore": 0.93, "confidence": 0.91, "ttftMs": 120, "endToEndLatencyMs": 1200, "outputTokens": 80, "perceivedTokensPerSecond": 80, "totalTokensPerSecond": 140, "costUsd": 0.007, "cacheHit": false}]}
+      ]
+    },
+    {
+      "id": "dev-prefix-03",
+      "groupId": "dev-fictional-thread-03",
+      "inputTokens": 3000,
+      "outputTokens": 100,
+      "repeatedPrefixTokens": 2400,
+      "concurrency": 4,
+      "mode": "repeated-prefix",
+      "critical": false,
+      "trafficWeight": 1,
+      "slices": ["routine", "repeated-prefix"],
+      "observations": [
+        {"profileId": "expert", "replicates": [{"status": "success", "taskScore": 0.96, "confidence": 0.99, "ttftMs": 360, "endToEndLatencyMs": 2700, "outputTokens": 100, "perceivedTokensPerSecond": 44, "totalTokensPerSecond": 100, "costUsd": 0.04, "cacheHit": true}]},
+        {"profileId": "fast", "replicates": [{"status": "success", "taskScore": 0.94, "confidence": 0.93, "ttftMs": 100, "endToEndLatencyMs": 1350, "outputTokens": 100, "perceivedTokensPerSecond": 85, "totalTokensPerSecond": 160, "costUsd": 0.006, "cacheHit": true}]}
+      ]
+    },
+    {
+      "id": "dev-low-confidence-04",
+      "groupId": "dev-fictional-thread-04",
+      "inputTokens": 300,
+      "outputTokens": 70,
+      "repeatedPrefixTokens": 0,
+      "concurrency": 1,
+      "mode": "ambiguous-interactive",
+      "critical": false,
+      "trafficWeight": 1,
+      "slices": ["ambiguous"],
+      "observations": [
+        {"profileId": "expert", "replicates": [{"status": "success", "taskScore": 0.97, "confidence": 0.99, "ttftMs": 300, "endToEndLatencyMs": 1900, "outputTokens": 70, "perceivedTokensPerSecond": 45, "totalTokensPerSecond": 60, "costUsd": 0.04, "cacheHit": false}]},
+        {"profileId": "fast", "replicates": [{"status": "success", "taskScore": 0.55, "confidence": 0.65, "ttftMs": 90, "endToEndLatencyMs": 950, "outputTokens": 70, "perceivedTokensPerSecond": 88, "totalTokensPerSecond": 105, "costUsd": 0.007, "cacheHit": false}]}
+      ]
+    },
+    {
+      "id": "dev-long-05",
+      "groupId": "dev-fictional-thread-05",
+      "inputTokens": 12000,
+      "outputTokens": 180,
+      "repeatedPrefixTokens": 500,
+      "concurrency": 2,
+      "mode": "long-context",
+      "critical": false,
+      "trafficWeight": 1,
+      "slices": ["long-context"],
+      "observations": [
+        {"profileId": "expert", "replicates": [{"status": "success", "taskScore": 0.97, "confidence": 0.99, "ttftMs": 700, "endToEndLatencyMs": 6800, "outputTokens": 180, "perceivedTokensPerSecond": 30, "totalTokensPerSecond": 55, "costUsd": 0.04, "cacheHit": false}]},
+        {"profileId": "fast", "replicates": [{"status": "success", "taskScore": 0.75, "confidence": 0.9, "ttftMs": 450, "endToEndLatencyMs": 3800, "outputTokens": 180, "perceivedTokensPerSecond": 55, "totalTokensPerSecond": 80, "costUsd": 0.015, "cacheHit": false}]}
+      ]
+    },
+    {
+      "id": "dev-critical-06",
+      "groupId": "dev-fictional-thread-06",
+      "inputTokens": 500,
+      "outputTokens": 90,
+      "repeatedPrefixTokens": 0,
+      "concurrency": 1,
+      "mode": "critical-review",
+      "critical": true,
+      "trafficWeight": 1,
+      "slices": ["fictional-critical"],
+      "observations": [
+        {"profileId": "expert", "replicates": [{"status": "success", "taskScore": 0.99, "confidence": 0.99, "ttftMs": 320, "endToEndLatencyMs": 2450, "outputTokens": 90, "perceivedTokensPerSecond": 44, "totalTokensPerSecond": 65, "costUsd": 0.04, "cacheHit": false}]},
+        {"profileId": "fast", "replicates": [{"status": "success", "taskScore": 0.4, "confidence": 0.98, "ttftMs": 75, "endToEndLatencyMs": 1150, "outputTokens": 90, "perceivedTokensPerSecond": 92, "totalTokensPerSecond": 110, "costUsd": 0.008, "cacheHit": false}]}
+      ]
+    },
+    {
+      "id": "dev-primary-failure-07",
+      "groupId": "dev-fictional-thread-07",
+      "inputTokens": 400,
+      "outputTokens": 80,
+      "repeatedPrefixTokens": 0,
+      "concurrency": 16,
+      "mode": "failure-recovery",
+      "critical": false,
+      "trafficWeight": 1,
+      "slices": ["routine", "provider-failure"],
+      "observations": [
+        {"profileId": "expert", "replicates": [{"status": "success", "taskScore": 0.96, "confidence": 0.99, "ttftMs": 300, "endToEndLatencyMs": 2250, "outputTokens": 80, "perceivedTokensPerSecond": 43, "totalTokensPerSecond": 85, "costUsd": 0.04, "cacheHit": false}]},
+        {"profileId": "fast", "replicates": [{"status": "failure", "failureCode": "fictional_overload", "elapsedMs": 250, "costUsd": 0.002}]}
+      ]
+    },
+    {
+      "id": "dev-bulk-08",
+      "groupId": "dev-fictional-thread-08",
+      "inputTokens": 800,
+      "outputTokens": 120,
+      "repeatedPrefixTokens": 100,
+      "concurrency": 32,
+      "mode": "batch-throughput",
+      "critical": false,
+      "trafficWeight": 1,
+      "slices": ["routine", "high-concurrency"],
+      "observations": [
+        {"profileId": "expert", "replicates": [{"status": "success", "taskScore": 0.95, "confidence": 0.99, "ttftMs": 500, "endToEndLatencyMs": 3750, "outputTokens": 120, "perceivedTokensPerSecond": 38, "totalTokensPerSecond": 150, "costUsd": 0.04, "cacheHit": false}]},
+        {"profileId": "fast", "replicates": [{"status": "success", "taskScore": 0.92, "confidence": 0.9, "ttftMs": 250, "endToEndLatencyMs": 2550, "outputTokens": 120, "perceivedTokensPerSecond": 55, "totalTokensPerSecond": 250, "costUsd": 0.005, "cacheHit": false}]}
+      ]
+    }
+  ]
+}

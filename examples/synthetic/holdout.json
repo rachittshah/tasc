@@ -1,0 +1,146 @@
+{
+  "version": "tasc-measurements-v1",
+  "dataset": {
+    "id": "fictional-orbit-holdout",
+    "version": "1",
+    "source": "SYNTHETIC / DEMO ONLY — fictional sealed holdout measurements",
+    "split": "holdout",
+    "synthetic": true
+  },
+  "evaluator": {
+    "id": "fictional-orbit-rubric",
+    "version": "1",
+    "kind": "deterministic",
+    "validated": true
+  },
+  "cases": [
+    {
+      "id": "holdout-short-11",
+      "groupId": "holdout-fictional-thread-11",
+      "inputTokens": 150,
+      "outputTokens": 55,
+      "repeatedPrefixTokens": 0,
+      "concurrency": 1,
+      "mode": "short-interactive",
+      "critical": false,
+      "trafficWeight": 1,
+      "slices": ["routine"],
+      "observations": [
+        {"profileId": "expert", "replicates": [{"status": "success", "taskScore": 0.96, "confidence": 0.99, "ttftMs": 310, "endToEndLatencyMs": 1650, "outputTokens": 55, "perceivedTokensPerSecond": 44, "totalTokensPerSecond": 60, "costUsd": 0.04, "cacheHit": false}]},
+        {"profileId": "fast", "replicates": [{"status": "success", "taskScore": 0.94, "confidence": 0.95, "ttftMs": 85, "endToEndLatencyMs": 780, "outputTokens": 55, "perceivedTokensPerSecond": 88, "totalTokensPerSecond": 98, "costUsd": 0.008, "cacheHit": false}]}
+      ]
+    },
+    {
+      "id": "holdout-short-concurrent-12",
+      "groupId": "holdout-fictional-thread-12",
+      "inputTokens": 260,
+      "outputTokens": 75,
+      "repeatedPrefixTokens": 0,
+      "concurrency": 10,
+      "mode": "short-interactive",
+      "critical": false,
+      "trafficWeight": 1,
+      "slices": ["routine", "concurrent"],
+      "observations": [
+        {"profileId": "expert", "replicates": [{"status": "success", "taskScore": 0.96, "confidence": 0.99, "ttftMs": 350, "endToEndLatencyMs": 2250, "outputTokens": 75, "perceivedTokensPerSecond": 41, "totalTokensPerSecond": 92, "costUsd": 0.04, "cacheHit": false}]},
+        {"profileId": "fast", "replicates": [{"status": "success", "taskScore": 0.93, "confidence": 0.92, "ttftMs": 125, "endToEndLatencyMs": 1170, "outputTokens": 75, "perceivedTokensPerSecond": 78, "totalTokensPerSecond": 145, "costUsd": 0.007, "cacheHit": false}]}
+      ]
+    },
+    {
+      "id": "holdout-prefix-13",
+      "groupId": "holdout-fictional-thread-13",
+      "inputTokens": 3500,
+      "outputTokens": 110,
+      "repeatedPrefixTokens": 2800,
+      "concurrency": 6,
+      "mode": "repeated-prefix",
+      "critical": false,
+      "trafficWeight": 1,
+      "slices": ["routine", "repeated-prefix"],
+      "observations": [
+        {"profileId": "expert", "replicates": [{"status": "success", "taskScore": 0.96, "confidence": 0.99, "ttftMs": 370, "endToEndLatencyMs": 3000, "outputTokens": 110, "perceivedTokensPerSecond": 43, "totalTokensPerSecond": 105, "costUsd": 0.04, "cacheHit": true}]},
+        {"profileId": "fast", "replicates": [{"status": "success", "taskScore": 0.94, "confidence": 0.94, "ttftMs": 105, "endToEndLatencyMs": 1520, "outputTokens": 110, "perceivedTokensPerSecond": 83, "totalTokensPerSecond": 165, "costUsd": 0.006, "cacheHit": true}]}
+      ]
+    },
+    {
+      "id": "holdout-low-confidence-14",
+      "groupId": "holdout-fictional-thread-14",
+      "inputTokens": 330,
+      "outputTokens": 65,
+      "repeatedPrefixTokens": 0,
+      "concurrency": 1,
+      "mode": "ambiguous-interactive",
+      "critical": false,
+      "trafficWeight": 1,
+      "slices": ["ambiguous"],
+      "observations": [
+        {"profileId": "expert", "replicates": [{"status": "success", "taskScore": 0.97, "confidence": 0.99, "ttftMs": 305, "endToEndLatencyMs": 1870, "outputTokens": 65, "perceivedTokensPerSecond": 44, "totalTokensPerSecond": 62, "costUsd": 0.04, "cacheHit": false}]},
+        {"profileId": "fast", "replicates": [{"status": "success", "taskScore": 0.57, "confidence": 0.68, "ttftMs": 95, "endToEndLatencyMs": 940, "outputTokens": 65, "perceivedTokensPerSecond": 86, "totalTokensPerSecond": 108, "costUsd": 0.007, "cacheHit": false}]}
+      ]
+    },
+    {
+      "id": "holdout-long-15",
+      "groupId": "holdout-fictional-thread-15",
+      "inputTokens": 14000,
+      "outputTokens": 190,
+      "repeatedPrefixTokens": 700,
+      "concurrency": 3,
+      "mode": "long-context",
+      "critical": false,
+      "trafficWeight": 1,
+      "slices": ["long-context"],
+      "observations": [
+        {"profileId": "expert", "replicates": [{"status": "success", "taskScore": 0.97, "confidence": 0.99, "ttftMs": 710, "endToEndLatencyMs": 7350, "outputTokens": 190, "perceivedTokensPerSecond": 29, "totalTokensPerSecond": 56, "costUsd": 0.04, "cacheHit": false}]},
+        {"profileId": "fast", "replicates": [{"status": "success", "taskScore": 0.76, "confidence": 0.91, "ttftMs": 460, "endToEndLatencyMs": 4100, "outputTokens": 190, "perceivedTokensPerSecond": 54, "totalTokensPerSecond": 82, "costUsd": 0.015, "cacheHit": false}]}
+      ]
+    },
+    {
+      "id": "holdout-critical-16",
+      "groupId": "holdout-fictional-thread-16",
+      "inputTokens": 550,
+      "outputTokens": 95,
+      "repeatedPrefixTokens": 0,
+      "concurrency": 1,
+      "mode": "critical-review",
+      "critical": true,
+      "trafficWeight": 1,
+      "slices": ["fictional-critical"],
+      "observations": [
+        {"profileId": "expert", "replicates": [{"status": "success", "taskScore": 0.99, "confidence": 0.99, "ttftMs": 325, "endToEndLatencyMs": 2620, "outputTokens": 95, "perceivedTokensPerSecond": 43, "totalTokensPerSecond": 66, "costUsd": 0.04, "cacheHit": false}]},
+        {"profileId": "fast", "replicates": [{"status": "success", "taskScore": 0.42, "confidence": 0.97, "ttftMs": 80, "endToEndLatencyMs": 1230, "outputTokens": 95, "perceivedTokensPerSecond": 90, "totalTokensPerSecond": 112, "costUsd": 0.008, "cacheHit": false}]}
+      ]
+    },
+    {
+      "id": "holdout-primary-failure-17",
+      "groupId": "holdout-fictional-thread-17",
+      "inputTokens": 420,
+      "outputTokens": 85,
+      "repeatedPrefixTokens": 0,
+      "concurrency": 18,
+      "mode": "failure-recovery",
+      "critical": false,
+      "trafficWeight": 1,
+      "slices": ["routine", "provider-failure"],
+      "observations": [
+        {"profileId": "expert", "replicates": [{"status": "success", "taskScore": 0.96, "confidence": 0.99, "ttftMs": 310, "endToEndLatencyMs": 2420, "outputTokens": 85, "perceivedTokensPerSecond": 42, "totalTokensPerSecond": 88, "costUsd": 0.04, "cacheHit": false}]},
+        {"profileId": "fast", "replicates": [{"status": "failure", "failureCode": "fictional_overload", "elapsedMs": 260, "costUsd": 0.002}]}
+      ]
+    },
+    {
+      "id": "holdout-bulk-18",
+      "groupId": "holdout-fictional-thread-18",
+      "inputTokens": 900,
+      "outputTokens": 130,
+      "repeatedPrefixTokens": 120,
+      "concurrency": 36,
+      "mode": "batch-throughput",
+      "critical": false,
+      "trafficWeight": 1,
+      "slices": ["routine", "high-concurrency"],
+      "observations": [
+        {"profileId": "expert", "replicates": [{"status": "success", "taskScore": 0.95, "confidence": 0.99, "ttftMs": 510, "endToEndLatencyMs": 4100, "outputTokens": 130, "perceivedTokensPerSecond": 37, "totalTokensPerSecond": 155, "costUsd": 0.04, "cacheHit": false}]},
+        {"profileId": "fast", "replicates": [{"status": "success", "taskScore": 0.92, "confidence": 0.91, "ttftMs": 260, "endToEndLatencyMs": 2760, "outputTokens": 130, "perceivedTokensPerSecond": 54, "totalTokensPerSecond": 255, "costUsd": 0.005, "cacheHit": false}]}
+      ]
+    }
+  ]
+}

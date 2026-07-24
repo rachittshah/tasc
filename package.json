@@ -19,14 +19,27 @@
     "LICENSE"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "demo": "tsx scripts/demo.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
     "tasc": "tsx src/cli.ts"
+  },
+  "author": {
+    "name": "Rachitt Shah",
+    "url": "https://github.com/rachittshah"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rachittshah/tasc.git"
+  },
+  "homepage": "https://github.com/rachittshah/tasc#readme",
+  "bugs": {
+    "url": "https://github.com/rachittshah/tasc/issues"
   },
   "dependencies": {
     "zod": "^3.25.0"

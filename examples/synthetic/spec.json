@@ -1,0 +1,42 @@
+{
+  "version": "tasc-inference-spec-v1",
+  "id": "fictional-orbit-support-cascade-v1",
+  "profiles": [
+    {
+      "id": "expert",
+      "model": "fictional-orbit-expert",
+      "runtime": "synthetic-replay",
+      "hardware": "fictional-gpu-x"
+    },
+    {
+      "id": "fast",
+      "model": "fictional-orbit-fast",
+      "runtime": "synthetic-replay",
+      "hardware": "fictional-gpu-y"
+    }
+  ],
+  "championProfileId": "expert",
+  "primaryProfileId": "fast",
+  "candidateSpace": {
+    "confidenceThresholds": [0.6, 0.8],
+    "inputTokenThresholds": [2000, 8000],
+    "includeFastOnly": true
+  },
+  "criticalSlices": ["fictional-critical"],
+  "constraints": {
+    "taskScoreFloor": 0.86,
+    "criticalSliceScoreFloor": 0.9,
+    "maxP95TtftMs": 5000,
+    "maxP95EndToEndLatencyMs": 12000,
+    "minP10PerceivedTokensPerSecond": 20,
+    "minP50TotalTokensPerSecond": 50,
+    "maxErrorRate": 0,
+    "maxCostPerThousandRequests": 35,
+    "nonInferiorityMargin": -0.08,
+    "minimumCostImprovement": 0.15
+  },
+  "bootstrap": {
+    "seed": 20260724,
+    "iterations": 1000
+  }
+}
