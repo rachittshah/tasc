@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "Eval-gated inference policy optimization with deterministic replay and holdout confirmation.",
   "private": true,
+  "packageManager": "npm@11.6.1",
   "license": "MIT",
   "keywords": [
     "inference",
