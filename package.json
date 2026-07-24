@@ -3,6 +3,14 @@
   "version": "0.1.0",
   "description": "Eval-gated inference policy optimization with deterministic replay and holdout confirmation.",
   "private": true,
+  "license": "MIT",
+  "keywords": [
+    "inference",
+    "evaluation",
+    "serving",
+    "llm",
+    "optimization"
+  ],
   "type": "module",
   "bin": {
     "tasc": "./dist/cli.js"
@@ -23,6 +31,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "check": "npm run typecheck && npm test && npm run build && npm pack --dry-run",
     "demo": "tsx scripts/demo.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
