@@ -1,3 +1,4 @@
+export * from "./evaluate.js";
 export * from "./integrity.js";
 export * from "./policy.js";
 export * from "./schema.js";
