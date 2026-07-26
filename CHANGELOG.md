@@ -4,6 +4,21 @@ All notable changes to TASC are documented here.
 
 The project follows semantic versioning once a stable public API is declared.
 
+## Unreleased
+
+### Added
+
+- A reproducible Apple Silicon MLX benchmark runner with immutable model
+  revisions, isolated processes, raw logs, sanitized environment provenance,
+  and tested P10/median/P95 parsing.
+- A real 2026-07-26 M4 Pro snapshot for two official 2026 sub-7B LiquidAI
+  models, covering three throughput workloads and the full ARC-Challenge test
+  task.
+- Explicit documentation of TASC's value proposition, adoption workflow,
+  advantages over ad-hoc benchmark tables, and inference R&D loop.
+- Guidance for turning an aggregate MLX snapshot into complete paired,
+  per-request TASC evidence without inventing confidence, latency, or cost.
+
 ## 0.1.0 — 2026-07-24
 
 Initial standalone proof of concept.

@@ -9,4 +9,8 @@ runs/
 .tasc/
 measurements/private/
 *.log
+!benchmarks/results/**/raw/*.log
+__pycache__/
+*.py[cod]
+.venv-mlx/
 .DS_Store

@@ -1,0 +1,8 @@
+# MLX and the evaluation stack used for the 2026-07-26 M4 Pro snapshot.
+# Use Python 3.12 on Apple Silicon; MLX does not support non-Apple platforms.
+mlx==0.31.1
+mlx-metal==0.31.1
+mlx-lm[evaluate]==0.31.1
+lm-eval==0.4.12
+transformers==5.14.1
+datasets==5.0.0

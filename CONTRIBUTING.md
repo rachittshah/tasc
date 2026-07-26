@@ -50,13 +50,26 @@ npm pack --dry-run
 
 ## Fixtures and sensitive data
 
-Only explicitly fictional fixtures belong in Git. Never commit real prompts,
-outputs, customer traces, credentials, provider tokens, or attestation keys.
-Use `examples/synthetic/` as the pattern for reviewable test data.
+Only explicitly fictional **TASC input fixtures** belong in Git. Never commit
+real customer prompts, model outputs, private traces, credentials, provider
+tokens, attestation keys, device identifiers, or proprietary benchmark data.
+Use `examples/synthetic/` as the pattern for reviewable decision-engine tests.
 
 If a change needs realistic private measurements, reproduce the behavior with a
 minimal synthetic fixture and keep the source evidence in approved
 access-controlled storage.
+
+Sanitized measurements of public models on public benchmark tasks may be
+committed under `benchmarks/results/` when they include:
+
+- immutable model revisions and public task/evaluator versions;
+- exact runtime, quantization, hardware-class, and workload metadata;
+- raw numeric logs and reproducible summary derivation;
+- no prompts, generated text, usernames, serial numbers, UUIDs, cache paths,
+  tokens, or other host/customer identifiers; and
+- a clear boundary between a benchmark snapshot and TASC-ready paired evidence.
+
+Review the model, dataset, and evaluator licenses before publishing results.
 
 ## Versioned contracts
 

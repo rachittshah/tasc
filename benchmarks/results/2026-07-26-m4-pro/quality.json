@@ -1,0 +1,80 @@
+{
+  "schemaVersion": "tasc-mlx-quality-results-v1",
+  "suiteStartedAtUtc": "2026-07-26T13:45:11.500158+00:00",
+  "runner": "benchmarks/mlx/run_benchmarks.py",
+  "environment": {
+    "python": "3.12.12",
+    "packages": {
+      "mlx": "0.31.1",
+      "mlx-lm": "0.31.1",
+      "lm-eval": "0.4.12",
+      "transformers": "5.14.1",
+      "datasets": "5.0.0"
+    },
+    "hardware": {
+      "machine": "MacBook Pro",
+      "modelIdentifier": "Mac16,7",
+      "chip": "Apple M4 Pro",
+      "cpuTopology": "proc 14:10:4:0",
+      "gpuCores": 20,
+      "unifiedMemory": "48 GB",
+      "macos": "26.5.2",
+      "macosBuild": "25F84",
+      "mlxDefaultDevice": "Device(gpu, 0)",
+      "mlxDevice": {
+        "name": "Apple M4 Pro",
+        "architecture": "applegpu_g16s",
+        "memoryBytes": 51539607552,
+        "recommendedWorkingSetBytes": 40200896512
+      },
+      "powerSource": "Now drawing from 'AC Power'",
+      "thermalStatus": [
+        "Note: No thermal warning level has been recorded",
+        "Note: No performance warning level has been recorded",
+        "Note: No CPU power status has been recorded"
+      ]
+    }
+  },
+  "evaluation": {
+    "task": "arc_challenge",
+    "split": "test",
+    "numShots": 0,
+    "batchSize": 8,
+    "seed": 20260726,
+    "applyChatTemplate": true,
+    "limit": null
+  },
+  "method": "Multiple-choice continuation log-likelihood through mlx_lm.evaluate; acc_norm is length-normalized accuracy.",
+  "results": [
+    {
+      "modelKey": "lfm2.5-350m",
+      "repoId": "LiquidAI/LFM2.5-350M-MLX-4bit",
+      "modelRevision": "8188cd2d54e7a49544853ec017ae21c17f752fc5",
+      "name": "arc_challenge",
+      "alias": "arc_challenge",
+      "samples": 1172,
+      "metrics": {
+        "accuracy": 0.29180887372013653,
+        "accuracyStandardError": 0.013284525292403586,
+        "lengthNormalizedAccuracy": 0.3148464163822526,
+        "lengthNormalizedAccuracyStandardError": 0.013572657703084967
+      },
+      "rawResult": "raw/lfm2.5-350m--arc_challenge.json"
+    },
+    {
+      "modelKey": "lfm2.5-1.2b-instruct",
+      "repoId": "LiquidAI/LFM2.5-1.2B-Instruct-MLX-4bit",
+      "modelRevision": "c30e30c5efac705771e1f37df38a32115718dd5d",
+      "name": "arc_challenge",
+      "alias": "arc_challenge",
+      "samples": 1172,
+      "metrics": {
+        "accuracy": 0.34897610921501704,
+        "accuracyStandardError": 0.01392893346138242,
+        "lengthNormalizedAccuracy": 0.39419795221843,
+        "lengthNormalizedAccuracyStandardError": 0.014280522667467148
+      },
+      "rawResult": "raw/lfm2.5-1.2b-instruct--arc_challenge.json"
+    }
+  ]
+}
