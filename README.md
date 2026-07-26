@@ -9,10 +9,13 @@ model setup while difficult requests go to a stronger one. It compares both
 setups on the same measured requests, selects a routing rule on development
 data, and verifies that unchanged rule on a separate test set.
 
-TASC produces a reviewable decision report. It does not call models, estimate
-unmeasured performance, change serving configuration, or deploy anything.
+The TASC decision engine produces a reviewable report. It does not call models,
+estimate unmeasured performance, change serving configuration, or deploy
+anything. The separate [`benchmarks/mlx/`](benchmarks/mlx/) workflow can collect
+local Apple Silicon measurements; it does not turn an aggregate benchmark into
+a serving recommendation.
 
-## The idea
+## Value proposition
 
 Always using the strongest setup can be unnecessarily expensive. Always using
 the fastest setup can hurt quality or reliability. A **cascade** tries the fast
@@ -30,6 +33,47 @@ quality regression, failed request, or slow tail. TASC is that evidence layer:
 measure both setups → choose on development data → freeze the rule
 → verify on untouched test data → write a decision report
 ```
+
+TASC is the bridge between a benchmark table and a serving change. It answers
+the harder question: **given paired request-level evidence, which exact routing
+rule reduces cost while every quality, slice, latency, throughput, and
+reliability requirement still passes?**
+
+It is useful to inference engineers, applied-ML teams, and reviewers who already
+have traces from two model/runtime/hardware profiles and need a reproducible
+go/no-go packet. It is intentionally not a learned router, load generator, or
+deployment controller.
+
+## Real MLX numbers: M4 Pro, July 2026
+
+The repository now includes a reproducible local snapshot from a 20-GPU-core
+Apple M4 Pro with 48 GB unified memory. Both models are official, same-family
+4-bit MLX conversions released in calendar 2026 and are well below seven
+billion parameters:
+
+| Measured model | 2026 release | Parameters | ARC-Challenge `acc_norm` | Short decode | Batch-8 decode |
+| --- | --- | ---: | ---: | ---: | ---: |
+| [LFM2.5-350M MLX 4-bit](https://huggingface.co/LiquidAI/LFM2.5-350M-MLX-4bit) | Mar 31 | 350M | 31.48% | 650.0 tok/s | 1,447.6 tok/s |
+| [LFM2.5-1.2B-Instruct MLX 4-bit](https://huggingface.co/LiquidAI/LFM2.5-1.2B-Instruct-MLX-4bit) | Jan 5 | 1.2B | 39.42% | 303.4 tok/s | 678.3 tok/s |
+
+Quality is the full 1,172-example ARC-Challenge test set, zero-shot, with
+length-normalized multiple-choice scoring. Throughput is the median of ten
+timed `mlx_lm.benchmark` trials after warmup. “Short” is 128 prompt tokens and
+256 generated tokens at batch 1; batch 8 is aggregate throughput for 512 prompt
+and 128 generated tokens per sequence.
+
+On this machine the 350M profile decoded **2.14× faster**, while the 1.2B
+profile gained **7.94 percentage points** of normalized ARC accuracy. That is a
+real speed/quality frontier, not yet proof that a cascade is safe. A TASC
+decision additionally needs paired per-request task scores, TTFT, route-time
+confidence, failures, cost, and group-disjoint development/holdout evidence.
+
+See the [full result, caveats, and raw evidence](benchmarks/results/2026-07-26-m4-pro/)
+and the [rerun instructions](benchmarks/mlx/README.md). Exact model revisions,
+MLX versions, every trial, P10/P95 ranges, and peak memory are committed. The
+models use the
+[LFM Open License 1.0](https://docs.liquid.ai/lfm/help/model-license), so review
+its commercial terms separately from TASC's MIT license.
 
 ## Example: lower cost with an explicit latency trade-off
 
@@ -65,9 +109,9 @@ cases, not an SLA claim or a production recommendation. TASC consumes the
 routing confidence recorded in the measurements; it does not calculate or
 calibrate that confidence.
 
-## Try it
+## Try it in five minutes
 
-Requirements: Node.js 22 or newer and access to this private repository.
+Requirement: Node.js 22 or newer.
 
 ```bash
 git clone https://github.com/rachittshah/tasc.git
@@ -86,8 +130,8 @@ Synthetic artifacts: ...
 
 `NOMINATED` means one rule passed the development checks. `DEMO_ONLY` means the
 same rule passed holdout, but the evidence was synthetic. The generated
-`report.md` files show the winning rule, every measured trade-off, and every
-failed alternative.
+`report.md` files show the winning rule, key measured trade-offs, and failed
+alternatives; the JSON artifacts retain the complete metrics and gates.
 
 <details>
 <summary>Run the two CLI steps directly</summary>
@@ -140,12 +184,32 @@ invents a direct-to-expert outcome that was not measured.
 | Fingerprint artifacts for reproducibility | Prove that the source measurements are truthful |
 | Produce evidence for human review | Change or deploy a production endpoint |
 
+The optional MLX runner measures local models, but it stays outside this
+decision contract. TASC will not silently combine aggregate throughput and
+aggregate accuracy into fictional per-request evidence.
+
 For real evidence, TASC can add a secret-key signature to detect nomination
 tampering between development and holdout. That signature protects continuity;
 it does not replace dataset custody, evaluator validation, or operational
 review.
 
-## Use your own measurements
+## Advantages over an ad-hoc benchmark
+
+- **Paired counterfactuals.** Both profiles are measured on the same requests,
+  so the decision is not built from unrelated averages.
+- **Cascade accounting.** When a request escalates, both attempts' latency and
+  cost remain visible instead of charging only the successful expert call.
+- **Hard guardrails.** Savings cannot compensate for a failed quality, critical
+  slice, tail-latency, throughput, reliability, or cost requirement.
+- **Selection discipline.** Development data chooses one rule; group-disjoint
+  holdout data can only verify that frozen rule.
+- **Reviewable failure.** Rejected policies, failed gates, uncertainty,
+  fingerprints, and provenance survive in machine- and human-readable
+  artifacts.
+- **Deployment separation.** A passing result remains a manual engineering
+  decision, which keeps evidence generation separate from production mutation.
+
+## Use TASC on your own measurements
 
 1. Copy the [example spec](examples/synthetic/spec.json) and define the two
    profiles, allowed routing thresholds, and non-negotiable requirements.
@@ -166,6 +230,25 @@ export TASC_ATTESTATION_KEY="<at least 32 UTF-8 bytes from your secret manager>"
 See the [operating guide](docs/operating-guide.md) for the measurement contract
 and the [design document](docs/design.md) for replay, statistics, selection, and
 attestation details.
+
+## How TASC helps R&D
+
+TASC turns inference optimization into a falsifiable loop:
+
+1. Benchmark a fast and an expert profile on the same workload.
+2. Preregister the routing policies and constraints worth testing.
+3. Nominate only policies that pass every development gate.
+4. Inspect the Pareto frontier and the exact bottleneck for rejected policies.
+5. Run the suggested next experiment—such as quantization, prefix caching,
+   chunked prefill, speculative decoding, batching, or reliability
+   instrumentation—while keeping the evaluator and gates fixed.
+6. Replicate the frozen winner on group-disjoint holdout traces.
+
+This helps teams learn *why* an optimization is or is not deployable. A smaller
+model may win decode throughput but lose a critical slice; batching may raise
+total TPS while hurting per-user streaming; escalation may recover quality but
+break P95 latency. TASC preserves those trade-offs instead of collapsing them
+into one leaderboard score.
 
 ## Result statuses
 
@@ -201,6 +284,7 @@ npm test
 npm run build
 npm run demo
 npm pack --dry-run
+python3 -m unittest benchmarks/mlx/test_run_benchmarks.py
 ```
 
 The public library surface is exported from `src/index.ts`; the CLI adapter is

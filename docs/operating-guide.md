@@ -185,6 +185,49 @@ Statuses mean:
 
 No status causes a serving change.
 
+## Collecting local MLX measurements
+
+The optional [`benchmarks/mlx/`](../benchmarks/mlx/) workflow is a reference
+collector for Apple Silicon. It pins current-year sub-7B model revisions and
+records:
+
+- random-token prefill and decode throughput from `mlx_lm.benchmark`;
+- peak MLX allocator memory for each workload;
+- a full standardized quality task through `mlx_lm.evaluate`; and
+- sanitized hardware, OS, runtime, power-source, and thermal-warning metadata.
+
+The committed [2026-07-26 M4 Pro snapshot](../benchmarks/results/2026-07-26-m4-pro/)
+is deliberately not shaped like `tasc-measurements-v1`. Runtime throughput and
+aggregate ARC-Challenge accuracy were measured in separate programs. Joining
+them would create per-request relationships, latency, confidence, and cost that
+were never observed.
+
+Use the snapshot to screen model/runtime candidates and design the paired
+experiment. To collect TASC-ready MLX evidence:
+
+1. Freeze public task cases, evaluator code, model commits, quantization,
+   generation settings, MLX versions, and group-disjoint split assignments.
+2. Run both profiles on every same case and replicate. Randomize execution order
+   so drift and thermal state are not confounded with one profile.
+3. Synchronize pending Metal work before stopping each clock. Measure request
+   start, first streamed output token, and final output token directly; do not
+   derive TTFT from aggregate prefill TPS.
+4. Retain failures and their elapsed time. Keep batch aggregate throughput
+   separate from single-request perceived TPS.
+5. Score each case with a frozen deterministic or validated evaluator.
+6. Supply a genuine route-time confidence. For multiple choice this can be a
+   calibrated normalized option likelihood, fitted on development data and then
+   frozen. It cannot be copied from the final task score.
+7. Measure energy and define reviewable hardware-amortization assumptions if
+   local request cost is a selection objective. Zero expert cost makes relative
+   cost improvement undefined by design.
+8. Preserve raw records and the sanitized environment beside the exported
+   TASC inputs.
+
+MLX uses the Metal GPU for model kernels, but tokenization and host orchestration
+still use the CPU and unified memory. Describe results as “MLX/Metal on Apple
+Silicon,” not as a GPU-only end-to-end measurement.
+
 ## Replacing the fixtures with real measurements
 
 1. Define the task and latency/cost budget before benchmarking.

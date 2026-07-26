@@ -1,0 +1,57 @@
+{
+  "schemaVersion": "tasc-mlx-benchmark-config-v1",
+  "models": [
+    {
+      "key": "lfm2.5-350m",
+      "repoId": "LiquidAI/LFM2.5-350M-MLX-4bit",
+      "revision": "8188cd2d54e7a49544853ec017ae21c17f752fc5",
+      "parameters": 350000000,
+      "released": "2026-03-31",
+      "precision": "4-bit affine, group size 64",
+      "license": "LFM Open License 1.0",
+      "releaseUrl": "https://www.liquid.ai/blog/lfm2-5-350m-no-size-left-behind",
+      "modelUrl": "https://huggingface.co/LiquidAI/LFM2.5-350M-MLX-4bit"
+    },
+    {
+      "key": "lfm2.5-1.2b-instruct",
+      "repoId": "LiquidAI/LFM2.5-1.2B-Instruct-MLX-4bit",
+      "revision": "c30e30c5efac705771e1f37df38a32115718dd5d",
+      "parameters": 1200000000,
+      "released": "2026-01-05",
+      "precision": "4-bit affine, group size 64",
+      "license": "LFM Open License 1.0",
+      "releaseUrl": "https://www.liquid.ai/blog/introducing-lfm2-5-the-next-generation-of-on-device-ai",
+      "modelUrl": "https://huggingface.co/LiquidAI/LFM2.5-1.2B-Instruct-MLX-4bit"
+    }
+  ],
+  "scenarios": [
+    {
+      "key": "short-interactive",
+      "promptTokens": 128,
+      "generationTokens": 256,
+      "batchSize": 1
+    },
+    {
+      "key": "long-prefill",
+      "promptTokens": 4096,
+      "generationTokens": 128,
+      "batchSize": 1
+    },
+    {
+      "key": "static-batch-8",
+      "promptTokens": 512,
+      "generationTokens": 128,
+      "batchSize": 8
+    }
+  ],
+  "qualityEvaluation": {
+    "task": "arc_challenge",
+    "split": "test",
+    "numShots": 0,
+    "batchSize": 8,
+    "seed": 20260726,
+    "applyChatTemplate": true,
+    "limit": null
+  },
+  "numTrials": 10
+}
