@@ -13,6 +13,13 @@ describe("standalone public API", () => {
       buildDevelopmentReport: expect.any(Function),
       buildConfirmationReport: expect.any(Function),
       proposeNextExperiment: expect.any(Function),
+      parseExperimentProtocol: expect.any(Function),
+      parseTraceEnvelope: expect.any(Function),
+      parseEvaluatorEvidence: expect.any(Function),
+      verifyEvaluatorEvidence: expect.any(Function),
+      parseAssessmentContext: expect.any(Function),
+      fingerprintExecutionProfile: expect.any(Function),
+      fingerprintProtocol: expect.any(Function),
     });
   });
 
@@ -20,5 +27,12 @@ describe("standalone public API", () => {
     expect(tasc.stableJson({ beta: 2, alpha: { delta: 4, gamma: 3 } }))
       .toBe(tasc.stableJson({ alpha: { gamma: 3, delta: 4 }, beta: 2 }));
     expect(tasc.sha256("tasc")).toHaveLength(64);
+  });
+
+  it("does not expose contract implementation helpers from the package entry point", () => {
+    expect(tasc).not.toHaveProperty("deepFreezeContract");
+    expect(tasc).not.toHaveProperty("domainSeparatedDigest");
+    expect(tasc).not.toHaveProperty("contractSlugSchema");
+    expect(tasc).not.toHaveProperty("contractTimestampSchema");
   });
 });
