@@ -1,23 +1,14 @@
 import { createHash } from "node:crypto";
+import { canonicalJson } from "./determinism.js";
 
 /**
- * Serialize JSON-compatible data with object keys in lexical order.
- * Array order remains meaningful.
+ * Compatibility alias for the versioned RFC 8785 JCS identity format.
+ *
+ * `stableJson` retains its legacy name for callers, but its v1 semantics are exactly
+ * `canonicalJson` with `CANONICAL_JSON_VERSION === "rfc8785-jcs-v1"`.
  */
 export function stableJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
-  if (value && typeof value === "object") {
-    const object = value as Record<string, unknown>;
-    const fields = Object.keys(object)
-      .sort()
-      .map((key) => `${JSON.stringify(key)}:${stableJson(object[key])}`);
-    return `{${fields.join(",")}}`;
-  }
-  const serialized = JSON.stringify(value);
-  if (serialized === undefined) {
-    throw new Error("stableJson only accepts JSON-compatible values");
-  }
-  return serialized;
+  return canonicalJson(value);
 }
 
 export function sha256(value: string): string {

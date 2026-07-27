@@ -1,6 +1,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { bootstrapMeanCI, median, type BootstrapCI } from "./statistics.js";
-import { sha256, stableJson } from "./integrity.js";
+import { canonicalJson, compareCodeUnits } from "./determinism.js";
+import { sha256 } from "./integrity.js";
 import { assertMeasurementMatrix, type InferenceSpec, type MeasurementSet } from "./schema.js";
 import {
   championPolicy,
@@ -220,7 +221,7 @@ function evaluatePolicyInternal(
   const championByCase = caseScores(championRows);
   const pairedCaseIds = [...candidateByCase.keys()]
     .filter((caseId) => championByCase.has(caseId))
-    .sort((left, right) => left.localeCompare(right));
+    .sort(compareCodeUnits);
   if (pairedCaseIds.length < 3) {
     throw new Error(`at least 3 unique paired cases are required; received ${pairedCaseIds.length}`);
   }
@@ -314,7 +315,7 @@ export function evaluatePolicy(
 }
 
 function digest(value: unknown): string {
-  return sha256(stableJson(value));
+  return sha256(canonicalJson(value));
 }
 
 function dominates(left: PolicyMetrics, right: PolicyMetrics): boolean {
@@ -355,7 +356,7 @@ function validatedAttestationKey(key: string): Buffer {
 }
 
 function attestationDigest(artifact: Omit<NominationArtifact, "attestation">, key: Buffer): string {
-  return createHmac("sha256", key).update(stableJson(artifact)).digest("hex");
+  return createHmac("sha256", key).update(canonicalJson(artifact)).digest("hex");
 }
 
 export function nominatePolicy(
@@ -389,9 +390,9 @@ export function nominatePolicy(
       - right.evaluation.candidateMetrics.costPerRequestUsd
     || left.evaluation.candidateMetrics.p95EndToEndLatencyMs
       - right.evaluation.candidateMetrics.p95EndToEndLatencyMs
-    || left.policy.id.localeCompare(right.policy.id)
+    || compareCodeUnits(left.policy.id, right.policy.id)
   ));
-  const frontier = frontierEntries.map(({ policy }) => policy.id).sort((left, right) => left.localeCompare(right));
+  const frontier = frontierEntries.map(({ policy }) => policy.id).sort(compareCodeUnits);
 
   if (orderedFrontier.length === 0) {
     return { status: "NO_CANDIDATE", evaluations, frontier, nomination: undefined };
@@ -411,7 +412,7 @@ export function nominatePolicy(
     developmentDatasetDigest: digest(dev),
     evaluator: structuredClone(dev.evaluator),
     developmentGroupIds: [...new Set(dev.cases.map((measurementCase) => measurementCase.groupId))]
-      .sort((left, right) => left.localeCompare(right)),
+      .sort(compareCodeUnits),
     developmentSynthetic: dev.dataset.synthetic,
     policy: structuredClone(selected.policy),
     policyDigest,
@@ -507,7 +508,7 @@ export function confirmNomination(
   const regenerated = generateCandidatePolicies(spec).find((candidate) => (
     candidate.id === nomination.policy.id
     && fingerprintPolicy(candidate) === nomination.policyDigest
-    && stableJson(candidate) === stableJson(nomination.policy)
+    && canonicalJson(candidate) === canonicalJson(nomination.policy)
   ));
   if (!regenerated) {
     throw new Error("policy drift: nomination does not exactly match a regenerated candidate");
@@ -521,7 +522,7 @@ export function confirmNomination(
     holdout.cases
       .map((measurementCase) => measurementCase.groupId)
       .filter((groupId) => developmentGroups.has(groupId)),
-  )].sort((left, right) => left.localeCompare(right));
+  )].sort(compareCodeUnits);
   if (leakedGroups.length > 0) {
     throw new Error(`development/holdout group leakage: ${leakedGroups.join(", ")}`);
   }
@@ -554,7 +555,7 @@ export function confirmNomination(
     nominationDigest: nomination.selfDigest,
     evaluator: structuredClone(holdout.evaluator),
     holdoutGroupIds: [...new Set(holdout.cases.map((measurementCase) => measurementCase.groupId))]
-      .sort((left, right) => left.localeCompare(right)),
+      .sort(compareCodeUnits),
     policy: structuredClone(regenerated),
     policyDigest: nomination.policyDigest,
     evaluation,

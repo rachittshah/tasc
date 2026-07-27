@@ -7,6 +7,7 @@ import {
   type NominationResult,
   type PolicyMetrics,
 } from "./evaluate.js";
+import { compareCodeUnits } from "./determinism.js";
 import { fingerprintPolicy } from "./policy.js";
 import type { InferenceSpec, MeasurementSet } from "./schema.js";
 
@@ -128,14 +129,14 @@ function mostPromisingRejectedCandidate(result: NominationResult): CandidateEval
     if (countDifference !== 0) return countDifference;
     const leftBreach = leftFailures.reduce((sum, gate) => sum + normalizedBreach(gate), 0);
     const rightBreach = rightFailures.reduce((sum, gate) => sum + normalizedBreach(gate), 0);
-    return leftBreach - rightBreach || left.policy.id.localeCompare(right.policy.id);
+    return leftBreach - rightBreach || compareCodeUnits(left.policy.id, right.policy.id);
   })[0];
 }
 
 function dominantFailedGate(candidate: CandidateEvaluation): GateResult | undefined {
   return [...failedGates(candidate)].sort((left, right) => (
     normalizedBreach(right) - normalizedBreach(left)
-    || left.id.localeCompare(right.id)
+    || compareCodeUnits(left.id, right.id)
   ))[0];
 }
 

@@ -1,4 +1,5 @@
-import { sha256, stableJson } from "./integrity.js";
+import { compareCodeUnits, canonicalJson } from "./determinism.js";
+import { sha256 } from "./integrity.js";
 import { assertMeasurementMatrix } from "./schema.js";
 import type {
   FailedObservation,
@@ -47,13 +48,13 @@ export interface ReplayedRow {
 type PolicyBody = Omit<InferencePolicy, "id">;
 
 function withStableId(body: PolicyBody): InferencePolicy {
-  const id = `${body.kind}-${sha256(stableJson(body)).slice(0, 16)}`;
+  const id = `${body.kind}-${sha256(canonicalJson(body)).slice(0, 16)}`;
   return { ...body, id };
 }
 
 /** A policy digest is order-insensitive for object keys and stable across processes. */
 export function fingerprintPolicy(policy: InferencePolicy): string {
-  return sha256(stableJson(policy));
+  return sha256(canonicalJson(policy));
 }
 
 /** The expert-only control policy is deliberately kept outside the candidate space. */
@@ -100,7 +101,7 @@ export function generateCandidatePolicies(spec: InferenceSpec): InferencePolicy[
     }));
   }
 
-  return candidates.sort((left, right) => left.id.localeCompare(right.id));
+  return candidates.sort((left, right) => compareCodeUnits(left.id, right.id));
 }
 
 function elapsedMs(observation: Observation): number {
