@@ -116,6 +116,11 @@ export interface MeasurementSet {
   cases: MeasurementCase[];
 }
 
+type SuccessfulTimingObservation = Pick<
+  SuccessfulObservation,
+  "ttftMs" | "endToEndLatencyMs" | "outputTokens" | "perceivedTokensPerSecond"
+>;
+
 const nonEmptyString = z.string().trim().min(1);
 const finiteNonNegative = z.number().finite().nonnegative();
 const score = z.number().finite().min(0).max(1);
@@ -271,26 +276,34 @@ export function assertMeasurementSetSemantics(measurements: MeasurementSet): voi
       observationSet.replicates.forEach((observation, replicateIndex) => {
         if (observation.status !== "success") return;
         const rowLabel = `case "${measurementCase.id}" profile "${observationSet.profileId}" replicate ${replicateIndex}`;
-        if (observation.endToEndLatencyMs < observation.ttftMs) {
-          throw new Error(`${rowLabel} end-to-end latency is below TTFT`);
-        }
-        if (observation.outputTokens <= 1) return;
-        if (observation.perceivedTokensPerSecond <= 0) {
-          throw new Error(`${rowLabel} requires positive perceived tokens per second for a multi-token success`);
-        }
-
-        // Provider counters are often rounded or sampled over slightly different boundaries.
-        // Allow 20% of decode time (at least 100 ms), while rejecting physically impossible rows.
-        const decodeMs = ((observation.outputTokens - 1) / observation.perceivedTokensPerSecond) * 1_000;
-        const toleranceMs = Math.max(100, decodeMs * 0.2);
-        if (observation.endToEndLatencyMs + toleranceMs < observation.ttftMs + decodeMs) {
-          throw new Error(
-            `${rowLabel} end-to-end latency cannot contain ${observation.outputTokens} output tokens at `
-            + `${observation.perceivedTokensPerSecond} perceived tokens per second`,
-          );
-        }
+        assertSuccessfulTimingSemantics(observation, rowLabel);
       });
     }
+  }
+}
+
+/** @internal Shared physical consistency checks for owned successful observations. */
+export function assertSuccessfulTimingSemantics(
+  observation: SuccessfulTimingObservation,
+  rowLabel: string,
+): void {
+  if (observation.endToEndLatencyMs < observation.ttftMs) {
+    throw new Error(`${rowLabel} end-to-end latency is below TTFT`);
+  }
+  if (observation.outputTokens <= 1) return;
+  if (observation.perceivedTokensPerSecond <= 0) {
+    throw new Error(`${rowLabel} requires positive perceived tokens per second for a multi-token success`);
+  }
+
+  // Provider counters are often rounded or sampled over slightly different boundaries.
+  // Allow 20% of decode time (at least 100 ms), while rejecting physically impossible rows.
+  const decodeMs = ((observation.outputTokens - 1) / observation.perceivedTokensPerSecond) * 1_000;
+  const toleranceMs = Math.max(100, decodeMs * 0.2);
+  if (observation.endToEndLatencyMs + toleranceMs < observation.ttftMs + decodeMs) {
+    throw new Error(
+      `${rowLabel} end-to-end latency cannot contain ${observation.outputTokens} output tokens at `
+      + `${observation.perceivedTokensPerSecond} perceived tokens per second`,
+    );
   }
 }
 

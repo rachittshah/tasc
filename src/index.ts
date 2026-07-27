@@ -46,7 +46,26 @@ export type {
   AssessmentPair,
   ResolvedGroupSplit,
 } from "./evidence-join.js";
-export * from "./evaluate.js";
+export {
+  confirmNomination,
+  DEFAULT_ASSESSMENT_WORK_BUDGET,
+  evaluatePolicy,
+  nominatePolicy,
+} from "./evaluate.js";
+export type {
+  AttestationOptions,
+  CandidateEvaluation,
+  ConfirmationResult,
+  ConfirmationStatus,
+  EvaluationOptions,
+  GateResult,
+  NominationArtifact,
+  NominationAttestation,
+  NominationResult,
+  PairedQualityResult,
+  PolicyEvaluation,
+  PolicyMetrics,
+} from "./evaluate.js";
 export * from "./integrity.js";
 export {
   championPolicy,

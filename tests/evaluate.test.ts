@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { bootstrapMeanCI, median } from "../src/statistics.js";
 import { compareCodeUnits } from "../src/determinism.js";
 import { sha256, stableJson } from "../src/integrity.js";
+import { estimateLegacyAssessmentWork } from "../src/legacy-work-budget.js";
 import {
   computePolicyMetrics,
   confirmNomination,
@@ -75,7 +76,7 @@ function row(overrides: Partial<ReplayedRow> = {}): ReplayedRow {
     escalated: false,
     taskScore: 0.9,
     ttftMs: 100,
-    endToEndLatencyMs: 400,
+    endToEndLatencyMs: 500,
     outputTokens: 40,
     perceivedTokensPerSecond: 80,
     serviceThroughput: { kind: "measured", tokensPerSecond: 70 },
@@ -129,7 +130,7 @@ function legacyRow(overrides: Partial<ReplayedRow> = {}): ReplayedRow {
     escalated: false,
     taskScore: 0.9,
     ttftMs: 100,
-    endToEndLatencyMs: 400,
+    endToEndLatencyMs: 500,
     outputTokens: 40,
     perceivedTokensPerSecond: 80,
     totalTokensPerSecond: 70,
@@ -177,6 +178,7 @@ describe("TASC policy metrics", () => {
         taskScore: 1,
         ttftMs: 100,
         endToEndLatencyMs: 200,
+        outputTokens: 1,
         costUsd: 0.01,
       }),
       ...[0, 1, 2].map((replicateIndex) => row({
@@ -523,6 +525,40 @@ describe("TASC hard gates", () => {
     expect(rowGetterCalls).toBe(0);
   });
 
+  it("rejects excessive direct groups before copying the remaining rows", () => {
+    const candidate = new Array<ReplayedRow>(40_000);
+    candidate[0] = row({ caseId: "case-a", groupId: "group-a" });
+    candidate[1] = row({ caseId: "case-b", groupId: "group-b" });
+    let laterRowReads = 0;
+    Object.defineProperty(candidate, "2", {
+      enumerable: true,
+      get() {
+        laterRowReads += 1;
+        throw new Error("later direct row getter must not run");
+      },
+    });
+
+    expect(() => evaluatePolicy(candidate, [
+      row({
+        policyId: "champion",
+        policyKind: "expert-only",
+        selectedProfileId: "expert",
+        attemptedProfileIds: ["expert"],
+        caseId: "case-a",
+        groupId: "group-a",
+      }),
+    ], spec(), {
+      workBudget: {
+        ...DEFAULT_ASSESSMENT_WORK_BUDGET,
+        maxTraceRows: 40_000,
+        maxEvidenceRows: 1,
+        maxIndependentGroups: 1,
+        maxAssessmentWork: Number.MAX_SAFE_INTEGER,
+      },
+    })).toThrow(/independent group count exceeds caller work budget/i);
+    expect(laterRowReads).toBe(0);
+  });
+
   it("snapshots nested direct-row capacity evidence without invoking getters", () => {
     const rows = pairedRows([[0.9]], [[0.9]]);
     let capacityGetterCalls = 0;
@@ -564,6 +600,53 @@ describe("TASC hard gates", () => {
       /candidate.*row.*ttftMs.*number|ttftMs.*finite/i,
     );
     expect(trapCalls).toBe(0);
+  });
+
+  it.each([
+    [
+      "end-to-end latency below TTFT",
+      { ttftMs: 100, endToEndLatencyMs: 1 },
+      /end-to-end latency.*below TTFT/i,
+    ],
+    [
+      "zero perceived rate for a multi-token success",
+      { outputTokens: 10, perceivedTokensPerSecond: 0 },
+      /positive perceived tokens per second/i,
+    ],
+    [
+      "a decode duration that cannot fit inside end-to-end latency",
+      {
+        ttftMs: 0,
+        endToEndLatencyMs: 1,
+        outputTokens: 10_000,
+        perceivedTokensPerSecond: 1_000,
+      },
+      /end-to-end latency cannot contain.*output tokens/i,
+    ],
+  ])("rejects a successful direct row with %s", (_label, invalid, expected) => {
+    const rows = pairedRows([[0.9], [0.9], [0.9]], [[0.9], [0.9], [0.9]]);
+    Object.assign(rows.candidate[0], invalid);
+
+    expect(() => evaluatePolicy(rows.candidate, rows.champion, spec())).toThrow(expected);
+  });
+
+  it("retains explicit zero-valued failure semantics at the direct-row boundary", () => {
+    const rows = pairedRows([[0.9], [0.9], [0.9]], [[0.9], [0.9], [0.9]]);
+    for (const candidate of rows.candidate) {
+      Object.assign(candidate, {
+        status: "failure",
+        taskScore: 0,
+        ttftMs: 0,
+        endToEndLatencyMs: 0,
+        outputTokens: 0,
+        perceivedTokensPerSecond: 0,
+        serviceThroughput: { kind: "unavailable", reason: "failed execution" },
+        failureCode: "timeout",
+      });
+    }
+
+    expect(evaluatePolicy(rows.candidate, rows.champion, spec()).candidateMetrics)
+      .toMatchObject({ meanTaskScore: 0, errorRate: 1 });
   });
 
   it("rejects whitespace aliases before counting direct-row groups or cases", () => {
@@ -759,6 +842,27 @@ function measurements(options: {
   });
 }
 
+function scaledMeasurements(
+  caseCount: number,
+  fastConfidence?: (caseIndex: number) => number,
+): MeasurementSet {
+  const value = measurements();
+  const templates = value.cases;
+  value.cases = Array.from({ length: caseCount }, (_unused, caseIndex) => {
+    const measurementCase = structuredClone(templates[caseIndex % templates.length]);
+    measurementCase.id = `scaled-case-${caseIndex}`;
+    measurementCase.groupId = `scaled-group-${caseIndex}`;
+    const fast = measurementCase.observations.find(({ profileId }) => profileId === "fast")!;
+    for (const observation of fast.replicates) {
+      if (observation.status === "success") {
+        observation.confidence = fastConfidence?.(caseIndex) ?? observation.confidence;
+      }
+    }
+    return measurementCase;
+  });
+  return value;
+}
+
 function nominationSpec(): InferenceSpec {
   const value = spec({
     taskScoreFloor: 0.7,
@@ -871,6 +975,125 @@ describe("TASC development nomination", () => {
         maxAssessmentWork: Number.MAX_SAFE_INTEGER,
       },
     })).toThrow(/candidate count exceeds caller work budget/i);
+  });
+
+  it("rejects an oversized measurement case lower bound before reading case entries", () => {
+    const oversizedCases = new Array<MeasurementSet["cases"][number]>(20_000);
+    let caseReads = 0;
+    Object.defineProperty(oversizedCases, "0", {
+      enumerable: true,
+      get() {
+        caseReads += 1;
+        throw new Error("measurement case getter must not run");
+      },
+    });
+    const dev = { ...measurements(), cases: oversizedCases };
+
+    expect(() => nominatePolicy(nominationSpec(), dev, {
+      workBudget: {
+        ...DEFAULT_ASSESSMENT_WORK_BUDGET,
+        maxTraceRows: 1,
+        maxEvidenceRows: 1,
+      },
+    })).toThrow(/(?:measurement row count|trace rows|evidence rows).*caller work budget/i);
+    expect(caseReads).toBe(0);
+  });
+
+  it("accepts realistic additive row and grouped-bootstrap work", () => {
+    const activeSpec = nominationSpec();
+    activeSpec.bootstrap.iterations = 1_000;
+
+    expect(() => nominatePolicy(activeSpec, scaledMeasurements(100))).not.toThrow();
+  });
+
+  it("rejects true additive grouped work before bootstrap allocation", () => {
+    const activeSpec = nominationSpec();
+    activeSpec.bootstrap.iterations = 1_000;
+    const dev = scaledMeasurements(100);
+    const lastReplicates = dev.cases[99].observations[1].replicates;
+    let replicateReads = 0;
+    Object.defineProperty(lastReplicates, "0", {
+      enumerable: true,
+      get() {
+        replicateReads += 1;
+        throw new Error("replicate getter must not run");
+      },
+    });
+
+    expect(() => nominatePolicy(activeSpec, dev, {
+      workBudget: {
+        ...DEFAULT_ASSESSMENT_WORK_BUDGET,
+        maxAssessmentWork: 500_000,
+      },
+    })).toThrow(/assessment work exceeds caller work budget/i);
+    expect(replicateReads).toBe(0);
+  });
+
+  it("groups 2,000 equal objective signatures before skyline comparison", () => {
+    const activeSpec = nominationSpec();
+    activeSpec.bootstrap.iterations = 1;
+    activeSpec.constraints.minimumIndependentGroups = 1;
+    activeSpec.candidateSpace = {
+      confidenceThresholds: Array.from(
+        { length: 2_000 },
+        (_unused, index) => (index + 1) / 2_001,
+      ),
+      inputTokenThresholds: [1_000],
+      includeFastOnly: false,
+    };
+
+    const result = nominatePolicy(activeSpec, scaledMeasurements(1, () => 1), {
+      workBudget: {
+        ...DEFAULT_ASSESSMENT_WORK_BUDGET,
+        maxAssessmentWork: 30_000,
+      },
+    });
+    const groupedEstimate = estimateLegacyAssessmentWork({
+      candidateCount: 2_000,
+      traceRows: 2,
+      evidenceRows: 2,
+      bootstrapDraws: 1,
+      independentGroups: 1,
+    }, 1);
+    const ungroupedEstimate = estimateLegacyAssessmentWork({
+      candidateCount: 2_000,
+      traceRows: 2,
+      evidenceRows: 2,
+      bootstrapDraws: 1,
+      independentGroups: 1,
+    }, 2_000);
+
+    expect(groupedEstimate.frontierComparisonWork).toBe(0);
+    expect(groupedEstimate.assessmentWork).toBeLessThanOrEqual(30_000);
+    expect(ungroupedEstimate.assessmentWork).toBeGreaterThan(30_000);
+    expect(result.frontier).toHaveLength(2_000);
+  });
+
+  it("charges unique objective signatures before quadratic skyline work", () => {
+    const activeSpec = nominationSpec();
+    activeSpec.bootstrap.iterations = 1;
+    activeSpec.constraints.minimumIndependentGroups = 1;
+    activeSpec.constraints.taskScoreFloor = 0;
+    activeSpec.constraints.nonInferiorityMargin = -1;
+    activeSpec.candidateSpace = {
+      confidenceThresholds: Array.from(
+        { length: 100 },
+        (_unused, index) => (index + 1) / 101,
+      ),
+      inputTokenThresholds: [1_000],
+      includeFastOnly: false,
+    };
+
+    expect(() => nominatePolicy(
+      activeSpec,
+      scaledMeasurements(100, (caseIndex) => (caseIndex + 1) / 101),
+      {
+        workBudget: {
+          ...DEFAULT_ASSESSMENT_WORK_BUDGET,
+          maxAssessmentWork: 60_000,
+        },
+      },
+    )).toThrow(/frontier.*(?:assessment )?work.*caller work budget/i);
   });
 
   it("evaluates every generated policy and retains hard-gate rejections", () => {

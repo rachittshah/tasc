@@ -11,6 +11,7 @@ import { canonicalJson, compareCodeUnits } from "./determinism.js";
 import { sha256 } from "./integrity.js";
 import {
   assertMeasurementMatrix,
+  assertSuccessfulTimingSemantics,
   parseMeasurementSet,
   parsePreparedInferenceSpec,
   prepareInferenceSpec,
@@ -20,11 +21,12 @@ import {
   type PreparedInferenceSpec,
   type ResolvedInferenceSpec,
 } from "./schema.js";
+import type { WorkBudget } from "./work-budget.js";
 import {
-  assertWithinWorkBudget,
-  estimateAssessmentWork,
-  type WorkBudget,
-} from "./work-budget.js";
+  assertWithinLegacyAssessmentBudget,
+  estimateLegacyAssessmentWork,
+  type LegacyAssessmentWorkInput,
+} from "./legacy-work-budget.js";
 import {
   championPolicyForResolvedSpec,
   fingerprintPolicy,
@@ -320,34 +322,172 @@ function candidatePolicyCount(preflight: PreparedInferenceSpec): number {
   );
 }
 
-function observationRowCount(measurements: MeasurementSet): number {
-  let count = 0;
-  for (const measurementCase of measurements.cases) {
-    for (const observationSet of measurementCase.observations) {
-      count = checkedAdd(count, observationSet.replicates.length, "measurement row count");
-    }
-  }
-  return count;
+interface PreparedMeasurementAssessment {
+  measurements: MeasurementSet;
+  workInput: LegacyAssessmentWorkInput;
 }
 
-/** Enforce work limits before candidate arrays or bootstrap result arrays can be allocated. */
-function assertAssessmentWorkBudget(
-  spec: PreparedInferenceSpec,
-  measurements: MeasurementSet,
+function assertPlainDescriptorObject(input: unknown, label: string): asserts input is object {
+  if (typeof input !== "object" || input === null || Array.isArray(input) || isProxy(input)) {
+    throw new Error(`${label} must be a plain non-proxy object`);
+  }
+  const prototype = Object.getPrototypeOf(input);
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new Error(`${label} must be a plain object with own data properties`);
+  }
+}
+
+function descriptorDataProperty(input: object, key: string, label: string): unknown {
+  const descriptor = Object.getOwnPropertyDescriptor(input, key);
+  if (
+    descriptor === undefined
+    || !descriptor.enumerable
+    || !Object.prototype.hasOwnProperty.call(descriptor, "value")
+  ) {
+    throw new Error(`${label}.${key} must be an enumerable own data property; accessors are not allowed`);
+  }
+  return descriptor.value;
+}
+
+function descriptorArrayLength(input: unknown, label: string): number {
+  if (!Array.isArray(input) || isProxy(input)) {
+    throw new Error(`${label} must be a non-proxy array`);
+  }
+  const length = Object.getOwnPropertyDescriptor(input, "length")?.value;
+  if (!Number.isSafeInteger(length) || length < 0) {
+    throw new Error(`${label} length must be a safe non-negative integer data property`);
+  }
+  return length;
+}
+
+function descriptorArrayEntry(input: unknown[], index: number, label: string): unknown {
+  const descriptor = Object.getOwnPropertyDescriptor(input, String(index));
+  if (descriptor === undefined) {
+    throw new Error(`${label} has a hole at index ${index}`);
+  }
+  if (
+    !descriptor.enumerable
+    || !Object.prototype.hasOwnProperty.call(descriptor, "value")
+  ) {
+    throw new Error(
+      `${label}[${index}] must be an enumerable own data property; accessors are not allowed`,
+    );
+  }
+  return descriptor.value;
+}
+
+function assertMeasurementRowBudget(rowCount: number, budget: WorkBudget): void {
+  if (rowCount > budget.maxTraceRows) {
+    throw new Error(
+      `trace rows exceeds caller work budget: ${rowCount} > ${budget.maxTraceRows}`,
+    );
+  }
+  if (rowCount > budget.maxEvidenceRows) {
+    throw new Error(
+      `evidence rows exceeds caller work budget: ${rowCount} > ${budget.maxEvidenceRows}`,
+    );
+  }
+}
+
+function preflightMeasurementShape(
+  input: MeasurementSet,
+  candidateCount: number,
+  bootstrapDraws: number,
   budget: WorkBudget,
-): void {
-  const rows = observationRowCount(measurements);
-  const input = {
-    candidateCount: candidatePolicyCount(spec),
-    traceRows: rows,
-    evidenceRows: rows,
-    bootstrapDraws: spec.bootstrapIterations,
-  };
-  assertWithinWorkBudget(estimateAssessmentWork({ ...input, independentGroups: 0 }), budget);
+): Omit<LegacyAssessmentWorkInput, "candidateCount" | "bootstrapDraws"> {
+  assertPlainDescriptorObject(input, "measurement set");
+  const casesInput = descriptorDataProperty(input, "cases", "measurement set");
+  const caseCount = descriptorArrayLength(casesInput, "measurement set.cases");
+  const cases = casesInput as unknown[];
+
+  // Every structurally valid case contributes at least one observation row.
+  assertWithinLegacyAssessmentBudget(estimateLegacyAssessmentWork({
+    candidateCount,
+    traceRows: caseCount,
+    evidenceRows: caseCount,
+    bootstrapDraws,
+    independentGroups: 0,
+  }), budget);
+
+  let rowCount = 0;
   const groups = new Set<string>();
-  for (const measurementCase of measurements.cases) groups.add(measurementCase.groupId);
-  const estimate = estimateAssessmentWork({ ...input, independentGroups: groups.size });
-  assertWithinWorkBudget(estimate, budget);
+  for (let caseIndex = 0; caseIndex < caseCount; caseIndex += 1) {
+    const caseLabel = `measurement set.cases[${caseIndex}]`;
+    const measurementCase = descriptorArrayEntry(cases, caseIndex, "measurement set.cases");
+    assertPlainDescriptorObject(measurementCase, caseLabel);
+
+    const groupId = descriptorDataProperty(measurementCase, "groupId", caseLabel);
+    if (typeof groupId !== "string" || groupId.trim().length === 0) {
+      throw new Error(`${caseLabel}.groupId must be a non-empty string`);
+    }
+    groups.add(groupId.trim());
+    if (groups.size > budget.maxIndependentGroups) {
+      throw new Error(
+        `independent group count exceeds caller work budget: ${groups.size} > ${budget.maxIndependentGroups}`,
+      );
+    }
+
+    const observationsInput = descriptorDataProperty(measurementCase, "observations", caseLabel);
+    const observationCount = descriptorArrayLength(
+      observationsInput,
+      `${caseLabel}.observations`,
+    );
+    assertMeasurementRowBudget(
+      checkedAdd(rowCount, observationCount, "measurement row count lower bound"),
+      budget,
+    );
+    const observations = observationsInput as unknown[];
+    for (let observationIndex = 0; observationIndex < observationCount; observationIndex += 1) {
+      const observationLabel = `${caseLabel}.observations[${observationIndex}]`;
+      const observationSet = descriptorArrayEntry(
+        observations,
+        observationIndex,
+        `${caseLabel}.observations`,
+      );
+      assertPlainDescriptorObject(observationSet, observationLabel);
+      const replicates = descriptorDataProperty(observationSet, "replicates", observationLabel);
+      const replicateCount = descriptorArrayLength(
+        replicates,
+        `${observationLabel}.replicates`,
+      );
+      rowCount = checkedAdd(rowCount, replicateCount, "measurement row count");
+      assertMeasurementRowBudget(rowCount, budget);
+    }
+  }
+  return {
+    traceRows: rowCount,
+    evidenceRows: rowCount,
+    independentGroups: groups.size,
+  };
+}
+
+/** Charge descriptor-derived cardinalities before the full owned measurement snapshot. */
+function prepareMeasurementAssessment(
+  spec: PreparedInferenceSpec,
+  measurementInput: MeasurementSet,
+  budget: WorkBudget,
+): PreparedMeasurementAssessment {
+  const candidateCount = candidatePolicyCount(spec);
+  const emptyInput: LegacyAssessmentWorkInput = {
+    candidateCount,
+    traceRows: 0,
+    evidenceRows: 0,
+    bootstrapDraws: spec.bootstrapIterations,
+    independentGroups: 0,
+  };
+  assertWithinLegacyAssessmentBudget(estimateLegacyAssessmentWork(emptyInput), budget);
+  const shape = preflightMeasurementShape(
+    measurementInput,
+    candidateCount,
+    spec.bootstrapIterations,
+    budget,
+  );
+  const workInput = { ...emptyInput, ...shape };
+  assertWithinLegacyAssessmentBudget(estimateLegacyAssessmentWork(workInput), budget);
+  return {
+    measurements: parseMeasurementSet(measurementInput),
+    workInput,
+  };
 }
 
 interface RowCollectionPreflight {
@@ -628,6 +768,14 @@ function snapshotReplayedRow(input: ReplayedRow, label: string): ReplayedRow {
     }
   }
   assertReplayedRowScalars(snapshot, label);
+  if (snapshot.status === "success") {
+    assertSuccessfulTimingSemantics({
+      ttftMs: snapshot.ttftMs as number,
+      endToEndLatencyMs: snapshot.endToEndLatencyMs as number,
+      outputTokens: snapshot.outputTokens as number,
+      perceivedTokensPerSecond: snapshot.perceivedTokensPerSecond as number,
+    }, label);
+  }
   snapshot.attemptedProfileIds = snapshotRowStringArray(
     snapshot.attemptedProfileIds,
     `${label}.attemptedProfileIds`,
@@ -656,13 +804,14 @@ function assertDirectEvaluationCardinalityBudget(
   bootstrapDraws: number,
   budget: WorkBudget,
 ): void {
-  const input = {
+  const input: LegacyAssessmentWorkInput = {
     candidateCount: 1,
     traceRows: candidateLength,
     evidenceRows: championLength,
     bootstrapDraws,
+    independentGroups: 0,
   };
-  assertWithinWorkBudget(estimateAssessmentWork({ ...input, independentGroups: 0 }), budget);
+  assertWithinLegacyAssessmentBudget(estimateLegacyAssessmentWork(input), budget);
 }
 
 function snapshotRowCollection(preflight: RowCollectionPreflight): ReplayedRow[] {
@@ -696,23 +845,48 @@ function snapshotRowCollection(preflight: RowCollectionPreflight): ReplayedRow[]
   return snapshot;
 }
 
-function assertDirectEvaluationGroupBudget(
-  candidateRows: readonly ReplayedRow[],
-  championRows: readonly ReplayedRow[],
+function preflightDirectEvaluationGroups(
+  candidate: RowCollectionPreflight,
+  champion: RowCollectionPreflight,
   bootstrapDraws: number,
   budget: WorkBudget,
-): void {
-  const input = {
+): LegacyAssessmentWorkInput {
+  const input: LegacyAssessmentWorkInput = {
     candidateCount: 1,
-    traceRows: candidateRows.length,
-    evidenceRows: championRows.length,
+    traceRows: candidate.length,
+    evidenceRows: champion.length,
     bootstrapDraws,
+    independentGroups: 0,
   };
   const groups = new Set<string>();
-  for (const row of candidateRows) groups.add(row.groupId);
-  for (const row of championRows) groups.add(row.groupId);
-  const estimate = estimateAssessmentWork({ ...input, independentGroups: groups.size });
-  assertWithinWorkBudget(estimate, budget);
+  for (const collection of [candidate, champion]) {
+    for (let index = 0; index < collection.length; index += 1) {
+      const rowLabel = `${collection.label} row ${index}`;
+      const row = descriptorArrayEntry(
+        collection.input as unknown[],
+        index,
+        `${collection.label} row collection`,
+      );
+      assertPlainDescriptorObject(row, rowLabel);
+      const groupId = descriptorDataProperty(row, "groupId", rowLabel);
+      if (
+        typeof groupId !== "string"
+        || groupId.length === 0
+        || groupId !== groupId.trim()
+      ) {
+        throw new Error(`${rowLabel}.groupId must be a canonical trimmed non-empty string`);
+      }
+      groups.add(groupId);
+      if (groups.size > budget.maxIndependentGroups) {
+        throw new Error(
+          `independent group count exceeds caller work budget: ${groups.size} > ${budget.maxIndependentGroups}`,
+        );
+      }
+    }
+  }
+  input.independentGroups = groups.size;
+  assertWithinLegacyAssessmentBudget(estimateLegacyAssessmentWork(input), budget);
+  return input;
 }
 
 function effectiveWeightedRows(rows: readonly ReplayedRow[]): Array<{ row: ReplayedRow; weight: number }> {
@@ -1286,6 +1460,12 @@ export function evaluatePolicy(
     specPreflight.bootstrapIterations,
     budget,
   );
+  preflightDirectEvaluationGroups(
+    candidatePreflight,
+    championPreflight,
+    specPreflight.bootstrapIterations,
+    budget,
+  );
   const candidateSnapshot = snapshotReplayedRows(
     snapshotRowCollection(candidatePreflight),
     "candidate",
@@ -1298,12 +1478,6 @@ export function evaluatePolicy(
   preflightDirectRowSlices(championSnapshot, "champion");
   assertSinglePolicyRows(candidateSnapshot, "candidate");
   assertSinglePolicyRows(championSnapshot, "champion");
-  assertDirectEvaluationGroupBudget(
-    candidateSnapshot,
-    championSnapshot,
-    specPreflight.bootstrapIterations,
-    budget,
-  );
   const spec = parsePreparedInferenceSpec(specPreflight);
   return evaluatePolicyInternal(candidateSnapshot, championSnapshot, spec, true);
 }
@@ -1398,6 +1572,56 @@ function dominates(left: PolicyMetrics, right: PolicyMetrics, capacityRequired: 
   return neverWorse && strictlyBetter;
 }
 
+function objectiveSignature(metrics: PolicyMetrics, capacityRequired: boolean): string {
+  return canonicalJson([
+    metrics.meanTaskScore,
+    metrics.p10PerceivedTokensPerSecond,
+    capacityRequired ? metrics.p50TotalTokensPerSecond : null,
+    metrics.errorRate,
+    metrics.p95TtftMs,
+    metrics.p95EndToEndLatencyMs,
+    metrics.costPerRequestUsd,
+  ]);
+}
+
+function boundedParetoFrontier(
+  passers: readonly CandidateEvaluation[],
+  capacityRequired: boolean,
+  workInput: LegacyAssessmentWorkInput,
+  budget: WorkBudget,
+): CandidateEvaluation[] {
+  const bySignature = new Map<string, CandidateEvaluation[]>();
+  for (const candidate of passers) {
+    const signature = objectiveSignature(
+      candidate.evaluation.candidateMetrics,
+      capacityRequired,
+    );
+    const equivalents = bySignature.get(signature);
+    if (equivalents === undefined) bySignature.set(signature, [candidate]);
+    else equivalents.push(candidate);
+  }
+  const signatureGroups = [...bySignature.values()].sort((left, right) => (
+    compareCodeUnits(left[0].policy.id, right[0].policy.id)
+  ));
+  assertWithinLegacyAssessmentBudget(
+    estimateLegacyAssessmentWork(workInput, signatureGroups.length),
+    budget,
+    "frontier",
+  );
+
+  const nonDominatedGroups = signatureGroups.filter((candidateGroup) => (
+    !signatureGroups.some((otherGroup) => (
+      otherGroup !== candidateGroup
+      && dominates(
+        otherGroup[0].evaluation.candidateMetrics,
+        candidateGroup[0].evaluation.candidateMetrics,
+        capacityRequired,
+      )
+    ))
+  ));
+  return nonDominatedGroups.flatMap((group) => group);
+}
+
 type NominationArtifactBody = Omit<NominationArtifact, "selfDigest" | "attestation">;
 
 function artifactSelfDigest(artifact: NominationArtifactBody): string {
@@ -1428,15 +1652,11 @@ export function nominatePolicy(
     ? undefined
     : validatedAttestationKey(attestationKeyInput);
   const specPreflight = prepareInferenceSpec(specInput);
-  const devSnapshot = parseMeasurementSet(dev);
+  const preparedDevelopment = prepareMeasurementAssessment(specPreflight, dev, workBudget);
+  const devSnapshot = preparedDevelopment.measurements;
   if (devSnapshot.dataset.split !== "dev") {
     throw new Error(`nomination requires development split "dev"; received "${devSnapshot.dataset.split}"`);
   }
-  assertAssessmentWorkBudget(
-    specPreflight,
-    devSnapshot,
-    workBudget,
-  );
   const spec = parsePreparedInferenceSpec(specPreflight);
   assertMeasurementMatrix(spec, devSnapshot);
 
@@ -1452,16 +1672,12 @@ export function nominatePolicy(
     ),
   }));
   const passers = evaluations.filter(({ evaluation }) => evaluation.passed);
-  const frontierEntries = passers.filter((candidate) => (
-    !passers.some((other) => (
-      other.policy.id !== candidate.policy.id
-      && dominates(
-        other.evaluation.candidateMetrics,
-        candidate.evaluation.candidateMetrics,
-        spec.constraints.minP50TotalTokensPerSecond > 0,
-      )
-    ))
-  ));
+  const frontierEntries = boundedParetoFrontier(
+    passers,
+    spec.constraints.minP50TotalTokensPerSecond > 0,
+    preparedDevelopment.workInput,
+    workBudget,
+  );
   const orderedFrontier = [...frontierEntries].sort((left, right) => (
     left.evaluation.candidateMetrics.costPerRequestUsd
       - right.evaluation.candidateMetrics.costPerRequestUsd
@@ -1608,7 +1824,8 @@ export function confirmNomination(
     ? undefined
     : validatedAttestationKey(attestationKeyInput);
   const specPreflight = prepareInferenceSpec(specInput);
-  const holdoutSnapshot = parseMeasurementSet(holdout);
+  const preparedHoldout = prepareMeasurementAssessment(specPreflight, holdout, workBudget);
+  const holdoutSnapshot = preparedHoldout.measurements;
   const nominationSnapshot = parseNominationArtifact(nomination, workBudget);
   if (holdoutSnapshot.dataset.split !== "holdout") {
     throw new Error(`confirmation requires holdout split "holdout"; received "${holdoutSnapshot.dataset.split}"`);
@@ -1618,11 +1835,6 @@ export function confirmNomination(
   }
   assertNominationSelfDigest(nominationSnapshot);
   const attestationVerified = attestationKey !== undefined;
-  assertAssessmentWorkBudget(
-    specPreflight,
-    holdoutSnapshot,
-    workBudget,
-  );
   const spec = parsePreparedInferenceSpec(specPreflight);
 
   const resolvedSpecDigest = specDigest(spec);

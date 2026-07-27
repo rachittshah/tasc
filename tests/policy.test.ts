@@ -145,6 +145,32 @@ describe("TASC empirical policy replay", () => {
     });
   });
 
+  it("snapshots and validates a caller policy exactly once before replay", () => {
+    const activePolicy = { ...policy("cascade") };
+    let kindReads = 0;
+    Object.defineProperty(activePolicy, "kind", {
+      enumerable: true,
+      get() {
+        kindReads += 1;
+        return kindReads === 1 ? "cascade" : "fast-only";
+      },
+    });
+
+    expect(() => replayPolicy(activePolicy, spec(), measurements())).toThrow(
+      /policy.*kind.*accessor|accessor.*policy.*kind/i,
+    );
+    expect(kindReads).toBe(0);
+  });
+
+  it("treats explicit undefined optional thresholds as omission for non-cascade policies", () => {
+    const expert = championPolicy(spec());
+    expert.confidenceThreshold = undefined;
+    expert.inputTokenThreshold = undefined;
+
+    expect(replayPolicy(expert, spec(), measurements()))
+      .toEqual(replayPolicy(championPolicy(spec()), spec(), measurements()));
+  });
+
   it("does not escalate an unconfigured critical case", () => {
     const row = replayPolicy(policy("cascade"), spec(), measurements()).find((candidate) => candidate.caseId === "unconfigured-critical")!;
     expect(row).toMatchObject({

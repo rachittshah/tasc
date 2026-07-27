@@ -1,9 +1,11 @@
+import { z } from "zod";
 import { compareCodeUnits, canonicalJson } from "./determinism.js";
 import { sha256 } from "./integrity.js";
 import {
   assertMeasurementMatrix,
   parseInferenceSpec,
   parseMeasurementSet,
+  snapshotPlainDataTree,
 } from "./schema.js";
 import type {
   FailedObservation,
@@ -24,6 +26,57 @@ export interface InferencePolicy {
   confidenceThreshold?: number;
   inputTokenThreshold?: number;
   criticalSlices: string[];
+}
+
+const canonicalPolicyText = z.string()
+  .min(1)
+  .refine((value) => value === value.trim(), "must not contain surrounding whitespace");
+const policyBaseShape = {
+  version: z.literal("tasc-policy-v1"),
+  id: canonicalPolicyText,
+  primaryProfileId: canonicalPolicyText,
+  expertProfileId: canonicalPolicyText,
+  criticalSlices: z.array(canonicalPolicyText).max(64),
+};
+const inferencePolicySchema: z.ZodType<InferencePolicy> = z.discriminatedUnion("kind", [
+  z.object({
+    ...policyBaseShape,
+    kind: z.literal("expert-only"),
+    confidenceThreshold: z.undefined().optional(),
+    inputTokenThreshold: z.undefined().optional(),
+  }).strict(),
+  z.object({
+    ...policyBaseShape,
+    kind: z.literal("fast-only"),
+    confidenceThreshold: z.undefined().optional(),
+    inputTokenThreshold: z.undefined().optional(),
+  }).strict(),
+  z.object({
+    ...policyBaseShape,
+    kind: z.literal("cascade"),
+    confidenceThreshold: z.number().finite().min(0).max(1),
+    inputTokenThreshold: z.number().int().finite().safe().nonnegative(),
+  }).strict(),
+]).superRefine((policy, context) => {
+  const uniqueSlices = new Set(policy.criticalSlices);
+  if (uniqueSlices.size !== policy.criticalSlices.length) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["criticalSlices"],
+      message: "must not contain duplicate labels",
+    });
+  }
+});
+
+function parseInferencePolicy(input: unknown): InferencePolicy {
+  const policy = inferencePolicySchema.parse(snapshotPlainDataTree(input, "policy"));
+  if (policy.kind === "cascade") return policy;
+  const {
+    confidenceThreshold: _confidenceThreshold,
+    inputTokenThreshold: _inputTokenThreshold,
+    ...canonical
+  } = policy;
+  return canonical;
 }
 
 export interface ReplayedRow {
@@ -254,8 +307,9 @@ export function replayPolicy(
   spec: InferenceSpec,
   measurements: MeasurementSet,
 ): ReplayedRow[] {
+  const policySnapshot = parseInferencePolicy(policy);
   return replayPolicyForResolvedSpec(
-    policy,
+    policySnapshot,
     parseInferenceSpec(spec),
     parseMeasurementSet(measurements),
   );

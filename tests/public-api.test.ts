@@ -39,5 +39,6 @@ describe("standalone public API", () => {
     expect(tasc).not.toHaveProperty("snapshotBoundedContractInput");
     expect(tasc).not.toHaveProperty("normalizeEvaluatorEvidence");
     expect(tasc).not.toHaveProperty("bootstrapGroupedWeightedMeanCI");
+    expect(tasc).not.toHaveProperty("computePolicyMetrics");
   });
 });
