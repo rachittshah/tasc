@@ -866,7 +866,7 @@ export function snapshotBoundedContractInput(input: unknown): unknown {
   return deepFreezeContract(snapshot);
 }
 
-function assertProtocolWorkBudget(protocol: MutableExperimentProtocol, budget: WorkBudget): void {
+function assertProtocolWorkBudget(protocol: ExperimentProtocol, budget: WorkBudget): void {
   assertWithinWorkBudget(estimateAssessmentWork({
     candidateCount: protocol.candidatePolicySpace.maxCandidates,
     traceRows: 1,
@@ -910,11 +910,19 @@ export function fingerprintExecutionProfile(profile: unknown): string {
   return domainSeparatedDigest("tasc/execution-profile/v2", parsed);
 }
 
-export function fingerprintProtocol(protocol: unknown): string {
+export function normalizeExperimentProtocol(protocol: unknown): ExperimentProtocol {
   const snapshot = snapshotBoundedContractInput(protocol);
   const parsed = experimentProtocolSchema.parse(snapshot);
   assertProtocolSemantics(parsed);
-  return domainSeparatedDigest("tasc/experiment-protocol/v2", parsed);
+  return deepFreezeContract(parsed);
+}
+
+export function fingerprintNormalizedProtocol(protocol: ExperimentProtocol): string {
+  return domainSeparatedDigest("tasc/experiment-protocol/v2", protocol);
+}
+
+export function fingerprintProtocol(protocol: unknown): string {
+  return fingerprintNormalizedProtocol(normalizeExperimentProtocol(protocol));
 }
 
 export function normalizeEvaluatorEvidence(evidence: unknown): EvaluatorEvidence {
@@ -978,11 +986,9 @@ export function parseExperimentProtocol(
   input: unknown,
   workBudget: WorkBudget,
 ): ExperimentProtocol {
-  const snapshot = snapshotBoundedContractInput(input);
-  const protocol = experimentProtocolSchema.parse(snapshot);
+  const protocol = normalizeExperimentProtocol(input);
   assertProtocolWorkBudget(protocol, requireWorkBudget(workBudget));
-  assertProtocolSemantics(protocol);
-  return deepFreezeContract(protocol);
+  return protocol;
 }
 
 export function parseTraceEnvelope(

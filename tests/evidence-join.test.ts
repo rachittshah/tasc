@@ -89,6 +89,53 @@ function failedTerminal(trace: TraceInput): TraceInput {
   });
 }
 
+function secondReplicatePair(
+  change?: (trace: TraceInput) => void,
+): [TraceInput, TraceInput] {
+  const champion = mutate(validTraceInputForProfile("champion"), (trace) => {
+    trace.traceId = "trace-case-1-r1-champion";
+    trace.replicateId = "replicate-1";
+    trace.terminalOutputId = keyedIdentity("3");
+  });
+  const candidate = mutate(validTraceInputForProfile("candidate"), (trace) => {
+    trace.traceId = "trace-case-1-r1-candidate";
+    trace.replicateId = "replicate-1";
+    trace.terminalOutputId = keyedIdentity("4");
+  });
+  change?.(champion);
+  change?.(candidate);
+  return [champion, candidate];
+}
+
+function manyPairedTraces(
+  protocol: ReturnType<typeof parseProtocol>,
+  caseCount: number,
+  slicesForCase: (index: number) => string[],
+): TraceInput[] {
+  const traces: TraceInput[] = [];
+  for (let index = 0; index < caseCount; index += 1) {
+    const caseId = `case-${index}`;
+    const groupId = `group-${index}`;
+    const split = resolveGroupSplit(protocol, groupId).split;
+    for (const profileId of ["champion", "candidate"] as const) {
+      const trace = validTraceInputForProfile(profileId);
+      trace.traceId = `trace-${caseId}-${profileId}`;
+      trace.caseId = caseId;
+      trace.groupId = groupId;
+      trace.split = split as "dev";
+      trace.slices = slicesForCase(index);
+      trace.terminalOutputId = {
+        ...keyedIdentity(),
+        value: (index * 2 + (profileId === "candidate" ? 1 : 0))
+          .toString(16)
+          .padStart(64, "0"),
+      };
+      traces.push(trace);
+    }
+  }
+  return traces;
+}
+
 describe("deterministic assessment evidence join", () => {
   it("publishes exact group-bucket vectors from a domain-separated JCS SHA-256 preimage", () => {
     const protocol = parseProtocol();
@@ -141,7 +188,30 @@ describe("deterministic assessment evidence join", () => {
         input.splitMembership.bucketCount = 0;
       }) as never,
       "conversation-1",
-    )).toThrow(/bucket count/i);
+    )).toThrow(/bucketCount|bucket count/i);
+
+    expect(() => resolveGroupSplit(
+      mutate(protocol, (input: any) => {
+        input.routeSignal.maximum = input.routeSignal.minimum;
+      }) as never,
+      "conversation-1",
+    )).toThrow(/route.signal maximum|maximum.*minimum/i);
+
+    let propertyReads = 0;
+    const descriptorReads = new Map<PropertyKey, number>();
+    const protocolProxy = new Proxy(protocol, {
+      get() {
+        propertyReads += 1;
+        throw new Error("public split resolver re-read caller protocol");
+      },
+      getOwnPropertyDescriptor(target, property) {
+        descriptorReads.set(property, (descriptorReads.get(property) ?? 0) + 1);
+        return Reflect.getOwnPropertyDescriptor(target, property);
+      },
+    });
+    expect(resolveGroupSplit(protocolProxy, "conversation-1").bucket).toBe(0);
+    expect(propertyReads).toBe(0);
+    expect([...descriptorReads.values()].every((count) => count === 1)).toBe(true);
   });
 
   it("joins trusted scores, pairs required profiles, and is invariant to input order", () => {
@@ -421,12 +491,36 @@ describe("deterministic assessment evidence join", () => {
         reason: "no-matching-trace",
       }),
     ]);
-    expect(joined.diagnostics.missingEvidence).toEqual([
-      expect.objectContaining({
-        profileId: "candidate",
-        reason: "successful-execution-without-trusted-evidence",
-      }),
-    ]);
+    expect(joined.diagnostics.missingEvidence).toEqual([]);
+    expect(joined.executions.find(
+      ({ profileId }) => profileId === "candidate",
+    )?.outcome.kind).toBe("invalid-evidence");
+    expect(joined.diagnostics.invalidEvidence[0]).toMatchObject({
+      evidence: {
+        source: invalidSignature.evidence.source,
+        keyId: invalidSignature.evidence.keyId,
+        producedAt: invalidSignature.evidence.producedAt,
+      },
+      verification: {
+        status: "invalid-signature",
+        trusted: false,
+        assessmentContextDigest: invalidSignature.assessmentContextDigest,
+      },
+    });
+    expect(joined.diagnostics.orphanEvidence[0]).toMatchObject({
+      evidence: {
+        source: orphan.evidence.source,
+      },
+      verification: {
+        status: "trusted",
+        trusted: true,
+        assessmentContextDigest: orphan.assessmentContextDigest,
+      },
+    });
+    expect(Object.isFrozen(joined.diagnostics.invalidEvidence[0].evidence)).toBe(true);
+    expect(Object.isFrozen(
+      joined.diagnostics.invalidEvidence[0].verification,
+    )).toBe(true);
   });
 
   it("attaches signed missing and invalid outcomes without treating them as scores", () => {
@@ -529,6 +623,19 @@ describe("deterministic assessment evidence join", () => {
     expect(forward.executions.find(
       ({ profileId }) => profileId === "candidate",
     )?.outcome.kind).toBe("invalid-evidence");
+    expect(forward.diagnostics.missingEvidence).toEqual([]);
+    expect(forward.diagnostics.conflictingEvidence[0]).toMatchObject({
+      rows: expect.arrayContaining([
+        expect.objectContaining({
+          evidence: candidateEvidence.evidence,
+          verification: expect.objectContaining({ status: "trusted" }),
+        }),
+        expect.objectContaining({
+          evidence: conflicting.evidence,
+          verification: expect.objectContaining({ status: "trusted" }),
+        }),
+      ]),
+    });
   });
 
   it("never partial-key attaches terminal-output or redundant-lineage mismatches", () => {
@@ -596,6 +703,105 @@ describe("deterministic assessment evidence join", () => {
         missingProfileIds: ["champion"],
       },
     ]);
+  });
+
+  it("counts traffic once per case while retaining every replicate", () => {
+    const protocol = parseProtocol();
+    const traces = [
+      validTraceInputForProfile("champion"),
+      validTraceInputForProfile("candidate"),
+      ...secondReplicatePair(),
+    ].map(parseTrace);
+
+    const joined = joinAssessmentEvidence(
+      protocol,
+      traces,
+      [],
+      TEST_WORK_BUDGET,
+    );
+
+    expect(joined.counts).toMatchObject({
+      cases: 1,
+      caseReplicates: 2,
+      pairedCaseReplicates: 2,
+      observedTrafficMass: 1,
+    });
+  });
+
+  it.each([
+    [
+      "group",
+      (trace: TraceInput) => { trace.groupId = "group-a"; },
+      /case.*group|group.*case/i,
+    ],
+    [
+      "traffic",
+      (trace: TraceInput) => { trace.workload.declaredTrafficWeight = 2; },
+      /case.*traffic|traffic.*case/i,
+    ],
+    [
+      "workload",
+      (trace: TraceInput) => { trace.workload.inputTokenEstimate = 256; },
+      /case.*workload|workload.*case/i,
+    ],
+    [
+      "slices",
+      (trace: TraceInput) => { trace.slices = ["other-slice"]; },
+      /case.*slice|slice.*case/i,
+    ],
+    [
+      "route signal",
+      (trace: TraceInput) => { trace.routeSignal!.value = 0.5; },
+      /case.*route.signal|route.signal.*case/i,
+    ],
+    [
+      "policy",
+      (trace: TraceInput) => { trace.policyDigest = digest("f"); },
+      /case.*policy|policy.*case/i,
+    ],
+  ] as const)("rejects %s drift across replicates of one case", (
+    _label,
+    change,
+    expected,
+  ) => {
+    const traces = [
+      validTraceInputForProfile("champion"),
+      validTraceInputForProfile("candidate"),
+      ...secondReplicatePair(change),
+    ].map(parseTrace);
+
+    expect(() => joinAssessmentEvidence(
+      parseProtocol(),
+      traces,
+      [],
+      TEST_WORK_BUDGET,
+    )).toThrow(expected);
+  });
+
+  it("rejects online window drift across replicates of one case", () => {
+    const firstReplicate = [
+      validTraceInputForProfile("champion"),
+      validTraceInputForProfile("candidate"),
+    ];
+    const secondReplicate = secondReplicatePair();
+    const makeOnline = (trace: TraceInput, windowId: string) => {
+      const mutable = trace as any;
+      mutable.split = "online";
+      mutable.collectionWindowId = windowId;
+      mutable.collectionWindowMembershipDigest = digest(
+        windowId === "window-1" ? "a" : "b",
+      );
+      mutable.sourceMode = "shadow";
+    };
+    firstReplicate.forEach((trace) => makeOnline(trace, "window-1"));
+    secondReplicate.forEach((trace) => makeOnline(trace, "window-2"));
+
+    expect(() => joinAssessmentEvidence(
+      parseProtocol(),
+      [...firstReplicate, ...secondReplicate].map(parseTrace),
+      [],
+      TEST_WORK_BUDGET,
+    )).toThrow(/case.*window|window.*case/i);
   });
 
   it.each([
@@ -776,7 +982,7 @@ describe("deterministic assessment evidence join", () => {
       [parseTrace(validTraceInputForProfile("champion"))],
       [],
       { ...TEST_WORK_BUDGET, maxAssessmentWork: 0 },
-    )).toThrow(/assessment work.*work budget/i);
+    )).toThrow(/(?:assessment|join) work.*work budget/i);
 
     expect(() => joinAssessmentEvidence(
       protocol,
@@ -784,6 +990,64 @@ describe("deterministic assessment evidence join", () => {
       [],
       { ...TEST_WORK_BUDGET, maxIndependentGroups: 0 },
     )).toThrow(/independent group.*work budget/i);
+  });
+
+  it("charges cumulative label memberships before allocating slice output", () => {
+    const protocol = parseProtocol();
+    const withoutLabels = manyPairedTraces(protocol, 1, () => []);
+    const withLabels = manyPairedTraces(
+      protocol,
+      1,
+      () => Array.from({ length: 64 }, (_, index) => `slice-${index}`),
+    );
+    const tightBudget = {
+      ...TEST_WORK_BUDGET,
+      maxAssessmentWork: 50,
+    };
+
+    expect(() => joinAssessmentEvidence(
+      protocol,
+      withoutLabels.map(parseTrace),
+      [],
+      tightBudget,
+    )).not.toThrow();
+    expect(() => joinAssessmentEvidence(
+      protocol,
+      withLabels.map(parseTrace),
+      [],
+      tightBudget,
+    )).toThrow(/join work.*work budget|label membership.*work budget/i);
+  });
+
+  it("admits a 320-pair linear join and reports one-pass disjoint-slice visits", () => {
+    const protocol = parseProtocol();
+    const traces = manyPairedTraces(
+      protocol,
+      320,
+      (index) => [`slice-${index}`],
+    ).map(parseTrace);
+    const budget = {
+      ...TEST_WORK_BUDGET,
+      maxTraceRows: 1_000,
+      maxEvidenceRows: 1_000,
+      maxIndependentGroups: 500,
+      maxAssessmentWork: 30_000,
+    };
+
+    const joined = joinAssessmentEvidence(protocol, traces, [], budget);
+
+    expect(joined.counts).toMatchObject({
+      traceRows: 640,
+      cases: 320,
+      caseReplicates: 320,
+      pairedCaseReplicates: 320,
+    });
+    expect(joined.counts.slices).toHaveLength(320);
+    expect(joined.work).toMatchObject({
+      labelMemberships: 640,
+      sliceAggregationVisits: 320,
+    });
+    expect(joined.work.chargedUnits).toBeLessThanOrEqual(30_000);
   });
 
   it("snapshots collection data properties once and never invokes element accessors", () => {

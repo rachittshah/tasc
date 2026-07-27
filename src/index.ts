@@ -42,6 +42,7 @@ export type {
   AssessmentDataset,
   AssessmentExecutionOutcome,
   AssessmentExecutionRow,
+  AssessmentJoinWork,
   AssessmentPair,
   ResolvedGroupSplit,
 } from "./evidence-join.js";

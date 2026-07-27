@@ -7,9 +7,9 @@ import {
   domainSeparatedDigest,
   fingerprintExecutionProfile,
   fingerprintNormalizedEvaluatorEvidence,
-  fingerprintProtocol,
+  fingerprintNormalizedProtocol,
+  normalizeExperimentProtocol,
   normalizeEvaluatorEvidence,
-  parseExperimentProtocol,
   parseTraceEnvelope,
   snapshotBoundedContractInput,
   type DeepReadonly,
@@ -20,12 +20,9 @@ import {
 import {
   isAuthenticEvaluatorEvidenceVerification,
   type EvaluatorEvidenceVerification,
+  type EvaluatorTrustStatus,
 } from "./evaluator-trust.js";
-import {
-  assertWithinWorkBudget,
-  estimateAssessmentWork,
-  type WorkBudget,
-} from "./work-budget.js";
+import type { WorkBudget } from "./work-budget.js";
 
 type OfflineSplit = "dev" | "holdout";
 type AssessmentSplit = OfflineSplit | "online";
@@ -45,6 +42,8 @@ interface ScoredAssessmentOutcome {
   };
   readonly evidenceDigest: string;
   readonly evidence: EvaluatorEvidence;
+  readonly verification: EvidenceVerificationProvenance;
+  readonly evidenceAccepted: true;
 }
 
 interface ProtocolFailureOutcome {
@@ -58,6 +57,8 @@ interface NonScoredAssessmentOutcome {
   readonly reasonCode: string;
   readonly evidenceDigest: string | null;
   readonly evidence: EvaluatorEvidence | null;
+  readonly verification: EvidenceVerificationProvenance | null;
+  readonly evidenceAccepted: boolean;
 }
 
 export type AssessmentExecutionOutcome =
@@ -91,8 +92,28 @@ export interface AssessmentPair {
   readonly executionKeys: readonly string[];
 }
 
+export interface EvidenceVerificationProvenance {
+  readonly authentic: boolean;
+  readonly status: EvaluatorTrustStatus | "inauthentic";
+  readonly trusted: boolean;
+  readonly reason: string;
+  readonly keyId: string | null;
+  readonly assessedAt: string | null;
+  readonly assessmentContextDigest: string | null;
+  readonly operatorTrustPolicySnapshotDigest: string | null;
+  readonly evaluatorRevocationSnapshotDigest: string | null;
+}
+
+export interface DiagnosticEvidenceRow {
+  readonly evidence: EvaluatorEvidence;
+  readonly evidenceDigest: string;
+  readonly verification: EvidenceVerificationProvenance;
+}
+
 export interface EvidenceDiagnostic {
   readonly evidenceDigest: string | null;
+  readonly evidence: EvaluatorEvidence | null;
+  readonly verification: EvidenceVerificationProvenance;
   readonly traceId: string | null;
   readonly profileId: string | null;
   readonly reason: string;
@@ -116,11 +137,13 @@ export interface DuplicateEvidenceDiagnostic {
   readonly joinKey: string;
   readonly evidenceDigest: string;
   readonly occurrences: number;
+  readonly row: DiagnosticEvidenceRow;
 }
 
 export interface ConflictingEvidenceDiagnostic {
   readonly joinKey: string;
   readonly evidenceDigests: readonly string[];
+  readonly rows: readonly DiagnosticEvidenceRow[];
   readonly reason: string;
 }
 
@@ -152,6 +175,7 @@ export interface AssessmentDataset {
   readonly verificationContextIdentities: readonly string[];
   readonly executions: readonly AssessmentExecutionRow[];
   readonly pairs: readonly AssessmentPair[];
+  readonly work: AssessmentJoinWork;
   readonly counts: {
     readonly traceRows: number;
     readonly acceptedTraceRows: number;
@@ -192,14 +216,31 @@ export interface AssessmentDataset {
   };
 }
 
+export interface AssessmentJoinWork {
+  readonly traceRows: number;
+  readonly evidenceRows: number;
+  readonly independentGroups: number;
+  readonly labelMemberships: number;
+  readonly hashOperations: number;
+  readonly diagnosticRows: number;
+  readonly outputRows: number;
+  readonly chargedUnits: number;
+  readonly sliceAggregationVisits: number;
+}
+
 interface TraceRecord {
   readonly trace: TraceEnvelope;
   readonly traceDigest: string;
   readonly traceIdentityKey: string;
+  readonly traceProfileKey: string;
   readonly logicalProfileKey: string;
+  readonly pairKey: string;
   readonly executionKey: string;
   readonly split: AssessmentSplit;
   readonly splitBucket: number | null;
+  readonly sortedSlices: readonly string[];
+  readonly workloadCanonical: string;
+  readonly routeSignalCanonical: string;
 }
 
 interface EvidenceRecord {
@@ -207,6 +248,15 @@ interface EvidenceRecord {
   readonly evidenceDigest: string;
   readonly joinKey: string;
   readonly contextIdentity: string;
+  readonly verification: EvidenceVerificationProvenance;
+}
+
+interface RejectedEvidenceRecord {
+  readonly evidence: EvaluatorEvidence;
+  readonly evidenceDigest: string;
+  readonly joinKey: string;
+  readonly verification: EvidenceVerificationProvenance;
+  readonly reason: string;
 }
 
 const FAILURE_SCORE = 0 as const;
@@ -245,6 +295,18 @@ function pairKey(trace: TraceEnvelope): string {
   });
 }
 
+function traceProfileKey(
+  protocolDigest: string,
+  traceId: string,
+  profileId: string,
+): string {
+  return identity("tasc/assessment-trace-profile/v2", {
+    protocolDigest,
+    traceId,
+    profileId,
+  });
+}
+
 function fingerprintTrace(trace: TraceEnvelope): string {
   return identity("tasc/trace-envelope/v2", trace);
 }
@@ -258,23 +320,15 @@ function fingerprintTrace(trace: TraceEnvelope): string {
  * The complete SHA-256 value is reduced byte-by-byte with BigInt arithmetic.
  * No rounded IEEE-754 conversion participates in membership.
  */
-export function resolveGroupSplit(
+function resolveNormalizedGroupSplit(
   protocol: ExperimentProtocol,
   groupId: string,
 ): ResolvedGroupSplit {
-  const normalizedGroupId = contractSlugSchema.parse(groupId);
-  if (
-    !Number.isSafeInteger(protocol.splitMembership.bucketCount)
-    || protocol.splitMembership.bucketCount < 2
-    || protocol.splitMembership.bucketCount > 256
-  ) {
-    throw new Error("split bucket count must be a safe integer from 2 through 256");
-  }
   const digest = domainSeparatedDigest(
     "tasc/seeded-sha256-group-bucket/v1",
     {
       algorithm: protocol.splitMembership.algorithm,
-      groupId: normalizedGroupId,
+      groupId,
       seed: protocol.splitMembership.seed,
     },
   );
@@ -295,6 +349,16 @@ export function resolveGroupSplit(
     bucket,
     split: development ? "dev" : "holdout",
   });
+}
+
+export function resolveGroupSplit(
+  protocol: ExperimentProtocol,
+  groupId: string,
+): ResolvedGroupSplit {
+  return resolveNormalizedGroupSplit(
+    normalizeExperimentProtocol(protocol),
+    contractSlugSchema.parse(groupId),
+  );
 }
 
 interface CollectionPreflight<Row> {
@@ -334,14 +398,21 @@ function snapshotCollection<Row>(
   preflight: CollectionPreflight<Row>,
 ): readonly Row[] {
   const keys = Reflect.ownKeys(preflight.input);
-  const allowedIndexes = new Set(
-    Array.from({ length: preflight.length }, (_, index) => String(index)),
-  );
+  const maximumIndexLength = preflight.length === 0
+    ? 0
+    : String(preflight.length - 1).length;
   for (const key of keys) {
     if (typeof key === "symbol") {
       throw new Error(`${preflight.label} collection cannot contain symbol properties`);
     }
-    if (key !== "length" && !allowedIndexes.has(key)) {
+    if (key === "length") continue;
+    const index = key.length <= maximumIndexLength ? Number(key) : Number.NaN;
+    if (
+      !Number.isSafeInteger(index)
+      || index < 0
+      || index >= preflight.length
+      || String(index) !== key
+    ) {
       throw new Error(`${preflight.label} collection cannot contain extra properties`);
     }
   }
@@ -371,32 +442,102 @@ function snapshotCollection<Row>(
   return Object.freeze(snapshot);
 }
 
-function assertJoinBudget(
+function checkedAdd(left: number, right: number, label: string): number {
+  if (
+    !Number.isSafeInteger(left)
+    || left < 0
+    || !Number.isSafeInteger(right)
+    || right < 0
+    || left > Number.MAX_SAFE_INTEGER - right
+  ) {
+    throw new Error(`${label} arithmetic overflow`);
+  }
+  return left + right;
+}
+
+function checkedScale(value: number, scale: number, label: string): number {
+  if (
+    !Number.isSafeInteger(value)
+    || value < 0
+    || !Number.isSafeInteger(scale)
+    || scale < 0
+    || (value !== 0 && scale > Number.MAX_SAFE_INTEGER / value)
+  ) {
+    throw new Error(`${label} arithmetic overflow`);
+  }
+  return value * scale;
+}
+
+function assertJoinLimit(value: number, limit: number, label: string): void {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`${label} must be a safe non-negative integer`);
+  }
+  if (!Number.isSafeInteger(limit) || limit < 0) {
+    throw new Error(`${label} budget must be a safe non-negative integer`);
+  }
+  if (value > limit) {
+    throw new Error(`${label} exceeds caller work budget: ${value} > ${limit}`);
+  }
+}
+
+function estimateJoinWork(
   traceRows: number,
   evidenceRows: number,
   independentGroups: number,
+  labelMemberships: number,
   budget: WorkBudget,
-): void {
-  assertWithinWorkBudget(estimateAssessmentWork({
-    candidateCount: 1,
+): Omit<AssessmentJoinWork, "sliceAggregationVisits"> {
+  assertJoinLimit(traceRows, budget.maxTraceRows, "trace rows");
+  assertJoinLimit(evidenceRows, budget.maxEvidenceRows, "evidence rows");
+  assertJoinLimit(
+    independentGroups,
+    budget.maxIndependentGroups,
+    "independent groups",
+  );
+  assertJoinLimit(0, budget.maxAssessmentWork, "join work");
+  if (!Number.isSafeInteger(labelMemberships) || labelMemberships < 0) {
+    throw new Error("label memberships must be a safe non-negative integer");
+  }
+  const hashOperations = checkedAdd(
+    checkedScale(traceRows, 6, "join hash work"),
+    checkedScale(evidenceRows, 4, "join hash work"),
+    "join hash work",
+  );
+  const diagnosticRows = checkedAdd(
+    checkedScale(traceRows, 2, "join diagnostic work"),
+    evidenceRows,
+    "join diagnostic work",
+  );
+  const outputRows = [
+    checkedScale(traceRows, 5, "join output work"),
+    checkedScale(evidenceRows, 2, "join output work"),
+    labelMemberships,
+    3,
+  ].reduce((total, value) => checkedAdd(total, value, "join output work"), 0);
+  const chargedUnits = [
     traceRows,
     evidenceRows,
-    bootstrapDraws: 0,
     independentGroups,
-  }), budget);
-
-  const nonZeroEstimate = estimateAssessmentWork({
-    candidateCount: 1,
-    traceRows: Math.max(1, traceRows),
-    evidenceRows: Math.max(1, evidenceRows),
-    bootstrapDraws: 1,
-    independentGroups: Math.max(1, independentGroups),
-  });
-  if (nonZeroEstimate.assessmentWork > budget.maxAssessmentWork) {
+    labelMemberships,
+    hashOperations,
+    diagnosticRows,
+    outputRows,
+  ].reduce((total, value) => checkedAdd(total, value, "join work"), 0);
+  if (chargedUnits > budget.maxAssessmentWork) {
     throw new Error(
-      `assessment work exceeds caller work budget: ${nonZeroEstimate.assessmentWork} > ${budget.maxAssessmentWork}`,
+      `join work exceeds caller work budget: ${chargedUnits} > ${budget.maxAssessmentWork}`,
     );
   }
+  return {
+    traceRows,
+    evidenceRows,
+    independentGroups,
+    labelMemberships,
+    hashOperations,
+    diagnosticRows,
+    outputRows,
+    chargedUnits,
+  };
 }
 
 function distinctGroupCount(
@@ -421,10 +562,28 @@ function normalizeTraces(
   inputs: readonly TraceEnvelope[],
   budget: WorkBudget,
   evidenceRows: number,
-): TraceEnvelope[] {
+): {
+  readonly traces: TraceEnvelope[];
+  readonly work: Omit<AssessmentJoinWork, "sliceAggregationVisits">;
+  readonly splitsByGroup: ReadonlyMap<string, ResolvedGroupSplit>;
+} {
   const traces = inputs.map((input) => parseTraceEnvelope(input, budget));
   const independentGroups = distinctGroupCount(traces, budget);
-  assertJoinBudget(traces.length, evidenceRows, independentGroups, budget);
+  let labelMemberships = 0;
+  for (const trace of traces) {
+    labelMemberships = checkedAdd(
+      labelMemberships,
+      trace.slices.length,
+      "label membership",
+    );
+  }
+  const work = estimateJoinWork(
+    traces.length,
+    evidenceRows,
+    independentGroups,
+    labelMemberships,
+    budget,
+  );
 
   const profileDigests = new Map(
     protocol.profiles.map((profile) => [
@@ -432,6 +591,7 @@ function normalizeTraces(
       fingerprintExecutionProfile(profile),
     ]),
   );
+  const splitsByGroup = new Map<string, ResolvedGroupSplit>();
   for (const trace of traces) {
     if (trace.studyId !== protocol.studyId) {
       throw new Error(`trace "${trace.traceId}" study identity conflicts with protocol`);
@@ -457,7 +617,11 @@ function normalizeTraces(
       throw new Error(`trace "${trace.traceId}" route-signal drift`);
     }
     if (trace.split !== "online") {
-      const resolved = resolveGroupSplit(protocol, trace.groupId);
+      let resolved = splitsByGroup.get(trace.groupId);
+      if (resolved === undefined) {
+        resolved = resolveNormalizedGroupSplit(protocol, trace.groupId);
+        splitsByGroup.set(trace.groupId, resolved);
+      }
       if (trace.split !== resolved.split) {
         throw new Error(
           `trace "${trace.traceId}" declared split disagrees with derived group split`,
@@ -465,29 +629,42 @@ function normalizeTraces(
       }
     }
   }
-  return traces;
+  return { traces, work, splitsByGroup };
 }
 
 function makeTraceRecord(
-  protocol: ExperimentProtocol,
   trace: TraceEnvelope,
+  splitsByGroup: ReadonlyMap<string, ResolvedGroupSplit>,
 ): TraceRecord {
   const split = trace.split;
   const resolved = split === "online"
     ? null
-    : resolveGroupSplit(protocol, trace.groupId);
+    : splitsByGroup.get(trace.groupId);
+  if (split !== "online" && resolved === undefined) {
+    throw new Error(`derived split is missing for group "${trace.groupId}"`);
+  }
   const traceDigest = fingerprintTrace(trace);
+  const traceJoinIdentity = traceIdentityKey(trace);
   return {
     trace,
     traceDigest,
-    traceIdentityKey: traceIdentityKey(trace),
+    traceIdentityKey: traceJoinIdentity,
+    traceProfileKey: traceProfileKey(
+      trace.protocolDigest,
+      trace.traceId,
+      trace.profileId,
+    ),
     logicalProfileKey: logicalProfileKey(trace),
+    pairKey: pairKey(trace),
     executionKey: identity("tasc/assessment-execution/v2", {
       traceDigest,
-      traceIdentityKey: traceIdentityKey(trace),
+      traceIdentityKey: traceJoinIdentity,
     }),
     split,
     splitBucket: resolved?.bucket ?? null,
+    sortedSlices: sortStrings(trace.slices),
+    workloadCanonical: canonicalJson(trace.workload),
+    routeSignalCanonical: canonicalJson(trace.routeSignal),
   };
 }
 
@@ -505,8 +682,26 @@ function groupBy<RecordType>(
   return grouped;
 }
 
-function canonicalEqual(left: unknown, right: unknown): boolean {
-  return canonicalJson(left) === canonicalJson(right);
+function stringArraysEqual(
+  left: readonly string[],
+  right: readonly string[],
+): boolean {
+  return (
+    left.length === right.length
+    && left.every((value, index) => value === right[index])
+  );
+}
+
+function terminalOutputEqual(
+  left: TraceEnvelope["terminalOutputId"],
+  right: EvaluatorEvidence["terminalOutputId"],
+): boolean {
+  return (
+    left !== null
+    && left.algorithm === right.algorithm
+    && left.keyId === right.keyId
+    && left.value === right.value
+  );
 }
 
 function retainUniqueTraceRecords(
@@ -558,7 +753,47 @@ function retainUniqueTraceRecords(
   );
 }
 
-function validatePairMetadata(records: readonly TraceRecord[]): void {
+function assertSharedTraceMetadata(
+  baselineRecord: TraceRecord,
+  record: TraceRecord,
+  scope: "paired profile executions" | "case replicates",
+): void {
+  const baseline = baselineRecord.trace;
+  const trace = record.trace;
+  if (trace.groupId !== baseline.groupId) {
+    throw new Error(`${scope} have conflicting group identity`);
+  }
+  if (trace.split !== baseline.split) {
+    throw new Error(`${scope} have conflicting split`);
+  }
+  if (
+    trace.workload.declaredTrafficWeight
+      !== baseline.workload.declaredTrafficWeight
+  ) {
+    throw new Error(`${scope} have conflicting traffic weight`);
+  }
+  if (record.workloadCanonical !== baselineRecord.workloadCanonical) {
+    throw new Error(`${scope} have conflicting workload identity`);
+  }
+  if (!stringArraysEqual(record.sortedSlices, baselineRecord.sortedSlices)) {
+    throw new Error(`${scope} have conflicting slice identity`);
+  }
+  if (record.routeSignalCanonical !== baselineRecord.routeSignalCanonical) {
+    throw new Error(`${scope} have conflicting route-signal`);
+  }
+  if (trace.policyDigest !== baseline.policyDigest) {
+    throw new Error(`${scope} have conflicting policy digest`);
+  }
+  if (
+    trace.collectionWindowId !== baseline.collectionWindowId
+    || trace.collectionWindowMembershipDigest
+      !== baseline.collectionWindowMembershipDigest
+  ) {
+    throw new Error(`${scope} have conflicting window identity`);
+  }
+}
+
+function validateTraceMetadata(records: readonly TraceRecord[]): void {
   const groupSplits = new Map<string, AssessmentSplit>();
   for (const record of records) {
     const priorSplit = groupSplits.get(record.trace.groupId);
@@ -568,41 +803,25 @@ function validatePairMetadata(records: readonly TraceRecord[]): void {
     groupSplits.set(record.trace.groupId, record.split);
   }
 
-  for (const recordsForPair of groupBy(records, ({ trace }) => pairKey(trace)).values()) {
-    const baseline = recordsForPair[0].trace;
-    const baselineSlices = sortStrings(baseline.slices);
-    for (const { trace } of recordsForPair.slice(1)) {
-      if (trace.groupId !== baseline.groupId) {
-        throw new Error("paired profile executions have conflicting group identity");
-      }
-      if (trace.split !== baseline.split) {
-        throw new Error("paired profile executions have conflicting split");
-      }
-      if (
-        trace.workload.declaredTrafficWeight
-          !== baseline.workload.declaredTrafficWeight
-      ) {
-        throw new Error("paired profile executions have conflicting traffic weight");
-      }
-      if (!canonicalEqual(trace.workload, baseline.workload)) {
-        throw new Error("paired profile executions have conflicting workload identity");
-      }
-      if (!canonicalEqual(sortStrings(trace.slices), baselineSlices)) {
-        throw new Error("paired profile executions have conflicting slice identity");
-      }
-      if (!canonicalEqual(trace.routeSignal, baseline.routeSignal)) {
-        throw new Error("paired profile executions have conflicting paired route-signal");
-      }
-      if (trace.policyDigest !== baseline.policyDigest) {
-        throw new Error("paired profile executions have conflicting policy digest");
-      }
-      if (
-        trace.collectionWindowId !== baseline.collectionWindowId
-        || trace.collectionWindowMembershipDigest
-          !== baseline.collectionWindowMembershipDigest
-      ) {
-        throw new Error("paired profile executions have conflicting window identity");
-      }
+  for (const recordsForPair of groupBy(records, ({ pairKey: key }) => key).values()) {
+    const baseline = recordsForPair[0];
+    for (let index = 1; index < recordsForPair.length; index += 1) {
+      assertSharedTraceMetadata(
+        baseline,
+        recordsForPair[index],
+        "paired profile executions",
+      );
+    }
+  }
+
+  for (const recordsForCase of groupBy(records, ({ trace }) => trace.caseId).values()) {
+    const baseline = recordsForCase[0];
+    for (let index = 1; index < recordsForCase.length; index += 1) {
+      assertSharedTraceMetadata(
+        baseline,
+        recordsForCase[index],
+        "case replicates",
+      );
     }
   }
 }
@@ -654,13 +873,56 @@ function verificationContextIdentity(
   });
 }
 
+function authenticVerificationProvenance(
+  receipt: EvaluatorEvidenceVerification,
+): EvidenceVerificationProvenance {
+  return {
+    authentic: true,
+    status: receipt.status,
+    trusted: receipt.trusted,
+    reason: receipt.reason,
+    keyId: receipt.keyId,
+    assessedAt: receipt.assessedAt,
+    assessmentContextDigest: receipt.assessmentContextDigest,
+    operatorTrustPolicySnapshotDigest:
+      receipt.operatorTrustPolicySnapshotDigest,
+    evaluatorRevocationSnapshotDigest:
+      receipt.evaluatorRevocationSnapshotDigest,
+  };
+}
+
+function inauthenticVerificationProvenance(): EvidenceVerificationProvenance {
+  return {
+    authentic: false,
+    status: "inauthentic",
+    trusted: false,
+    reason: "object was not emitted by the local evaluator verifier",
+    keyId: null,
+    assessedAt: null,
+    assessmentContextDigest: null,
+    operatorTrustPolicySnapshotDigest: null,
+    evaluatorRevocationSnapshotDigest: null,
+  };
+}
+
+function diagnosticEvidenceRow(record: EvidenceRecord): DiagnosticEvidenceRow {
+  return {
+    evidence: record.evidence,
+    evidenceDigest: record.evidenceDigest,
+    verification: record.verification,
+  };
+}
+
 function diagnosticForEvidence(
   evidence: EvaluatorEvidence | null,
   evidenceDigest: string | null,
   reason: string,
+  verification: EvidenceVerificationProvenance,
 ): EvidenceDiagnostic {
   return {
     evidenceDigest,
+    evidence,
+    verification,
     traceId: evidence?.traceId ?? null,
     profileId: evidence?.profileId ?? null,
     reason,
@@ -668,9 +930,10 @@ function diagnosticForEvidence(
 }
 
 function sortDiagnostics<T>(values: T[]): T[] {
-  return values.sort((left, right) =>
-    compareCodeUnits(canonicalJson(left), canonicalJson(right))
-  );
+  return values
+    .map((value) => ({ value, sortKey: canonicalJson(value) }))
+    .sort((left, right) => compareCodeUnits(left.sortKey, right.sortKey))
+    .map(({ value }) => value);
 }
 
 function terminalStatus(trace: TraceEnvelope): "success" | "failure" | "aborted" {
@@ -689,7 +952,7 @@ function traceLineageMatches(
     && trace.replicateId === evidence.replicateId
     && trace.profileId === evidence.profileId
     && trace.split === evidence.split
-    && canonicalEqual(trace.terminalOutputId, evidence.terminalOutputId)
+    && terminalOutputEqual(trace.terminalOutputId, evidence.terminalOutputId)
   );
 }
 
@@ -713,33 +976,37 @@ export function joinAssessmentEvidence(
   );
   const traceRows = traceCollection.length;
   const evidenceRows = evidenceCollection.length;
-  assertJoinBudget(
+  estimateJoinWork(
     traceRows,
     evidenceRows,
     traceRows === 0 ? 0 : 1,
+    0,
     workBudget,
   );
   const traceSnapshot = snapshotCollection(traceCollection);
   const verificationSnapshot = snapshotCollection(evidenceCollection);
 
-  const protocol = parseExperimentProtocol(protocolInput, workBudget);
-  const protocolDigest = fingerprintProtocol(protocol);
-  const traces = normalizeTraces(
+  const protocol = normalizeExperimentProtocol(protocolInput);
+  const protocolDigest = fingerprintNormalizedProtocol(protocol);
+  const normalizedTraces = normalizeTraces(
     protocol,
     protocolDigest,
     traceSnapshot,
     workBudget,
     evidenceRows,
   );
+  const traces = normalizedTraces.traces;
 
   const duplicateTraces: DuplicateTraceDiagnostic[] = [];
   const conflictingTraces: ConflictingTraceDiagnostic[] = [];
   const traceRecords = retainUniqueTraceRecords(
-    traces.map((trace) => makeTraceRecord(protocol, trace)),
+    traces.map((trace) =>
+      makeTraceRecord(trace, normalizedTraces.splitsByGroup)
+    ),
     duplicateTraces,
     conflictingTraces,
   );
-  validatePairMetadata(traceRecords);
+  validateTraceMetadata(traceRecords);
 
   const invalidEvidence: EvidenceDiagnostic[] = [];
   const orphanEvidence: EvidenceDiagnostic[] = [];
@@ -748,45 +1015,76 @@ export function joinAssessmentEvidence(
   const missingEvidence: MissingEvidenceDiagnostic[] = [];
   const abstainedEvidence: AbstainedEvidenceDiagnostic[] = [];
   const authenticRecords: EvidenceRecord[] = [];
+  const rejectedEvidenceRecords: RejectedEvidenceRecord[] = [];
+  const authenticContextIdentities: string[] = [];
+  const rejectEvidence = (
+    evidence: EvaluatorEvidence | null,
+    evidenceDigest: string | null,
+    reason: string,
+    verification: EvidenceVerificationProvenance,
+  ): void => {
+    invalidEvidence.push(diagnosticForEvidence(
+      evidence,
+      evidenceDigest,
+      reason,
+      verification,
+    ));
+    if (evidence !== null && evidenceDigest !== null) {
+      rejectedEvidenceRecords.push({
+        evidence,
+        evidenceDigest,
+        joinKey: evidenceJoinKey(evidence),
+        verification,
+        reason,
+      });
+    }
+  };
 
   for (const input of verificationSnapshot) {
     if (!isAuthenticEvaluatorEvidenceVerification(input)) {
       const normalized = normalizeInauthenticEvidence(input);
-      invalidEvidence.push(diagnosticForEvidence(
+      rejectEvidence(
         normalized.evidence,
         normalized.evidenceDigest,
         "inauthentic-verification-receipt",
-      ));
+        inauthenticVerificationProvenance(),
+      );
       continue;
     }
-    const evidence = normalizeEvaluatorEvidence(input.evidence);
+    const verification = authenticVerificationProvenance(input);
+    const contextIdentity = verificationContextIdentity(input);
+    authenticContextIdentities.push(contextIdentity);
+    const evidence = input.evidence;
     const evidenceDigest = fingerprintNormalizedEvaluatorEvidence(evidence);
     if (
       input.evidenceDigest !== evidenceDigest
       || input.keyId !== evidence.keyId
       || input.trusted !== (input.status === "trusted")
     ) {
-      invalidEvidence.push(diagnosticForEvidence(
+      rejectEvidence(
         evidence,
         evidenceDigest,
         "verification-receipt-integrity-conflict",
-      ));
+        verification,
+      );
       continue;
     }
     if (!input.trusted) {
-      invalidEvidence.push(diagnosticForEvidence(
+      rejectEvidence(
         evidence,
         evidenceDigest,
         `verification-${input.status}`,
-      ));
+        verification,
+      );
       continue;
     }
     if (!protocol.evaluator.requiredTrustedKeyIds.includes(evidence.keyId)) {
-      invalidEvidence.push(diagnosticForEvidence(
+      rejectEvidence(
         evidence,
         evidenceDigest,
         "evaluator-key-not-pinned-by-protocol",
-      ));
+        verification,
+      );
       continue;
     }
     if (
@@ -800,32 +1098,35 @@ export function joinAssessmentEvidence(
       || evidence.evaluator.producer.producerId !== protocol.evaluator.producerId
       || evidence.evaluator.producer.version !== protocol.evaluator.producerVersion
     ) {
-      invalidEvidence.push(diagnosticForEvidence(
+      rejectEvidence(
         evidence,
         evidenceDigest,
         "evaluator-or-rubric-or-calibration-or-producer-drift",
-      ));
+        verification,
+      );
       continue;
     }
     authenticRecords.push({
       evidence,
       evidenceDigest,
       joinKey: evidenceJoinKey(evidence),
-      contextIdentity: verificationContextIdentity(input),
+      contextIdentity,
+      verification,
     });
   }
 
   const contextIdentities = sortStrings([
-    ...new Set(authenticRecords.map(({ contextIdentity }) => contextIdentity)),
+    ...new Set(authenticContextIdentities),
   ]);
   let identityStableRecords = authenticRecords;
   if (contextIdentities.length > 1) {
     for (const record of authenticRecords) {
-      invalidEvidence.push(diagnosticForEvidence(
+      rejectEvidence(
         record.evidence,
         record.evidenceDigest,
         "verification-context-drift",
-      ));
+        record.verification,
+      );
     }
     identityStableRecords = [];
   }
@@ -840,6 +1141,7 @@ export function joinAssessmentEvidence(
         joinKey: records[0].joinKey,
         evidenceDigest: digest,
         occurrences: records.length,
+        row: diagnosticEvidenceRow(records[0]),
       });
       uniqueEvidence.push(records[0]);
       continue;
@@ -853,6 +1155,11 @@ export function joinAssessmentEvidence(
       conflictingEvidence.push({
         joinKey: key,
         evidenceDigests: sortStrings(records.map(({ evidenceDigest }) => evidenceDigest)),
+        rows: records
+          .map(diagnosticEvidenceRow)
+          .sort((left, right) =>
+            compareEvidenceIdentities(left.evidenceDigest, right.evidenceDigest)
+          ),
         reason: "multiple-distinct-evidence-rows-for-join-key",
       });
       continue;
@@ -863,44 +1170,54 @@ export function joinAssessmentEvidence(
   const tracesByIdentity = new Map(
     traceRecords.map((record) => [record.traceIdentityKey, record]),
   );
-  const tracesByTraceAndProfile = groupBy(
-    traceRecords,
-    ({ trace }) => identity("tasc/assessment-trace-profile/v2", {
-      protocolDigest: trace.protocolDigest,
-      traceId: trace.traceId,
-      profileId: trace.profileId,
-    }),
-  );
+  const traceProfileKeys = new Set<string>();
+  const failedTraceProfileKeys = new Set<string>();
+  for (const record of traceRecords) {
+    traceProfileKeys.add(record.traceProfileKey);
+    if (terminalStatus(record.trace) !== "success") {
+      failedTraceProfileKeys.add(record.traceProfileKey);
+    }
+  }
   const evidenceByExecution = new Map<string, EvidenceRecord>();
   const invalidOutcomeByExecution = new Map<string, {
     kind: "missing-evidence" | "invalid-evidence" | "abstained";
     reasonCode: string;
     evidence: EvaluatorEvidence;
     evidenceDigest: string;
+    verification: EvidenceVerificationProvenance;
   }>();
+  const rejectedEvidenceByExecution = new Map<string, RejectedEvidenceRecord>();
+  for (const rejected of sortDiagnostics(rejectedEvidenceRecords)) {
+    const trace = tracesByIdentity.get(rejected.joinKey);
+    if (
+      trace !== undefined
+      && traceLineageMatches(trace.trace, rejected.evidence)
+      && !rejectedEvidenceByExecution.has(trace.executionKey)
+    ) {
+      rejectedEvidenceByExecution.set(trace.executionKey, rejected);
+    }
+  }
 
   for (const record of nonConflictingEvidence.sort((left, right) =>
     compareEvidenceIdentities(left.evidenceDigest, right.evidenceDigest)
   )) {
     const trace = tracesByIdentity.get(record.joinKey);
     if (trace === undefined) {
-      const traceProfileKey = identity("tasc/assessment-trace-profile/v2", {
-        protocolDigest: record.evidence.protocolDigest,
-        traceId: record.evidence.traceId,
-        profileId: record.evidence.profileId,
-      });
-      const partialMatches = tracesByTraceAndProfile.get(traceProfileKey) ?? [];
-      const reason = partialMatches.some(
-          ({ trace: partial }) => terminalStatus(partial) !== "success",
-        )
+      const partialKey = traceProfileKey(
+        record.evidence.protocolDigest,
+        record.evidence.traceId,
+        record.evidence.profileId,
+      );
+      const reason = failedTraceProfileKeys.has(partialKey)
         ? "evidence-for-failed-execution"
-        : partialMatches.length > 0
+        : traceProfileKeys.has(partialKey)
         ? "terminal-output-mismatch"
         : "no-matching-trace";
       orphanEvidence.push(diagnosticForEvidence(
         record.evidence,
         record.evidenceDigest,
         reason,
+        record.verification,
       ));
       continue;
     }
@@ -908,6 +1225,7 @@ export function joinAssessmentEvidence(
       conflictingEvidence.push({
         joinKey: record.joinKey,
         evidenceDigests: [record.evidenceDigest],
+        rows: [diagnosticEvidenceRow(record)],
         reason: "trace-evidence-lineage-conflict",
       });
       continue;
@@ -926,6 +1244,7 @@ export function joinAssessmentEvidence(
       reasonCode: record.evidence.outcome.reasonCode,
       evidence: record.evidence,
       evidenceDigest: record.evidenceDigest,
+      verification: record.verification,
     });
     if (outcomeKind === "abstained") {
       abstainedEvidence.push({
@@ -946,10 +1265,14 @@ export function joinAssessmentEvidence(
         record.evidence,
         record.evidenceDigest,
         `evaluator-declared-${record.evidence.outcome.reasonCode}`,
+        record.verification,
       ));
     }
   }
 
+  const conflictingJoinKeys = new Set(
+    conflictingEvidence.map(({ joinKey }) => joinKey),
+  );
   const executions: AssessmentExecutionRow[] = [];
   for (const record of traceRecords) {
     const status = terminalStatus(record.trace);
@@ -970,6 +1293,8 @@ export function joinAssessmentEvidence(
           range: scored.evidence.outcome.range,
           evidenceDigest: scored.evidenceDigest,
           evidence: scored.evidence,
+          verification: scored.verification,
+          evidenceAccepted: true,
         };
       } else if (nonScored !== undefined) {
         outcome = {
@@ -977,32 +1302,45 @@ export function joinAssessmentEvidence(
           reasonCode: nonScored.reasonCode,
           evidenceDigest: nonScored.evidenceDigest,
           evidence: nonScored.evidence,
+          verification: nonScored.verification,
+          evidenceAccepted: true,
         };
       } else {
-        const hasConflict = conflictingEvidence.some(
-          ({ joinKey: key }) => key === record.traceIdentityKey,
-        );
-        const hasDuplicate = duplicateEvidence.some(
-          ({ joinKey: key }) => key === record.traceIdentityKey,
-        );
-        outcome = {
-          kind: hasConflict || hasDuplicate
-            ? "invalid-evidence"
-            : "missing-evidence",
-          reasonCode: hasConflict
-            ? "conflicting-evidence"
-            : hasDuplicate
-            ? "duplicate-evidence"
-            : "successful-execution-without-trusted-evidence",
-          evidenceDigest: null,
-          evidence: null,
-        };
-        missingEvidence.push({
-          executionKey: record.executionKey,
-          traceId: record.trace.traceId,
-          profileId: record.trace.profileId,
-          reason: outcome.reasonCode,
-        });
+        const rejected = rejectedEvidenceByExecution.get(record.executionKey);
+        if (rejected !== undefined) {
+          outcome = {
+            kind: "invalid-evidence",
+            reasonCode: rejected.reason,
+            evidenceDigest: rejected.evidenceDigest,
+            evidence: rejected.evidence,
+            verification: rejected.verification,
+            evidenceAccepted: false,
+          };
+        } else if (conflictingJoinKeys.has(record.traceIdentityKey)) {
+          outcome = {
+            kind: "invalid-evidence",
+            reasonCode: "conflicting-evidence",
+            evidenceDigest: null,
+            evidence: null,
+            verification: null,
+            evidenceAccepted: false,
+          };
+        } else {
+          outcome = {
+            kind: "missing-evidence",
+            reasonCode: "successful-execution-without-trusted-evidence",
+            evidenceDigest: null,
+            evidence: null,
+            verification: null,
+            evidenceAccepted: false,
+          };
+          missingEvidence.push({
+            executionKey: record.executionKey,
+            traceId: record.trace.traceId,
+            profileId: record.trace.profileId,
+            reason: outcome.reasonCode,
+          });
+        }
       }
     }
     executions.push({
@@ -1029,12 +1367,13 @@ export function joinAssessmentEvidence(
   ]);
   const missingProfileExecutions: MissingProfileDiagnostic[] = [];
   const pairs: AssessmentPair[] = [];
-  const pairGroups = [...groupBy(traceRecords, ({ trace }) => pairKey(trace)).values()]
+  const pairGroups = [...groupBy(traceRecords, ({ pairKey: key }) => key).values()]
     .sort((left, right) =>
-      compareEvidenceIdentities(pairKey(left[0].trace), pairKey(right[0].trace))
+      compareEvidenceIdentities(left[0].pairKey, right[0].pairKey)
     );
   for (const records of pairGroups) {
-    const baseline = records[0].trace;
+    const baselineRecord = records[0];
+    const baseline = baselineRecord.trace;
     const present = new Set(records.map(({ trace }) => trace.profileId));
     const missing = requiredProfileIds.filter((profileId) => !present.has(profileId));
     if (missing.length > 0) {
@@ -1046,60 +1385,86 @@ export function joinAssessmentEvidence(
       continue;
     }
     pairs.push({
-      pairKey: pairKey(baseline),
+      pairKey: baselineRecord.pairKey,
       caseId: baseline.caseId,
       replicateId: baseline.replicateId,
       groupId: baseline.groupId,
       split: baseline.split,
       declaredTrafficWeight: baseline.workload.declaredTrafficWeight,
-      slices: sortStrings(baseline.slices),
+      slices: baselineRecord.sortedSlices,
       profileIds: requiredProfileIds,
       executionKeys: sortStrings(records.map(({ executionKey }) => executionKey)),
     });
   }
 
   const logicalUnits = pairGroups.map((records) => records[0].trace);
-  const trafficMass = logicalUnits.reduce(
+  const caseUnits = [...groupBy(logicalUnits, ({ caseId }) => caseId).values()]
+    .map((records) => records[0]);
+  const trafficMass = caseUnits.reduce(
     (total, trace) => total + trace.workload.declaredTrafficWeight,
     0,
   );
   if (!Number.isFinite(trafficMass)) {
     throw new Error("observed traffic mass exceeds the finite numeric range");
   }
-  const cases = new Set(logicalUnits.map(({ caseId }) => caseId));
-  const groups = new Set(logicalUnits.map(({ groupId }) => groupId));
-  const splits = sortStrings([
-    ...new Set(logicalUnits.map(({ split }) => split)),
-  ] as string[]).map((splitValue) => {
-    const split = splitValue as AssessmentSplit;
-    const members = logicalUnits.filter((trace) => trace.split === split);
-    const mass = members.reduce(
-      (total, trace) => total + trace.workload.declaredTrafficWeight,
-      0,
-    );
-    if (!Number.isFinite(mass)) {
+  const groups = new Set(caseUnits.map(({ groupId }) => groupId));
+  const splitAccumulators = new Map<AssessmentSplit, {
+    caseReplicates: number;
+    groups: Set<string>;
+    observedTrafficMass: number;
+  }>();
+  const sliceAccumulators = new Map<string, {
+    caseReplicates: number;
+    groups: Set<string>;
+  }>();
+  let sliceAggregationVisits = 0;
+  for (const trace of logicalUnits) {
+    const split = splitAccumulators.get(trace.split) ?? {
+      caseReplicates: 0,
+      groups: new Set<string>(),
+      observedTrafficMass: 0,
+    };
+    split.caseReplicates += 1;
+    split.groups.add(trace.groupId);
+    splitAccumulators.set(trace.split, split);
+    for (const sliceId of trace.slices) {
+      sliceAggregationVisits = checkedAdd(
+        sliceAggregationVisits,
+        1,
+        "slice aggregation visit",
+      );
+      const slice = sliceAccumulators.get(sliceId) ?? {
+        caseReplicates: 0,
+        groups: new Set<string>(),
+      };
+      slice.caseReplicates += 1;
+      slice.groups.add(trace.groupId);
+      sliceAccumulators.set(sliceId, slice);
+    }
+  }
+  for (const trace of caseUnits) {
+    const split = splitAccumulators.get(trace.split);
+    if (split === undefined) throw new Error("case split accumulator is missing");
+    split.observedTrafficMass += trace.workload.declaredTrafficWeight;
+    if (!Number.isFinite(split.observedTrafficMass)) {
       throw new Error("split traffic mass exceeds the finite numeric range");
     }
-    return {
+  }
+  const splits = [...splitAccumulators.entries()]
+    .sort(([left], [right]) => compareCodeUnits(left, right))
+    .map(([split, accumulator]) => ({
       split,
-      caseReplicates: members.length,
-      groups: new Set(members.map(({ groupId }) => groupId)).size,
-      observedTrafficMass: mass,
-    };
-  });
-  const sliceIds = sortStrings([
-    ...new Set(logicalUnits.flatMap(({ slices }) => slices)),
-  ]);
-  const slices = sliceIds.map((sliceId) => {
-    const members = logicalUnits.filter(({ slices: labels }) =>
-      labels.includes(sliceId)
-    );
-    return {
+      caseReplicates: accumulator.caseReplicates,
+      groups: accumulator.groups.size,
+      observedTrafficMass: accumulator.observedTrafficMass,
+    }));
+  const slices = [...sliceAccumulators.entries()]
+    .sort(([left], [right]) => compareCodeUnits(left, right))
+    .map(([sliceId, accumulator]) => ({
       sliceId,
-      caseReplicates: members.length,
-      groups: new Set(members.map(({ groupId }) => groupId)).size,
-    };
-  });
+      caseReplicates: accumulator.caseReplicates,
+      groups: accumulator.groups.size,
+    }));
   const diagnostics = {
     missingEvidence: sortDiagnostics(missingEvidence),
     invalidEvidence: sortDiagnostics(invalidEvidence),
@@ -1141,16 +1506,22 @@ export function joinAssessmentEvidence(
     verificationContextIdentities: contextIdentities,
     executions,
     pairs,
+    work: {
+      ...normalizedTraces.work,
+      sliceAggregationVisits,
+    },
     counts: {
       traceRows,
       acceptedTraceRows: traceRecords.length,
       evidenceRows,
-      matchedRows: executions.filter(({ outcome }) => outcome.evidence !== null).length,
+      matchedRows: executions.filter(({ outcome }) =>
+        "evidenceAccepted" in outcome && outcome.evidenceAccepted
+      ).length,
       scoredRows: executions.filter(({ outcome }) =>
         outcome.kind === "scored"
       ).length,
       pairedCaseReplicates: pairs.length,
-      cases: cases.size,
+      cases: caseUnits.length,
       caseReplicates: logicalUnits.length,
       groups: groups.size,
       observedTrafficMass: trafficMass,
