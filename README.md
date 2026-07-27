@@ -29,9 +29,15 @@ request → fast setup → routine → return fast result
 The hard part is showing that the routing rule saves money without hiding a
 quality regression, failed request, or slow tail. TASC is that evidence layer:
 
-```text
-measure both setups → choose on development data → freeze the rule
-→ verify on untouched test data → write a decision report
+```mermaid
+flowchart LR
+    A["Paired traces<br/>fast + expert setup"] --> B["Split by group<br/>dev / holdout"]
+    B --> C["Select routing rule<br/>on development data"]
+    C --> D["Freeze the rule"]
+    D --> E["Verify unchanged rule<br/>on untouched holdout"]
+    E --> F{"All gates pass?<br/>quality, slices, latency,<br/>throughput, reliability"}
+    F -->|yes| G["GO<br/>decision report"]
+    F -->|no| H["NO-GO<br/>failing gate named"]
 ```
 
 TASC is the bridge between a benchmark table and a serving change. It answers
