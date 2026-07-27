@@ -63,10 +63,13 @@ export interface CandidateEvaluation {
   evaluation: PolicyEvaluation;
 }
 
-export interface AttestationOptions {
-  attestationKey?: string;
+export interface EvaluationOptions {
   /** Optional tighter caller limit; omitted callers receive a bounded safe default. */
   workBudget?: WorkBudget;
+}
+
+export interface AttestationOptions extends EvaluationOptions {
+  attestationKey?: string;
 }
 
 /** Bounded defaults preserve the synthetic CLI/demo call shape without allowing unbounded work. */
@@ -162,14 +165,37 @@ function observationRowCount(measurements: MeasurementSet): number {
 /** Enforce work limits before candidate arrays or bootstrap result arrays can be allocated. */
 function assertAssessmentWorkBudget(spec: InferenceSpec, measurements: MeasurementSet, budget: WorkBudget): void {
   const rows = observationRowCount(measurements);
-  const independentGroups = new Set(measurements.cases.map((measurementCase) => measurementCase.groupId)).size;
-  const estimate = estimateAssessmentWork({
+  const input = {
     candidateCount: candidatePolicyCount(spec),
     traceRows: rows,
     evidenceRows: rows,
     bootstrapDraws: spec.bootstrap.iterations,
-    independentGroups,
-  });
+  };
+  assertWithinWorkBudget(estimateAssessmentWork({ ...input, independentGroups: 0 }), budget);
+  const groups = new Set<string>();
+  for (const measurementCase of measurements.cases) groups.add(measurementCase.groupId);
+  const estimate = estimateAssessmentWork({ ...input, independentGroups: groups.size });
+  assertWithinWorkBudget(estimate, budget);
+}
+
+/** Bound the public row-level evaluator before its bootstrap result array is allocated. */
+function assertDirectEvaluationWorkBudget(
+  candidateRows: readonly ReplayedRow[],
+  championRows: readonly ReplayedRow[],
+  spec: InferenceSpec,
+  budget: WorkBudget,
+): void {
+  const input = {
+    candidateCount: 1,
+    traceRows: candidateRows.length,
+    evidenceRows: championRows.length,
+    bootstrapDraws: spec.bootstrap.iterations,
+  };
+  assertWithinWorkBudget(estimateAssessmentWork({ ...input, independentGroups: 0 }), budget);
+  const groups = new Set<string>();
+  for (const row of candidateRows) groups.add(row.groupId);
+  for (const row of championRows) groups.add(row.groupId);
+  const estimate = estimateAssessmentWork({ ...input, independentGroups: groups.size });
   assertWithinWorkBudget(estimate, budget);
 }
 
@@ -371,7 +397,14 @@ export function evaluatePolicy(
   candidateRows: ReplayedRow[],
   championRows: ReplayedRow[],
   spec: InferenceSpec,
+  options: EvaluationOptions = {},
 ): PolicyEvaluation {
+  assertDirectEvaluationWorkBudget(
+    candidateRows,
+    championRows,
+    spec,
+    options.workBudget ?? DEFAULT_ASSESSMENT_WORK_BUDGET,
+  );
   return evaluatePolicyInternal(candidateRows, championRows, spec, true);
 }
 
@@ -438,7 +471,7 @@ export function nominatePolicy(
   const championRows = replayPolicy(champion, spec, dev);
   const evaluations = generateCandidatePolicies(spec).map((policy): CandidateEvaluation => ({
     policy,
-    evaluation: evaluatePolicy(replayPolicy(policy, spec, dev), championRows, spec),
+    evaluation: evaluatePolicy(replayPolicy(policy, spec, dev), championRows, spec, options),
   }));
   const passers = evaluations.filter(({ evaluation }) => evaluation.passed);
   const frontierEntries = passers.filter((candidate) => (

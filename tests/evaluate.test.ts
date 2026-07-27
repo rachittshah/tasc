@@ -165,6 +165,23 @@ describe("TASC policy metrics", () => {
 });
 
 describe("TASC hard gates", () => {
+  it("bounds direct evaluation before allocating an oversized bootstrap", () => {
+    const rows = pairedRows([[0.9], [0.9], [0.9]], [[0.9], [0.9], [0.9]]);
+    const activeSpec = spec();
+    activeSpec.bootstrap.iterations = 10_000_000;
+
+    expect(() => evaluatePolicy(rows.candidate, rows.champion, activeSpec, {
+      workBudget: {
+        maxCandidates: 1,
+        maxTraceRows: Number.MAX_SAFE_INTEGER,
+        maxEvidenceRows: Number.MAX_SAFE_INTEGER,
+        maxBootstrapDraws: 1,
+        maxIndependentGroups: Number.MAX_SAFE_INTEGER,
+        maxAssessmentWork: Number.MAX_SAFE_INTEGER,
+      },
+    })).toThrow(/bootstrap draws exceeds caller work budget/i);
+  });
+
   it("uses case-level median deltas and the preregistered deterministic bootstrap", () => {
     const rows = pairedRows(
       [[0, 1, 1], [0.7], [0.8]],
