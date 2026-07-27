@@ -273,6 +273,19 @@ describe("evidence v2 contracts", () => {
       }),
       TEST_WORK_BUDGET,
     )).toThrow(/duplicate critical slice/i);
+    expect(() => parseExperimentProtocol(
+      mutate(validProtocolInput(), (protocol) => {
+        protocol.criticalSlices = [];
+      }),
+      TEST_WORK_BUDGET,
+    )).toThrow(/critical.slice.*minimum|minimum.*critical.slice/i);
+    expect(() => parseExperimentProtocol(
+      mutate(validProtocolInput(), (protocol) => {
+        protocol.criticalSlices = [];
+        protocol.gates.minimumCriticalSliceGroups = 0;
+      }),
+      TEST_WORK_BUDGET,
+    )).not.toThrow();
   });
 
   it.each([
@@ -299,6 +312,21 @@ describe("evidence v2 contracts", () => {
       ...TEST_WORK_BUDGET,
       maxBootstrapDraws: 999,
     })).toThrow(/bootstrap.*work budget/i);
+    expect(() => parseExperimentProtocol(validProtocolInput(), {
+      ...TEST_WORK_BUDGET,
+      maxIndependentGroups: 9,
+    })).toThrow(/independent group.*work budget/i);
+    expect(() => parseExperimentProtocol(validProtocolInput(), {
+      ...TEST_WORK_BUDGET,
+      maxAssessmentWork: 79_999,
+    })).toThrow(/assessment work.*work budget/i);
+    expect(() => parseExperimentProtocol(
+      mutate(validProtocolInput(), (protocol) => {
+        protocol.gates.minimumIndependentGroups = 2;
+        protocol.gates.minimumCriticalSliceGroups = 12;
+      }),
+      { ...TEST_WORK_BUDGET, maxIndependentGroups: 11 },
+    )).toThrow(/independent group.*work budget/i);
     expect(() => parseTraceEnvelope(validTraceInput(), {
       ...TEST_WORK_BUDGET,
       maxTraceRows: 0,
@@ -324,5 +352,76 @@ describe("evidence v2 contracts", () => {
     }
     expect(() => parseExperimentProtocol(new ProtocolObject(), TEST_WORK_BUDGET))
       .toThrow(/plain JSON object/i);
+  });
+
+  it("snapshots data properties once and rejects accessors without invoking them", () => {
+    let getterCalls = 0;
+    const accessor = validProtocolInput() as Record<string, unknown>;
+    Object.defineProperty(accessor, "owner", {
+      enumerable: true,
+      get() {
+        getterCalls += 1;
+        return "inference-platform";
+      },
+    });
+    expect(() => parseExperimentProtocol(accessor, TEST_WORK_BUDGET))
+      .toThrow(/accessor.*not allowed|data propert/i);
+    expect(getterCalls).toBe(0);
+
+    let propertyReads = 0;
+    const descriptorReads = new Map<PropertyKey, number>();
+    const proxy = new Proxy(validProtocolInput(), {
+      get() {
+        propertyReads += 1;
+        throw new Error("caller object was read after snapshot");
+      },
+      getOwnPropertyDescriptor(target, property) {
+        descriptorReads.set(property, (descriptorReads.get(property) ?? 0) + 1);
+        return Reflect.getOwnPropertyDescriptor(target, property);
+      },
+    });
+    expect(() => parseExperimentProtocol(proxy, TEST_WORK_BUDGET)).not.toThrow();
+    expect(propertyReads).toBe(0);
+    expect([...descriptorReads.values()].every((count) => count === 1)).toBe(true);
+  });
+
+  it("keeps provider metrics operational and rejects obvious credential markers in trace identity text", () => {
+    for (const reservedName of [
+      "evaluator-score",
+      "judge.reward",
+      "quality",
+      "reward",
+      "task-score",
+      "task_score",
+    ]) {
+      expect(() => parseTraceEnvelope(
+        mutate(validTraceInput(), (trace) => {
+          trace.attempts[0].providerReported.metrics[0].name = reservedName;
+        }),
+        TEST_WORK_BUDGET,
+      )).toThrow(/reserved.*metric|metric.*reserved/i);
+    }
+
+    for (const credentialText of [
+      "Bearer abc.def.ghi",
+      "api_key=topsecret",
+      "authorization: Basic abc123",
+      "password=hunter2",
+      "sk-1234567890abcdef",
+    ]) {
+      expect(() => parseTraceEnvelope(
+        mutate(validTraceInput(), (trace) => {
+          trace.attempts[0].requestedModel.id = credentialText;
+        }),
+        TEST_WORK_BUDGET,
+      )).toThrow(/credential|secret/i);
+    }
+
+    expect(() => parseTraceEnvelope(
+      mutate(validTraceInput(), (trace) => {
+        trace.routeSignal.version = "authorization: Basic abc123";
+      }),
+      TEST_WORK_BUDGET,
+    )).toThrow(/credential|secret/i);
   });
 });

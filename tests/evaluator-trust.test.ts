@@ -6,7 +6,10 @@ import {
   verifyEvaluatorEvidence,
 } from "../src/evaluator-trust.js";
 import { parseAssessmentContext } from "../src/assessment-context.js";
-import { parseEvaluatorEvidence } from "../src/evidence.js";
+import {
+  parseEvaluatorEvidence,
+  parseExperimentProtocol,
+} from "../src/evidence.js";
 import {
   TEST_WORK_BUDGET,
   digest,
@@ -16,6 +19,7 @@ import {
   unsignedEvaluatorEvidence,
   validAssessmentContextInput,
   validEvaluatorEvidenceInput,
+  validProtocolInput,
 } from "./fixtures/evidence.js";
 
 describe("external evaluator evidence trust", () => {
@@ -47,7 +51,7 @@ describe("external evaluator evidence trust", () => {
     }
   });
 
-  it("signs every identity, lineage, outcome, score, source, and production-time field", () => {
+  it("signs every mutable identity, lineage, scored outcome, source, and production-time leaf", () => {
     const key = evaluatorKeyFixture();
     const snapshot = parseEvaluatorTrustSnapshot(key.trustSnapshot);
     const context = parseAssessmentContext(validAssessmentContextInput(snapshot));
@@ -69,16 +73,81 @@ describe("external evaluator evidence trust", () => {
       (evidence) => { evidence.evaluator.producer.kind = "human"; },
       (evidence) => { evidence.evaluator.producer.version = "4.2.1"; },
       (evidence) => { evidence.outcome.score = 0.91; },
+      (evidence) => { evidence.outcome.range.minimum = -1; },
       (evidence) => { evidence.outcome.range.maximum = 2; },
+      (evidence) => { evidence.outcome.subscores[0].id = "factuality"; },
       (evidence) => { evidence.outcome.subscores[0].score = 0.94; },
+      (evidence) => { evidence.outcome.subscores[0].range.minimum = -1; },
+      (evidence) => { evidence.outcome.subscores[0].range.maximum = 2; },
       (evidence) => { evidence.source.digest = digest("f"); },
+      (evidence) => {
+        evidence.source = {
+          kind: "controlled-reference",
+          storeId: "evaluator-store",
+          referenceId: "evidence-2",
+          digest: digest("e"),
+        };
+      },
+      (evidence) => {
+        evidence.outcome = {
+          kind: "abstained",
+          reasonCode: "insufficient-context",
+        };
+      },
       (evidence) => { evidence.producedAt = "2026-07-21T12:00:00.001Z"; },
       (evidence) => { evidence.keyId = "evaluator-key-2"; },
     ];
 
     for (const change of mutations) {
       const tampered = parseEvaluatorEvidence(mutate(signed, change), TEST_WORK_BUDGET);
-      expect(verifyEvaluatorEvidence(tampered, snapshot, context).status).not.toBe("trusted");
+      expect(verifyEvaluatorEvidence(tampered, snapshot, context).status)
+        .toBe("invalid-signature");
+    }
+  });
+
+  it("signs non-scored outcome reasons and every controlled-source leaf", () => {
+    const key = evaluatorKeyFixture();
+    const snapshot = parseEvaluatorTrustSnapshot(key.trustSnapshot);
+    const context = parseAssessmentContext(validAssessmentContextInput(snapshot));
+
+    for (const kind of ["missing", "invalid", "abstained"] as const) {
+      const signed = signEvaluatorEvidence(key.privateKey, {
+        ...unsignedEvaluatorEvidence(),
+        outcome: { kind, reasonCode: "original-reason" },
+      });
+      const original = parseEvaluatorEvidence(signed, TEST_WORK_BUDGET);
+      expect(verifyEvaluatorEvidence(original, snapshot, context).status).toBe("trusted");
+      const tampered = parseEvaluatorEvidence(
+        mutate(signed, (evidence: any) => {
+          evidence.outcome.reasonCode = "changed-reason";
+        }),
+        TEST_WORK_BUDGET,
+      );
+      expect(verifyEvaluatorEvidence(tampered, snapshot, context).status)
+        .toBe("invalid-signature");
+    }
+
+    const controlled = signEvaluatorEvidence(key.privateKey, {
+      ...unsignedEvaluatorEvidence(),
+      source: {
+        kind: "controlled-reference",
+        storeId: "evaluator-store",
+        referenceId: "evidence-1",
+        digest: digest("e"),
+      },
+    });
+    const originalControlled = parseEvaluatorEvidence(controlled, TEST_WORK_BUDGET);
+    expect(verifyEvaluatorEvidence(originalControlled, snapshot, context).status)
+      .toBe("trusted");
+    for (const change of [
+      (evidence: any) => { evidence.source.storeId = "other-store"; },
+      (evidence: any) => { evidence.source.referenceId = "evidence-2"; },
+      (evidence: any) => { evidence.source.digest = digest("f"); },
+      (evidence: any) => { delete evidence.source.digest; },
+    ]) {
+      const tampered = parseEvaluatorEvidence(mutate(controlled, change), TEST_WORK_BUDGET);
+      expect(verifyEvaluatorEvidence(tampered, snapshot, context).status)
+        .toBe("invalid-signature");
     }
   });
 
@@ -157,6 +226,97 @@ describe("external evaluator evidence trust", () => {
     );
     expect(verifyWith(key.trustSnapshot, unauthorized).status).toBe("unauthorized-evidence");
     expect(baseSnapshot.keys[0].purpose).toBe("evaluator-evidence");
+  });
+
+  it("checks a known-key signature before interpreting signed freshness or evaluator metadata", () => {
+    const key = evaluatorKeyFixture();
+    const snapshotInput = mutate(key.trustSnapshot, (snapshot) => {
+      snapshot.revocations.push({
+        keyId: "evaluator-key-1",
+        revokedAt: "2026-07-22T00:00:00.000Z",
+        reasonCode: "operator-revocation",
+      });
+    });
+    const snapshot = parseEvaluatorTrustSnapshot(snapshotInput);
+    const context = parseAssessmentContext(validAssessmentContextInput(snapshot));
+    const signed = validEvaluatorEvidenceInput(key.privateKey);
+
+    for (const change of [
+      (evidence: any) => { evidence.producedAt = "2026-08-30T00:00:00.000Z"; },
+      (evidence: any) => { evidence.evaluator.rubricVersion = "rubric-6"; },
+      (evidence: any) => { evidence.outcome.score = 0.91; },
+    ]) {
+      const evidence = parseEvaluatorEvidence(mutate(signed, change), TEST_WORK_BUDGET);
+      expect(verifyEvaluatorEvidence(evidence, snapshot, context).status)
+        .toBe("invalid-signature");
+    }
+  });
+
+  it("normalizes verifier inputs once and only returns immutable local evidence", () => {
+    const key = evaluatorKeyFixture();
+    const rawEvidence = validEvaluatorEvidenceInput(key.privateKey);
+    const rawContext = validAssessmentContextInput(key.trustSnapshot);
+    let propertyReads = 0;
+    const noGet = <T extends object>(value: T): T => new Proxy(value, {
+      get() {
+        propertyReads += 1;
+        throw new Error("verifier re-read a caller object");
+      },
+    });
+
+    const verified = verifyEvaluatorEvidence(
+      noGet(rawEvidence) as never,
+      noGet(key.trustSnapshot) as never,
+      noGet(rawContext) as never,
+    );
+    expect(verified.status).toBe("trusted");
+    expect(verified.evidence).not.toBe(rawEvidence);
+    expect(Object.isFrozen(verified.evidence)).toBe(true);
+    expect(propertyReads).toBe(0);
+  });
+
+  it("rejects duplicate key material and non-canonical Ed25519 SPKI encodings", () => {
+    const key = evaluatorKeyFixture();
+    const duplicate = mutate(key.trustSnapshot, (snapshot) => {
+      snapshot.keys[1].publicKeySpki = snapshot.keys[0].publicKeySpki;
+    });
+    expect(() => parseEvaluatorTrustSnapshot(duplicate))
+      .toThrow(/duplicate.*public key|public key.*duplicate/i);
+
+    const nonCanonical = mutate(key.trustSnapshot, (snapshot) => {
+      const canonical = Buffer.from(snapshot.keys[0].publicKeySpki, "base64url");
+      snapshot.keys[0].publicKeySpki = Buffer.concat([
+        canonical,
+        Buffer.from([0]),
+      ]).toString("base64url");
+    });
+    expect(() => parseEvaluatorTrustSnapshot(nonCanonical))
+      .toThrow(/canonical.*Ed25519|Ed25519.*canonical/i);
+  });
+
+  it("uses one rubric identity contract across protocols, evidence, and trust authorization", () => {
+    const key = evaluatorKeyFixture();
+    const rubricVersion = "Rubric v4 / strict";
+    const trust = mutate(key.trustSnapshot, (snapshot) => {
+      snapshot.keys[0].authorizedRubricVersions = [rubricVersion];
+    });
+    const evidence = signEvaluatorEvidence(key.privateKey, {
+      ...unsignedEvaluatorEvidence(),
+      evaluator: {
+        ...unsignedEvaluatorEvidence().evaluator,
+        rubricVersion,
+      },
+    });
+    const protocol = mutate(validProtocolInput(), (value) => {
+      value.evaluator.rubricVersion = rubricVersion;
+    });
+
+    const parsedTrust = parseEvaluatorTrustSnapshot(trust);
+    const parsedEvidence = parseEvaluatorEvidence(evidence, TEST_WORK_BUDGET);
+    const context = parseAssessmentContext(validAssessmentContextInput(parsedTrust));
+    expect(verifyEvaluatorEvidence(parsedEvidence, parsedTrust, context).status)
+      .toBe("trusted");
+    expect(() => parseExperimentProtocol(protocol, TEST_WORK_BUDGET)).not.toThrow();
   });
 
   it("honors exact freshness, skew, revocation, and key-validity boundaries", () => {

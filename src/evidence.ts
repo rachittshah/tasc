@@ -56,6 +56,19 @@ const boundedTextSchema = z.string()
   .max(MAX_TEXT)
   .refine((value) => value.trim() === value, "must not contain leading or trailing whitespace");
 
+/** Rubric identities are shared verbatim by protocols, evidence, and operator authorization. */
+export const rubricIdentitySchema = boundedTextSchema;
+
+// Narrow defense-in-depth for identity fields, not content scanning. Task 8
+// owns byte-level secret detection, redaction, and covert-channel policy.
+const obviousCredentialPattern =
+  /(?:\b(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]+)|(?:\b(?:api[-_ ]?key|authorization|password|passwd|secret)\b\s*[:=])|(?:\bsk-[A-Za-z0-9_-]{8,}\b)/i;
+
+const persistedTraceIdentityTextSchema = boundedTextSchema.refine(
+  (value) => !obviousCredentialPattern.test(value),
+  "obvious credential-like text is not allowed in persisted trace identity fields",
+);
+
 const hexIdentitySchema = z.string()
   .length(64)
   .regex(/^[a-f0-9]{64}$/, "must contain 64 lowercase hexadecimal characters");
@@ -141,7 +154,7 @@ const onlineWindowMembershipSchema = z.object({
 
 const routeSignalDefinitionSchema = z.object({
   definitionId: contractSlugSchema,
-  version: boundedTextSchema,
+  version: persistedTraceIdentityTextSchema,
   minimum: finiteNumberSchema,
   maximum: finiteNumberSchema,
   direction: z.enum(["higher-is-more-confident", "lower-is-more-confident"]),
@@ -150,7 +163,7 @@ const routeSignalDefinitionSchema = z.object({
 
 const evaluatorDefinitionSchema = z.object({
   evaluatorId: contractSlugSchema,
-  rubricVersion: boundedTextSchema,
+  rubricVersion: rubricIdentitySchema,
   calibrationDigest: contractDigestSchema,
   producerKind: z.enum(["human", "deterministic", "external-model"]),
   requiredTrustedKeyIds: z.array(contractSlugSchema).min(1).max(32),
@@ -253,7 +266,7 @@ const workloadSchema = z.object({
 
 const routeSignalObservationSchema = z.object({
   definitionId: contractSlugSchema,
-  version: boundedTextSchema,
+  version: persistedTraceIdentityTextSchema,
   calibrationDigest: contractDigestSchema,
   value: finiteNumberSchema,
   provenance: z.object({
@@ -272,13 +285,13 @@ const observerTimingsSchema = z.object({
 }).strict();
 
 const requestedModelSchema = z.object({
-  id: boundedTextSchema,
-  revision: boundedTextSchema,
+  id: persistedTraceIdentityTextSchema,
+  revision: persistedTraceIdentityTextSchema,
 }).strict();
 
 const resolvedModelSchema = z.object({
-  id: boundedTextSchema,
-  revision: boundedTextSchema,
+  id: persistedTraceIdentityTextSchema,
+  revision: persistedTraceIdentityTextSchema,
   source: z.literal("provider-reported"),
 }).strict();
 
@@ -302,7 +315,10 @@ const providerTimingSchema = z.object({
 }).strict();
 
 const providerMetricSchema = z.object({
-  name: contractSlugSchema,
+  name: contractSlugSchema.refine(
+    (value) => !/(?:^|[._-])(?:evaluator|judge|quality|reward|score|task[._-]?score)(?:$|[._-])/.test(value),
+    "reserved evaluator/score metric namespaces are not operational provider metrics",
+  ),
   value: finiteNumberSchema,
   unit: contractSlugSchema,
   source: z.literal("provider-reported"),
@@ -384,7 +400,7 @@ export const traceEnvelopeSchema = z.object({
   routeSignal: routeSignalObservationSchema.nullable(),
   attempts: z.array(attemptSchema).min(1).max(MAX_ATTEMPTS),
   terminalOutputId: keyedIdentitySchema.nullable(),
-  collectorVersion: boundedTextSchema,
+  collectorVersion: persistedTraceIdentityTextSchema,
 }).strict();
 
 type MutableTraceEnvelope = z.infer<typeof traceEnvelopeSchema>;
@@ -398,7 +414,7 @@ const evaluatorProducerSchema = z.object({
 
 const evaluatorIdentitySchema = z.object({
   evaluatorId: contractSlugSchema,
-  rubricVersion: boundedTextSchema,
+  rubricVersion: rubricIdentitySchema,
   calibrationDigest: contractDigestSchema,
   producer: evaluatorProducerSchema,
 }).strict();
@@ -513,6 +529,14 @@ function assertProtocolSemantics(protocol: MutableExperimentProtocol): void {
   unique(protocol.evaluator.requiredTrustedKeyIds, "required trusted key id");
   unique(protocol.requiredCapabilities, "required capability");
   unique(protocol.criticalSlices, "critical slice");
+  if (
+    protocol.criticalSlices.length === 0
+    && protocol.gates.minimumCriticalSliceGroups > 0
+  ) {
+    throw new Error(
+      "critical-slice group minimum must be zero when no critical slices are declared",
+    );
+  }
   unique(protocol.endpointRequirements.map(({ endpointAlias }) => endpointAlias), "endpoint alias");
 
   const profileIds = new Set(protocol.profiles.map(({ id }) => id));
@@ -692,57 +716,108 @@ function requireWorkBudget(budget: WorkBudget | undefined): WorkBudget {
   return budget;
 }
 
-/**
- * Stop adversarial object graphs before a recursive schema walks them. Exact
- * per-field bounds remain in Zod; this is the coarse resource-safety envelope.
- */
-export function assertBoundedContractInput(input: unknown): void {
-  const pending: Array<{ value: unknown; depth: number }> = [{ value: input, depth: 0 }];
-  let visitedNodes = 0;
-  while (pending.length > 0) {
-    const current = pending.pop();
-    if (current === undefined) break;
-    visitedNodes += 1;
-    if (visitedNodes > MAX_CONTRACT_NODES) {
-      throw new Error("bounded contract input exceeds the node limit");
-    }
-    if (current.depth > MAX_CONTRACT_DEPTH) {
-      throw new Error("bounded contract input exceeds the nesting-depth limit");
-    }
-    if (typeof current.value === "string" && current.value.length > 1_024) {
-      throw new Error("bounded contract input string exceeds the coarse length limit");
-    }
-    if (Array.isArray(current.value)) {
-      if (current.value.length > MAX_BUCKETS) {
+interface SnapshotState {
+  nodes: number;
+  readonly ancestors: Set<object>;
+}
+
+function snapshotContractValue(
+  value: unknown,
+  depth: number,
+  state: SnapshotState,
+): unknown {
+  state.nodes += 1;
+  if (state.nodes > MAX_CONTRACT_NODES) {
+    throw new Error("bounded contract input exceeds the node limit");
+  }
+  if (depth > MAX_CONTRACT_DEPTH) {
+    throw new Error("bounded contract input exceeds the nesting-depth limit");
+  }
+  if (typeof value === "string" && value.length > 1_024) {
+    throw new Error("bounded contract input string exceeds the coarse length limit");
+  }
+  if (value === null || typeof value !== "object") return value;
+  if (state.ancestors.has(value)) {
+    throw new Error("bounded contract input must be an acyclic I-JSON value");
+  }
+
+  const isArray = Array.isArray(value);
+  const prototype = Object.getPrototypeOf(value);
+  if (
+    (isArray && prototype !== Array.prototype)
+    || (!isArray && prototype !== Object.prototype && prototype !== null)
+  ) {
+    throw new Error("bounded contract input requires plain JSON objects and arrays");
+  }
+
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const descriptorKeys = Reflect.ownKeys(descriptors);
+  if (descriptorKeys.some((key) => typeof key === "symbol")) {
+    throw new Error("bounded contract input cannot contain symbol properties");
+  }
+
+  state.ancestors.add(value);
+  try {
+    if (isArray) {
+      const lengthDescriptor = descriptors.length;
+      const length = lengthDescriptor?.value;
+      if (!Number.isSafeInteger(length) || length < 0 || length > MAX_BUCKETS) {
         throw new Error("bounded contract input array exceeds the coarse length limit");
       }
-      for (const value of current.value) {
-        pending.push({ value, depth: current.depth + 1 });
+      const allowedKeys = new Set<string>(["length"]);
+      const snapshot: unknown[] = new Array(length);
+      for (let index = 0; index < length; index += 1) {
+        const key = String(index);
+        allowedKeys.add(key);
+        const descriptor = descriptors[key];
+        if (descriptor === undefined) {
+          throw new Error("bounded contract input arrays cannot contain holes");
+        }
+        if (!Object.hasOwn(descriptor, "value")) {
+          throw new Error("bounded contract input accessor properties are not allowed");
+        }
+        snapshot[index] = snapshotContractValue(descriptor.value, depth + 1, state);
       }
-      continue;
+      for (const key of descriptorKeys as string[]) {
+        if (!allowedKeys.has(key)) {
+          throw new Error("bounded contract input arrays cannot contain extra properties");
+        }
+      }
+      return snapshot;
     }
-    if (current.value === null || typeof current.value !== "object") continue;
-    const prototype = Object.getPrototypeOf(current.value);
-    if (prototype !== Object.prototype && prototype !== null) {
-      throw new Error("bounded contract input requires a plain JSON object");
-    }
-    const keys = Object.keys(current.value);
-    if (
-      keys.length > MAX_CONTRACT_OBJECT_KEYS
-      || Object.getOwnPropertySymbols(current.value).length > 0
-    ) {
+
+    if (descriptorKeys.length > MAX_CONTRACT_OBJECT_KEYS) {
       throw new Error("bounded contract input object exceeds the key limit");
     }
-    for (const key of keys) {
-      pending.push({
-        value: (current.value as Record<string, unknown>)[key],
-        depth: current.depth + 1,
-      });
+    const snapshot = Object.create(null) as Record<string, unknown>;
+    for (const key of descriptorKeys as string[]) {
+      const descriptor = descriptors[key];
+      if (!Object.hasOwn(descriptor, "value")) {
+        throw new Error("bounded contract input accessor properties are not allowed");
+      }
+      if (!descriptor.enumerable) {
+        throw new Error("bounded contract input cannot contain hidden non-enumerable properties");
+      }
+      snapshot[key] = snapshotContractValue(descriptor.value, depth + 1, state);
     }
+    return snapshot;
+  } finally {
+    state.ancestors.delete(value);
   }
-  // The bounded walk makes this canonical validation safe while ensuring Zod
-  // cannot silently normalize undefined, malformed Unicode, or class instances.
-  canonicalJsonBytes(input);
+}
+
+/**
+ * Read each caller-owned data property exactly once into a bounded data-only
+ * snapshot. Canonical validation and every subsequent schema read use this
+ * immutable snapshot, never the caller's object graph.
+ */
+export function snapshotBoundedContractInput(input: unknown): unknown {
+  const snapshot = snapshotContractValue(input, 0, {
+    nodes: 0,
+    ancestors: new Set<object>(),
+  });
+  canonicalJsonBytes(snapshot);
+  return deepFreezeContract(snapshot);
 }
 
 function assertProtocolWorkBudget(protocol: MutableExperimentProtocol, budget: WorkBudget): void {
@@ -751,7 +826,10 @@ function assertProtocolWorkBudget(protocol: MutableExperimentProtocol, budget: W
     traceRows: 1,
     evidenceRows: 1,
     bootstrapDraws: protocol.bootstrap.iterations,
-    independentGroups: 1,
+    independentGroups: Math.max(
+      protocol.gates.minimumIndependentGroups,
+      protocol.gates.minimumCriticalSliceGroups,
+    ),
   }), budget);
 }
 
@@ -781,23 +859,41 @@ export function domainSeparatedDigest(domain: string, value: unknown): string {
 }
 
 export function fingerprintExecutionProfile(profile: unknown): string {
-  assertBoundedContractInput(profile);
-  const parsed = executionProfileSchema.parse(profile);
+  const snapshot = snapshotBoundedContractInput(profile);
+  const parsed = executionProfileSchema.parse(snapshot);
   return domainSeparatedDigest("tasc/execution-profile/v2", parsed);
 }
 
 export function fingerprintProtocol(protocol: unknown): string {
-  assertBoundedContractInput(protocol);
-  const parsed = experimentProtocolSchema.parse(protocol);
+  const snapshot = snapshotBoundedContractInput(protocol);
+  const parsed = experimentProtocolSchema.parse(snapshot);
   assertProtocolSemantics(parsed);
   return domainSeparatedDigest("tasc/experiment-protocol/v2", parsed);
 }
 
-export function fingerprintEvaluatorEvidence(evidence: unknown): string {
-  assertBoundedContractInput(evidence);
-  const parsed = evaluatorEvidenceSchema.parse(evidence);
+export function normalizeEvaluatorEvidence(evidence: unknown): EvaluatorEvidence {
+  const snapshot = snapshotBoundedContractInput(evidence);
+  const parsed = evaluatorEvidenceSchema.parse(snapshot);
   assertEvaluatorEvidenceSemantics(parsed);
-  return domainSeparatedDigest("tasc/evaluator-evidence/v2", parsed);
+  return deepFreezeContract(parsed);
+}
+
+export function fingerprintNormalizedEvaluatorEvidence(evidence: EvaluatorEvidence): string {
+  return domainSeparatedDigest("tasc/evaluator-evidence/v2", evidence);
+}
+
+export function fingerprintEvaluatorEvidence(evidence: unknown): string {
+  return fingerprintNormalizedEvaluatorEvidence(normalizeEvaluatorEvidence(evidence));
+}
+
+export function normalizedEvaluatorEvidenceSigningBytes(
+  evidence: EvaluatorEvidence,
+): Buffer {
+  const { signature: _signature, ...withoutSignature } = evidence;
+  return canonicalJsonBytes({
+    domain: "tasc/evaluator-evidence-signature/v2",
+    evidence: withoutSignature,
+  });
 }
 
 /**
@@ -805,19 +901,19 @@ export function fingerprintEvaluatorEvidence(evidence: unknown): string {
  * the signature algorithm and every producer-controlled value remain covered.
  */
 export function evaluatorEvidenceSigningBytes(evidence: unknown): Buffer {
-  assertBoundedContractInput(evidence);
+  const snapshot = snapshotBoundedContractInput(evidence);
   let unsigned: MutableEvaluatorEvidenceUnsigned;
   if (
-    evidence !== null
-    && typeof evidence === "object"
-    && Object.hasOwn(evidence, "signature")
+    snapshot !== null
+    && typeof snapshot === "object"
+    && Object.hasOwn(snapshot, "signature")
   ) {
-    const parsed = evaluatorEvidenceSchema.parse(evidence);
+    const parsed = evaluatorEvidenceSchema.parse(snapshot);
     assertEvaluatorEvidenceSemantics(parsed);
     const { signature: _signature, ...withoutSignature } = parsed;
     unsigned = withoutSignature;
   } else {
-    unsigned = evaluatorEvidenceUnsignedSchema.parse(evidence);
+    unsigned = evaluatorEvidenceUnsignedSchema.parse(snapshot);
     if (unsigned.outcome.kind === "scored") {
       assertScoreRange(unsigned.outcome.score, unsigned.outcome.range, "evaluator");
       unique(unsigned.outcome.subscores.map(({ id }) => id), "subscore id");
@@ -836,8 +932,8 @@ export function parseExperimentProtocol(
   input: unknown,
   workBudget: WorkBudget,
 ): ExperimentProtocol {
-  assertBoundedContractInput(input);
-  const protocol = experimentProtocolSchema.parse(input);
+  const snapshot = snapshotBoundedContractInput(input);
+  const protocol = experimentProtocolSchema.parse(snapshot);
   assertProtocolWorkBudget(protocol, requireWorkBudget(workBudget));
   assertProtocolSemantics(protocol);
   return deepFreezeContract(protocol);
@@ -848,8 +944,8 @@ export function parseTraceEnvelope(
   workBudget: WorkBudget,
 ): TraceEnvelope {
   assertSingleRowBudget("trace", requireWorkBudget(workBudget));
-  assertBoundedContractInput(input);
-  const trace = traceEnvelopeSchema.parse(input);
+  const snapshot = snapshotBoundedContractInput(input);
+  const trace = traceEnvelopeSchema.parse(snapshot);
   assertTraceSemantics(trace);
   return deepFreezeContract(trace);
 }
@@ -859,10 +955,7 @@ export function parseEvaluatorEvidence(
   workBudget: WorkBudget,
 ): EvaluatorEvidence {
   assertSingleRowBudget("evidence", requireWorkBudget(workBudget));
-  assertBoundedContractInput(input);
-  const evidence = evaluatorEvidenceSchema.parse(input);
-  assertEvaluatorEvidenceSemantics(evidence);
-  return deepFreezeContract(evidence);
+  return normalizeEvaluatorEvidence(input);
 }
 
 /** Portable ordering helper for later joins without locale-sensitive collation. */

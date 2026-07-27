@@ -34,5 +34,7 @@ describe("standalone public API", () => {
     expect(tasc).not.toHaveProperty("domainSeparatedDigest");
     expect(tasc).not.toHaveProperty("contractSlugSchema");
     expect(tasc).not.toHaveProperty("contractTimestampSchema");
+    expect(tasc).not.toHaveProperty("snapshotBoundedContractInput");
+    expect(tasc).not.toHaveProperty("normalizeEvaluatorEvidence");
   });
 });

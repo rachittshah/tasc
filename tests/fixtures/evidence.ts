@@ -284,12 +284,12 @@ export interface EvaluatorKeyFixture {
 
 export const evaluatorKeyFixture = (): EvaluatorKeyFixture => {
   const { privateKey, publicKey } = generateKeyPairSync("ed25519");
-  const publicKeySpki = publicKey.export({ type: "spki", format: "der" }).toString("base64url");
-  const key = (keyId: string) => ({
+  const alternate = generateKeyPairSync("ed25519");
+  const key = (keyId: string, keyObject: KeyObject) => ({
     keyId,
     purpose: "evaluator-evidence" as const,
     algorithm: "ed25519" as const,
-    publicKeySpki,
+    publicKeySpki: keyObject.export({ type: "spki", format: "der" }).toString("base64url"),
     evaluatorId: "support-correctness",
     producerId: "support-evaluator-service",
     authorizedRubricVersions: ["rubric-4", "rubric-5"],
@@ -306,7 +306,10 @@ export const evaluatorKeyFixture = (): EvaluatorKeyFixture => {
         maximumEvidenceAgeMs: 7 * 24 * 60 * 60 * 1_000,
         maximumFutureSkewMs: 30_000,
       },
-      keys: [key("evaluator-key-1"), key("evaluator-key-2")],
+      keys: [
+        key("evaluator-key-1", publicKey),
+        key("evaluator-key-2", alternate.publicKey),
+      ],
       revocations: [],
     },
   };

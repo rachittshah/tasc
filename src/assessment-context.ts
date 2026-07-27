@@ -2,9 +2,9 @@ import { z } from "zod";
 import {
   contractDigestSchema,
   contractTimestampSchema,
-  assertBoundedContractInput,
   deepFreezeContract,
   domainSeparatedDigest,
+  snapshotBoundedContractInput,
   type DeepReadonly,
 } from "./evidence.js";
 
@@ -39,8 +39,8 @@ function withoutContextDigest(
  * excluded and is always recomputed by `parseAssessmentContext`.
  */
 export function fingerprintAssessmentContext(input: unknown): string {
-  assertBoundedContractInput(input);
-  const parsed = assessmentContextInputSchema.parse(input);
+  const snapshot = snapshotBoundedContractInput(input);
+  const parsed = assessmentContextInputSchema.parse(snapshot);
   return domainSeparatedDigest(
     "tasc/assessment-context/v2",
     withoutContextDigest(parsed),
@@ -48,8 +48,8 @@ export function fingerprintAssessmentContext(input: unknown): string {
 }
 
 export function parseAssessmentContext(input: unknown): AssessmentContext {
-  assertBoundedContractInput(input);
-  const parsed = assessmentContextInputSchema.parse(input);
+  const snapshot = snapshotBoundedContractInput(input);
+  const parsed = assessmentContextInputSchema.parse(snapshot);
   const derivedDigest = domainSeparatedDigest(
     "tasc/assessment-context/v2",
     withoutContextDigest(parsed),

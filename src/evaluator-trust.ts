@@ -5,18 +5,20 @@ import {
 } from "node:crypto";
 import { z } from "zod";
 import {
-  fingerprintAssessmentContext,
+  parseAssessmentContext,
   type AssessmentContext,
 } from "./assessment-context.js";
 import {
-  assertBoundedContractInput,
   contractDigestSchema,
   contractSlugSchema,
   contractTimestampSchema,
   deepFreezeContract,
   domainSeparatedDigest,
-  evaluatorEvidenceSigningBytes,
-  fingerprintEvaluatorEvidence,
+  fingerprintNormalizedEvaluatorEvidence,
+  normalizeEvaluatorEvidence,
+  normalizedEvaluatorEvidenceSigningBytes,
+  rubricIdentitySchema,
+  snapshotBoundedContractInput,
   type DeepReadonly,
   type EvaluatorEvidence,
 } from "./evidence.js";
@@ -38,7 +40,7 @@ const evaluatorTrustKeySchema = z.object({
   publicKeySpki: canonicalBase64UrlSchema,
   evaluatorId: contractSlugSchema,
   producerId: contractSlugSchema,
-  authorizedRubricVersions: z.array(contractSlugSchema).min(1).max(64),
+  authorizedRubricVersions: z.array(rubricIdentitySchema).min(1).max(64),
   authorizedCalibrationDigests: z.array(contractDigestSchema).min(1).max(64),
   validFrom: contractTimestampSchema,
   validUntil: contractTimestampSchema,
@@ -113,7 +115,9 @@ function importEd25519PublicKey(encoded: string): KeyObject | undefined {
   if (bytes === undefined) return undefined;
   try {
     const key = createPublicKey({ key: bytes, type: "spki", format: "der" });
-    return key.asymmetricKeyType === "ed25519" ? key : undefined;
+    if (key.asymmetricKeyType !== "ed25519") return undefined;
+    const canonical = key.export({ type: "spki", format: "der" });
+    return Buffer.isBuffer(canonical) && canonical.equals(bytes) ? key : undefined;
   } catch {
     return undefined;
   }
@@ -122,6 +126,7 @@ function importEd25519PublicKey(encoded: string): KeyObject | undefined {
 function assertSnapshotSemantics(snapshot: MutableEvaluatorTrustSnapshot): void {
   unique(snapshot.keys.map(({ keyId }) => keyId), "evaluator key id");
   unique(snapshot.revocations.map(({ keyId }) => keyId), "revoked evaluator key id");
+  const publicKeys = new Set<string>();
   for (const key of snapshot.keys) {
     unique(key.authorizedRubricVersions, `rubric authorization for key ${key.keyId}`);
     unique(
@@ -134,40 +139,51 @@ function assertSnapshotSemantics(snapshot: MutableEvaluatorTrustSnapshot): void 
     if (importEd25519PublicKey(key.publicKeySpki) === undefined) {
       throw new Error(`evaluator key "${key.keyId}" is not a canonical Ed25519 SPKI key`);
     }
+    if (publicKeys.has(key.publicKeySpki)) {
+      throw new Error("duplicate evaluator public key material is not allowed");
+    }
+    publicKeys.add(key.publicKeySpki);
   }
 }
 
 export function parseEvaluatorTrustSnapshot(input: unknown): EvaluatorTrustSnapshot {
-  assertBoundedContractInput(input);
-  const snapshot = evaluatorTrustSnapshotSchema.parse(input);
+  const inputSnapshot = snapshotBoundedContractInput(input);
+  const snapshot = evaluatorTrustSnapshotSchema.parse(inputSnapshot);
   assertSnapshotSemantics(snapshot);
   return deepFreezeContract(snapshot);
 }
 
-function parsedSnapshot(input: unknown): MutableEvaluatorTrustSnapshot {
-  assertBoundedContractInput(input);
-  const snapshot = evaluatorTrustSnapshotSchema.parse(input);
-  assertSnapshotSemantics(snapshot);
-  return snapshot;
+/** Digest the operator-controlled keys and freshness policy, excluding revocations. */
+export function fingerprintNormalizedEvaluatorTrustPolicy(
+  snapshot: EvaluatorTrustSnapshot,
+): string {
+  return domainSeparatedDigest("tasc/operator-evaluator-trust-policy-snapshot/v1", {
+    version: snapshot.version,
+    freshness: snapshot.freshness,
+    keys: snapshot.keys,
+  });
 }
 
-/** Digest the operator-controlled keys and freshness policy, excluding revocations. */
 export function fingerprintEvaluatorTrustPolicy(snapshot: unknown): string {
-  const parsed = parsedSnapshot(snapshot);
-  return domainSeparatedDigest("tasc/operator-evaluator-trust-policy-snapshot/v1", {
-    version: parsed.version,
-    freshness: parsed.freshness,
-    keys: parsed.keys,
-  });
+  return fingerprintNormalizedEvaluatorTrustPolicy(
+    parseEvaluatorTrustSnapshot(snapshot),
+  );
 }
 
 /** Digest the separately versioned revocation view bound into an assessment context. */
-export function fingerprintEvaluatorRevocations(snapshot: unknown): string {
-  const parsed = parsedSnapshot(snapshot);
+export function fingerprintNormalizedEvaluatorRevocations(
+  snapshot: EvaluatorTrustSnapshot,
+): string {
   return domainSeparatedDigest("tasc/evaluator-revocation-snapshot/v1", {
-    version: parsed.version,
-    revocations: parsed.revocations,
+    version: snapshot.version,
+    revocations: snapshot.revocations,
   });
+}
+
+export function fingerprintEvaluatorRevocations(snapshot: unknown): string {
+  return fingerprintNormalizedEvaluatorRevocations(
+    parseEvaluatorTrustSnapshot(snapshot),
+  );
 }
 
 function verificationResult(
@@ -180,7 +196,7 @@ function verificationResult(
     status,
     trusted: status === "trusted",
     evidence,
-    evidenceDigest: fingerprintEvaluatorEvidence(evidence),
+    evidenceDigest: fingerprintNormalizedEvaluatorEvidence(evidence),
     assessedAt: context.asOf,
     assessmentContextDigest: context.contextDigest,
     operatorTrustPolicySnapshotDigest: context.operatorTrustPolicySnapshotDigest,
@@ -199,92 +215,43 @@ export function verifyEvaluatorEvidence(
   trustSnapshot: EvaluatorTrustSnapshot,
   assessmentContext: AssessmentContext,
 ): EvaluatorEvidenceVerification {
-  if (fingerprintAssessmentContext(assessmentContext) !== assessmentContext.contextDigest) {
-    return verificationResult(
-      "context-mismatch",
-      "assessment context self-digest does not match its content",
-      evidence,
-      assessmentContext,
-    );
-  }
+  const normalizedEvidence = normalizeEvaluatorEvidence(evidence);
+  const normalizedTrustSnapshot = parseEvaluatorTrustSnapshot(trustSnapshot);
+  const normalizedAssessmentContext = parseAssessmentContext(assessmentContext);
+
   if (
-    fingerprintEvaluatorTrustPolicy(trustSnapshot)
-      !== assessmentContext.operatorTrustPolicySnapshotDigest
-    || fingerprintEvaluatorRevocations(trustSnapshot)
-      !== assessmentContext.evaluatorRevocationSnapshotDigest
+    fingerprintNormalizedEvaluatorTrustPolicy(normalizedTrustSnapshot)
+      !== normalizedAssessmentContext.operatorTrustPolicySnapshotDigest
+    || fingerprintNormalizedEvaluatorRevocations(normalizedTrustSnapshot)
+      !== normalizedAssessmentContext.evaluatorRevocationSnapshotDigest
   ) {
     return verificationResult(
       "context-mismatch",
       "assessment context does not bind the supplied trust and revocation snapshots",
-      evidence,
-      assessmentContext,
+      normalizedEvidence,
+      normalizedAssessmentContext,
     );
   }
 
-  const key = trustSnapshot.keys.find(({ keyId }) => keyId === evidence.keyId);
+  const key = normalizedTrustSnapshot.keys.find(
+    ({ keyId }) => keyId === normalizedEvidence.keyId,
+  );
   if (key === undefined) {
     return verificationResult(
       "unknown-key",
       "evidence key is absent from the operator trust snapshot",
-      evidence,
-      assessmentContext,
+      normalizedEvidence,
+      normalizedAssessmentContext,
     );
   }
 
-  const asOf = Date.parse(assessmentContext.asOf);
-  const revocation = trustSnapshot.revocations.find(
-    ({ keyId, revokedAt }) => keyId === evidence.keyId && Date.parse(revokedAt) <= asOf,
-  );
-  if (revocation !== undefined) {
-    return verificationResult(
-      "revoked",
-      `evidence key was revoked: ${revocation.reasonCode}`,
-      evidence,
-      assessmentContext,
-    );
-  }
-
-  const producedAt = Date.parse(evidence.producedAt);
-  if (producedAt - asOf > trustSnapshot.freshness.maximumFutureSkewMs) {
-    return verificationResult(
-      "future-dated",
-      "evidence production time exceeds the allowed assessment-time skew",
-      evidence,
-      assessmentContext,
-    );
-  }
-  if (asOf - producedAt > trustSnapshot.freshness.maximumEvidenceAgeMs) {
-    return verificationResult(
-      "stale",
-      "evidence exceeds the operator freshness window",
-      evidence,
-      assessmentContext,
-    );
-  }
-  if (producedAt < Date.parse(key.validFrom)) {
-    return verificationResult(
-      "key-not-yet-valid",
-      "evidence predates the trusted key validity interval",
-      evidence,
-      assessmentContext,
-    );
-  }
-  if (producedAt > Date.parse(key.validUntil)) {
-    return verificationResult(
-      "key-expired",
-      "evidence postdates the trusted key validity interval",
-      evidence,
-      assessmentContext,
-    );
-  }
-
-  const signature = decodeCanonicalBase64Url(evidence.signature);
+  const signature = decodeCanonicalBase64Url(normalizedEvidence.signature);
   if (signature === undefined || signature.length !== 64) {
     return verificationResult(
       "malformed-signature",
       "evidence signature is not a canonical 64-byte Ed25519 signature",
-      evidence,
-      assessmentContext,
+      normalizedEvidence,
+      normalizedAssessmentContext,
     );
   }
   const publicKey = importEd25519PublicKey(key.publicKeySpki);
@@ -292,13 +259,13 @@ export function verifyEvaluatorEvidence(
     return verificationResult(
       "malformed-signature",
       "trusted evaluator key material is malformed",
-      evidence,
-      assessmentContext,
+      normalizedEvidence,
+      normalizedAssessmentContext,
     );
   }
   const validSignature = verifySignature(
     null,
-    evaluatorEvidenceSigningBytes(evidence),
+    normalizedEvaluatorEvidenceSigningBytes(normalizedEvidence),
     publicKey,
     signature,
   );
@@ -306,29 +273,85 @@ export function verifyEvaluatorEvidence(
     return verificationResult(
       "invalid-signature",
       "Ed25519 signature does not cover the canonical evidence",
-      evidence,
-      assessmentContext,
+      normalizedEvidence,
+      normalizedAssessmentContext,
+    );
+  }
+
+  const asOf = Date.parse(normalizedAssessmentContext.asOf);
+  const revocation = normalizedTrustSnapshot.revocations.find(
+    ({ keyId, revokedAt }) =>
+      keyId === normalizedEvidence.keyId && Date.parse(revokedAt) <= asOf,
+  );
+  if (revocation !== undefined) {
+    return verificationResult(
+      "revoked",
+      `evidence key was revoked: ${revocation.reasonCode}`,
+      normalizedEvidence,
+      normalizedAssessmentContext,
+    );
+  }
+
+  const producedAt = Date.parse(normalizedEvidence.producedAt);
+  if (
+    producedAt - asOf
+      > normalizedTrustSnapshot.freshness.maximumFutureSkewMs
+  ) {
+    return verificationResult(
+      "future-dated",
+      "evidence production time exceeds the allowed assessment-time skew",
+      normalizedEvidence,
+      normalizedAssessmentContext,
+    );
+  }
+  if (
+    asOf - producedAt
+      > normalizedTrustSnapshot.freshness.maximumEvidenceAgeMs
+  ) {
+    return verificationResult(
+      "stale",
+      "evidence exceeds the operator freshness window",
+      normalizedEvidence,
+      normalizedAssessmentContext,
+    );
+  }
+  if (producedAt < Date.parse(key.validFrom)) {
+    return verificationResult(
+      "key-not-yet-valid",
+      "evidence predates the trusted key validity interval",
+      normalizedEvidence,
+      normalizedAssessmentContext,
+    );
+  }
+  if (producedAt > Date.parse(key.validUntil)) {
+    return verificationResult(
+      "key-expired",
+      "evidence postdates the trusted key validity interval",
+      normalizedEvidence,
+      normalizedAssessmentContext,
     );
   }
 
   const authorized = key.purpose === "evaluator-evidence"
-    && key.evaluatorId === evidence.evaluator.evaluatorId
-    && key.producerId === evidence.evaluator.producer.producerId
-    && key.authorizedRubricVersions.includes(evidence.evaluator.rubricVersion)
-    && key.authorizedCalibrationDigests.includes(evidence.evaluator.calibrationDigest);
+    && key.evaluatorId === normalizedEvidence.evaluator.evaluatorId
+    && key.producerId === normalizedEvidence.evaluator.producer.producerId
+    && key.authorizedRubricVersions.includes(normalizedEvidence.evaluator.rubricVersion)
+    && key.authorizedCalibrationDigests.includes(
+      normalizedEvidence.evaluator.calibrationDigest,
+    );
   if (!authorized) {
     return verificationResult(
       "unauthorized-evidence",
       "trusted key is not authorized for this evaluator, producer, rubric, or calibration",
-      evidence,
-      assessmentContext,
+      normalizedEvidence,
+      normalizedAssessmentContext,
     );
   }
 
   return verificationResult(
     "trusted",
     "canonical Ed25519 evidence is current and authorized",
-    evidence,
-    assessmentContext,
+    normalizedEvidence,
+    normalizedAssessmentContext,
   );
 }
