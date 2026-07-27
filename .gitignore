@@ -14,3 +14,4 @@ __pycache__/
 *.py[cod]
 .venv-mlx/
 .DS_Store
+.worktrees/
