@@ -17,6 +17,7 @@ const MAX_TEXT = 256;
 const MAX_CONTRACT_DEPTH = 16;
 const MAX_CONTRACT_NODES = 32_768;
 const MAX_CONTRACT_OBJECT_KEYS = 64;
+const MAX_CONTRACT_PROPERTY_KEY_LENGTH = 1_024;
 
 export type DeepReadonly<T> =
   T extends (...args: never[]) => unknown ? T
@@ -721,6 +722,23 @@ interface SnapshotState {
   readonly ancestors: Set<object>;
 }
 
+function hasWellFormedUnicode(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit < 0xd800 || codeUnit > 0xdfff) continue;
+    if (
+      codeUnit > 0xdbff
+      || index + 1 >= value.length
+      || value.charCodeAt(index + 1) < 0xdc00
+      || value.charCodeAt(index + 1) > 0xdfff
+    ) {
+      return false;
+    }
+    index += 1;
+  }
+  return true;
+}
+
 function snapshotContractValue(
   value: unknown,
   depth: number,
@@ -750,16 +768,42 @@ function snapshotContractValue(
     throw new Error("bounded contract input requires plain JSON objects and arrays");
   }
 
-  const descriptors = Object.getOwnPropertyDescriptors(value);
-  const descriptorKeys = Reflect.ownKeys(descriptors);
-  if (descriptorKeys.some((key) => typeof key === "symbol")) {
+  const ownKeys = Reflect.ownKeys(value);
+  if (ownKeys.some((key) => typeof key === "symbol")) {
     throw new Error("bounded contract input cannot contain symbol properties");
+  }
+  if (isArray && ownKeys.length > MAX_BUCKETS + 1) {
+    throw new Error("bounded contract input array exceeds the key limit");
+  }
+  if (!isArray && ownKeys.length > MAX_CONTRACT_OBJECT_KEYS) {
+    throw new Error("bounded contract input object exceeds the key limit");
+  }
+
+  const stringKeys = ownKeys as string[];
+  for (const key of stringKeys) {
+    if (key.length > MAX_CONTRACT_PROPERTY_KEY_LENGTH) {
+      throw new Error("bounded contract input property key exceeds the length limit");
+    }
+    if (!hasWellFormedUnicode(key)) {
+      throw new Error(
+        "bounded contract input property key must contain valid Unicode scalar values",
+      );
+    }
+  }
+
+  const descriptors = new Map<string, PropertyDescriptor>();
+  for (const key of stringKeys) {
+    const descriptor = Reflect.getOwnPropertyDescriptor(value, key);
+    if (descriptor === undefined) {
+      throw new Error("bounded contract input properties changed during snapshot");
+    }
+    descriptors.set(key, descriptor);
   }
 
   state.ancestors.add(value);
   try {
     if (isArray) {
-      const lengthDescriptor = descriptors.length;
+      const lengthDescriptor = descriptors.get("length");
       const length = lengthDescriptor?.value;
       if (!Number.isSafeInteger(length) || length < 0 || length > MAX_BUCKETS) {
         throw new Error("bounded contract input array exceeds the coarse length limit");
@@ -769,7 +813,7 @@ function snapshotContractValue(
       for (let index = 0; index < length; index += 1) {
         const key = String(index);
         allowedKeys.add(key);
-        const descriptor = descriptors[key];
+        const descriptor = descriptors.get(key);
         if (descriptor === undefined) {
           throw new Error("bounded contract input arrays cannot contain holes");
         }
@@ -778,7 +822,7 @@ function snapshotContractValue(
         }
         snapshot[index] = snapshotContractValue(descriptor.value, depth + 1, state);
       }
-      for (const key of descriptorKeys as string[]) {
+      for (const key of stringKeys) {
         if (!allowedKeys.has(key)) {
           throw new Error("bounded contract input arrays cannot contain extra properties");
         }
@@ -786,12 +830,12 @@ function snapshotContractValue(
       return snapshot;
     }
 
-    if (descriptorKeys.length > MAX_CONTRACT_OBJECT_KEYS) {
-      throw new Error("bounded contract input object exceeds the key limit");
-    }
     const snapshot = Object.create(null) as Record<string, unknown>;
-    for (const key of descriptorKeys as string[]) {
-      const descriptor = descriptors[key];
+    for (const key of stringKeys) {
+      const descriptor = descriptors.get(key);
+      if (descriptor === undefined) {
+        throw new Error("bounded contract input properties changed during snapshot");
+      }
       if (!Object.hasOwn(descriptor, "value")) {
         throw new Error("bounded contract input accessor properties are not allowed");
       }

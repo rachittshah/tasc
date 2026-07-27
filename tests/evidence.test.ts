@@ -354,6 +354,22 @@ describe("evidence v2 contracts", () => {
       .toThrow(/plain JSON object/i);
   });
 
+  it("retains array hole and extra-property rejection during snapshotting", () => {
+    const withHole = validProtocolInput();
+    withHole.requiredCapabilities = new Array<string>(2);
+    withHole.requiredCapabilities[0] = "streaming";
+    expect(() => parseExperimentProtocol(withHole, TEST_WORK_BUDGET))
+      .toThrow(/arrays cannot contain holes/i);
+
+    const withExtraProperty = validProtocolInput();
+    Object.defineProperty(withExtraProperty.requiredCapabilities, "metadata", {
+      enumerable: true,
+      value: "not-array-data",
+    });
+    expect(() => parseExperimentProtocol(withExtraProperty, TEST_WORK_BUDGET))
+      .toThrow(/arrays cannot contain extra properties/i);
+  });
+
   it("snapshots data properties once and rejects accessors without invoking them", () => {
     let getterCalls = 0;
     const accessor = validProtocolInput() as Record<string, unknown>;
@@ -383,6 +399,47 @@ describe("evidence v2 contracts", () => {
     expect(() => parseExperimentProtocol(proxy, TEST_WORK_BUDGET)).not.toThrow();
     expect(propertyReads).toBe(0);
     expect([...descriptorReads.values()].every((count) => count === 1)).toBe(true);
+  });
+
+  it.each<[string, () => object, RegExp]>([
+    [
+      "wide objects",
+      () => Object.fromEntries(
+        Array.from({ length: 65 }, (_, index) => [`field-${index}`, index]),
+      ),
+      /object.*key limit/i,
+    ],
+    [
+      "oversized property names",
+      () => ({ ["x".repeat(1_025)]: true }),
+      /property key.*length limit/i,
+    ],
+    [
+      "malformed property names",
+      () => ({ ["malformed-\ud800"]: true }),
+      /property key.*Unicode/i,
+    ],
+    [
+      "symbol properties",
+      () => ({ [Symbol("hidden")]: true }),
+      /symbol propert/i,
+    ],
+  ])("rejects %s before requesting any property descriptors", (
+    _label,
+    makeValue,
+    expectedMessage,
+  ) => {
+    let descriptorReads = 0;
+    const proxy = new Proxy(makeValue(), {
+      getOwnPropertyDescriptor(target, property) {
+        descriptorReads += 1;
+        return Reflect.getOwnPropertyDescriptor(target, property);
+      },
+    });
+
+    expect(() => parseExperimentProtocol(proxy, TEST_WORK_BUDGET))
+      .toThrow(expectedMessage);
+    expect(descriptorReads).toBe(0);
   });
 
   it("keeps provider metrics operational and rejects obvious credential markers in trace identity text", () => {
