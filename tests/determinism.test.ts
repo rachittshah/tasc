@@ -46,6 +46,7 @@ describe("portable deterministic primitives", () => {
   it("keeps canonical artifact bytes and decisions invariant across process locales", () => {
     const moduleUrl = new URL("../src/determinism.ts", import.meta.url).href;
     const evaluateUrl = new URL("../src/evaluate.ts", import.meta.url).href;
+    const reportUrl = new URL("../src/report.ts", import.meta.url).href;
     const schemaUrl = new URL("../src/schema.ts", import.meta.url).href;
     const specPath = new URL("../examples/synthetic/spec.json", import.meta.url).pathname;
     const developmentPath = new URL("../examples/synthetic/dev.json", import.meta.url).pathname;
@@ -54,6 +55,7 @@ describe("portable deterministic primitives", () => {
       import { readFileSync } from "node:fs";
       import { canonicalJson, compareCodeUnits } from ${JSON.stringify(moduleUrl)};
       import { nominatePolicy } from ${JSON.stringify(evaluateUrl)};
+      import { proposeNextExperiment } from ${JSON.stringify(reportUrl)};
       import { parseInferenceSpec, parseMeasurementSet } from ${JSON.stringify(schemaUrl)};
       const ids = ["z", "ä", "a10", "a2", "😀", "😃"];
       const ordered = [...ids].sort(compareCodeUnits);
@@ -61,6 +63,15 @@ describe("portable deterministic primitives", () => {
       const development = parseMeasurementSet(JSON.parse(readFileSync(${JSON.stringify(developmentPath)}, "utf8")), "dev");
       const result = nominatePolicy(spec, development);
       if (result.status !== "NOMINATED" || !result.nomination) throw new Error("expected synthetic nomination");
+      const rejected = (id) => ({
+        policy: { id, kind: "fast-only" },
+        evaluation: { gates: [{
+          id: "mean_task_score", pass: false, actual: 0, threshold: 1, comparison: ">=", reason: "fixture",
+        }] },
+      });
+      const proposal = proposeNextExperiment({
+        status: "NO_CANDIDATE", evaluations: [rejected("ä"), rejected("z")], frontier: [],
+      }, { spec: {}, measurements: { cases: [] } });
       const artifact = canonicalJson(result.nomination);
       process.stdout.write(JSON.stringify({
         legacy: "z".localeCompare("ä"),
@@ -68,6 +79,7 @@ describe("portable deterministic primitives", () => {
         status: result.status,
         decisionDigest: result.nomination.decisionDigest,
         selfDigest: result.nomination.selfDigest,
+        proposalTrigger: proposal.trigger,
         artifact,
         digest: createHash("sha256").update(artifact).digest("hex"),
       }));
@@ -87,6 +99,7 @@ describe("portable deterministic primitives", () => {
       status: string;
       decisionDigest: string;
       selfDigest: string;
+      proposalTrigger: string;
       artifact: string;
       digest: string;
     };
@@ -104,18 +117,21 @@ describe("portable deterministic primitives", () => {
         status: "NOMINATED",
         decisionDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
         selfDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+        proposalTrigger: expect.stringMatching(/^z was the most promising rejected candidate/),
       }),
       expect.objectContaining({
         ordered: ["a10", "a2", "z", "ä", "😀", "😃"],
         status: "NOMINATED",
         decisionDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
         selfDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+        proposalTrigger: expect.stringMatching(/^z was the most promising rejected candidate/),
       }),
       expect.objectContaining({
         ordered: ["a10", "a2", "z", "ä", "😀", "😃"],
         status: "NOMINATED",
         decisionDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
         selfDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+        proposalTrigger: expect.stringMatching(/^z was the most promising rejected candidate/),
       }),
     ]);
     expect(c.artifact).toBe(english.artifact);
