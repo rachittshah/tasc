@@ -55,7 +55,7 @@ function metricsRow(label: string, metrics: PolicyMetrics): string {
 
 function metricsTable(champion: PolicyMetrics, candidates: CandidateEvaluation[]): string {
   const rows = [
-    "| Policy | Mean score | Error | P95 TTFT ms | P95 E2E ms | P10 perceived TPS | P50 total TPS | Cost / 1k | Escalation |",
+    "| Policy | Mean score | Error | P95 TTFT ms | P95 E2E ms | P10 perceived TPS | P50 service TPS | Cost / 1k | Escalation |",
     "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     `| ${metricsRow("Champion (expert-only)", champion)} |`,
     ...candidates.map(({ policy, evaluation }) => (
@@ -421,7 +421,7 @@ export function buildConfirmationReport(
     "",
     "## Manual boundary",
     "",
-    "Confirmation does not mutate a serving endpoint. Even READY_FOR_MANUAL_PRODUCTION requires separate manual review and rollout.",
+    "Confirmation does not mutate a serving endpoint. Legacy v1 evidence is migration-only and cannot produce a production recommendation; any rollout still requires separate manual review.",
     "",
   ].join("\n");
 }

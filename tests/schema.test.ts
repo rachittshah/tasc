@@ -84,8 +84,43 @@ describe("TASC input contracts", () => {
     const measurements = parseMeasurementSet(validMeasurements(), "dev");
 
     expect(spec.primaryProfileId).toBe("fast");
+    expect(spec.constraints.minimumIndependentGroups).toBe(3);
+    expect(spec.constraints.minimumCriticalSliceGroups).toBe(1);
+    expect(spec.bootstrap.alpha).toBe(0.05);
     expect(measurements.dataset.split).toBe("dev");
     expect(() => assertMeasurementMatrix(spec, measurements)).not.toThrow();
+  });
+
+  it("defaults legacy critical-slice group coverage to zero when no critical slice is configured", () => {
+    const withoutCriticalSlices = validSpec();
+    withoutCriticalSlices.criticalSlices = [];
+    expect(parseInferenceSpec(withoutCriticalSlices).constraints.minimumCriticalSliceGroups).toBe(0);
+
+    const inconsistent = validSpec();
+    inconsistent.criticalSlices = [];
+    (inconsistent.constraints as any).minimumCriticalSliceGroups = 1;
+    expect(() => parseInferenceSpec(inconsistent)).toThrow(/critical.slice.*minimum.*zero/i);
+  });
+
+  it("accepts explicit bounded legacy inference controls and rejects unsafe values", () => {
+    const explicit = validSpec();
+    (explicit.constraints as any).minimumIndependentGroups = 7;
+    (explicit.constraints as any).minimumCriticalSliceGroups = 2;
+    (explicit.bootstrap as any).alpha = 0.1;
+    expect(parseInferenceSpec(explicit)).toMatchObject({
+      constraints: {
+        minimumIndependentGroups: 7,
+        minimumCriticalSliceGroups: 2,
+      },
+      bootstrap: { alpha: 0.1 },
+    });
+
+    const invalidGroups = validSpec();
+    (invalidGroups.constraints as any).minimumIndependentGroups = 0;
+    expect(() => parseInferenceSpec(invalidGroups)).toThrow(/minimumIndependentGroups|greater than/i);
+    const invalidAlpha = validSpec();
+    (invalidAlpha.bootstrap as any).alpha = 1;
+    expect(() => parseInferenceSpec(invalidAlpha)).toThrow(/alpha|less than/i);
   });
 
   it("rejects incomplete profile observations with the case and profile", () => {
@@ -122,6 +157,16 @@ describe("TASC input contracts", () => {
     measurements.cases[0].trafficWeight = 0;
 
     expect(() => parseMeasurementSet(measurements)).toThrow(/trafficWeight|greater than 0/i);
+  });
+
+  it("rejects duplicate or unbounded slice labels", () => {
+    const duplicate = validMeasurements();
+    duplicate.cases[0].slices = ["routine", "routine"];
+    expect(() => parseMeasurementSet(duplicate)).toThrow(/duplicate.*slice/i);
+
+    const oversized = validMeasurements();
+    oversized.cases[0].slices = Array.from({ length: 65 }, (_unused, index) => `slice-${index}`);
+    expect(() => parseMeasurementSet(oversized)).toThrow(/64|too big|at most/i);
   });
 
   it("rejects successful timing rows that cannot contain their measured token stream", () => {

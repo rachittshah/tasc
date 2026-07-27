@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { bootstrapMeanCI, median } from "../src/statistics.js";
+import { compareCodeUnits } from "../src/determinism.js";
 import { sha256, stableJson } from "../src/integrity.js";
 import {
   computePolicyMetrics,
@@ -42,9 +43,11 @@ function spec(overrides: Partial<InferenceSpec["constraints"]> = {}): InferenceS
       maxCostPerThousandRequests: 100,
       nonInferiorityMargin: -0.02,
       minimumCostImprovement: 0.1,
+      minimumIndependentGroups: 3,
+      minimumCriticalSliceGroups: 1,
       ...overrides,
     },
-    bootstrap: { seed: 17, iterations: 200 },
+    bootstrap: { seed: 17, iterations: 200, alpha: 0.05 },
   };
 }
 
@@ -63,7 +66,7 @@ function row(overrides: Partial<ReplayedRow> = {}): ReplayedRow {
     endToEndLatencyMs: 400,
     outputTokens: 40,
     perceivedTokensPerSecond: 80,
-    totalTokensPerSecond: 70,
+    serviceThroughput: { kind: "measured", tokensPerSecond: 70 },
     costUsd: 0.01,
     trafficWeight: 1,
     slices: ["payments", "safety"],
@@ -114,7 +117,7 @@ describe("TASC policy metrics", () => {
         endToEndLatencyMs: 900,
         outputTokens: 20,
         perceivedTokensPerSecond: 40,
-        totalTokensPerSecond: 35,
+        serviceThroughput: { kind: "unavailable", reason: "failed execution" },
         failureCode: "timeout",
       }),
     ], []);
@@ -198,24 +201,163 @@ describe("TASC hard gates", () => {
       maxCostPerThousandRequests: 1_000,
       minimumCostImprovement: 0,
     }));
-    const deltas = [0, 1, 2].map((caseIndex) => (
-      median(rows.candidate.filter((candidate) => candidate.caseId === `case-${caseIndex}`).map((candidate) => candidate.taskScore))
-      - median(rows.champion.filter((champion) => champion.caseId === `case-${caseIndex}`).map((champion) => champion.taskScore))
+    const replicateDeltas = rows.candidate.map((candidate) => (
+      candidate.taskScore - rows.champion.find((champion) => (
+        champion.caseId === candidate.caseId && champion.replicateIndex === candidate.replicateIndex
+      ))!.taskScore
+    ));
+    const caseDeltas = [0, 1, 2].map((caseIndex) => median(
+      replicateDeltas.filter((_delta, index) => rows.candidate[index].caseId === `case-${caseIndex}`),
     ));
 
     expect(result.pairedQuality.caseCount).toBe(3);
-    expect(result.pairedQuality.deltas).toEqual(deltas);
-    expect(result.pairedQuality.bootstrap).toEqual(bootstrapMeanCI(deltas, {
+    expect(result.pairedQuality.deltas).toEqual(replicateDeltas);
+    expect(result.pairedQuality.caseEffects.map(({ effect }) => effect)).toEqual(caseDeltas);
+    expect(result.pairedQuality.bootstrap).toEqual(bootstrapMeanCI(caseDeltas, {
+      alpha: 0.05,
       seed: 17,
       iters: 200,
     }));
   });
 
-  it("rejects fewer than three unique paired cases", () => {
-    const rows = pairedRows([[0.9], [0.9]], [[0.9], [0.9]]);
-    expect(() => evaluatePolicy(rows.candidate, rows.champion, spec())).toThrow(
-      /at least 3 unique paired cases/i,
+  it("pairs replicate indexes before taking each case median", () => {
+    const rows = pairedRows(
+      [[0, 0, 1], [0.8], [0.8]],
+      [[0, 1, 1], [0.8], [0.8]],
     );
+    const result = evaluatePolicy(rows.candidate, rows.champion, spec({
+      taskScoreFloor: 0,
+      criticalSliceScoreFloor: 0,
+      minP10PerceivedTokensPerSecond: 0,
+      minP50TotalTokensPerSecond: 0,
+      minimumCostImprovement: 0,
+    }));
+
+    expect(result.pairedQuality.deltas).toEqual([0, -1, 0, 0, 0]);
+    expect(result.pairedQuality.caseEffects).toEqual([
+      { caseId: "case-0", groupId: "group-0", effect: 0, trafficWeight: 1 },
+      { caseId: "case-1", groupId: "group-1", effect: 0, trafficWeight: 1 },
+      { caseId: "case-2", groupId: "group-2", effect: 0, trafficWeight: 1 },
+    ]);
+    expect(result.pairedQuality.estimate).toBe(0);
+  });
+
+  it("rejects missing, duplicate, and lineage-drifted case-replicate pairs", () => {
+    const rows = pairedRows([[0.9], [0.9], [0.9]], [[0.9], [0.9], [0.9]]);
+    expect(() => evaluatePolicy(rows.candidate.slice(1), rows.champion, spec())).toThrow(
+      /missing.*case.*replicate|pair.*missing/i,
+    );
+    expect(() => evaluatePolicy([...rows.candidate, structuredClone(rows.candidate[0])], rows.champion, spec())).toThrow(
+      /duplicate.*case.*replicate/i,
+    );
+    const drifted = structuredClone(rows.champion);
+    drifted[0].groupId = "different-group";
+    expect(() => evaluatePolicy(rows.candidate, drifted, spec())).toThrow(
+      /lineage|group.*drift|conflicting group/i,
+    );
+    const weightDrift = structuredClone(rows.champion);
+    weightDrift[0].trafficWeight = 2;
+    expect(() => evaluatePolicy(rows.candidate, weightDrift, spec())).toThrow(/traffic-weight.*drift/i);
+    const sliceDrift = structuredClone(rows.champion);
+    sliceDrift[0].slices = ["different-slice"];
+    expect(() => evaluatePolicy(rows.candidate, sliceDrift, spec())).toThrow(/slice-set.*drift/i);
+    const criticalDrift = structuredClone(rows.champion);
+    criticalDrift[0].critical = !criticalDrift[0].critical;
+    expect(() => evaluatePolicy(rows.candidate, criticalDrift, spec())).toThrow(/critical.*drift/i);
+    const caseLevelDrift = pairedRows([[0.9, 0.9], [0.9], [0.9]], [[0.9, 0.9], [0.9], [0.9]]);
+    caseLevelDrift.candidate[1].trafficWeight = 2;
+    expect(() => evaluatePolicy(caseLevelDrift.candidate, caseLevelDrift.champion, spec()))
+      .toThrow(/candidate case.*traffic-weight.*drift/i);
+    const unsafe = structuredClone(rows.candidate);
+    unsafe[0].replicateIndex = Number.MAX_SAFE_INTEGER + 1;
+    expect(() => evaluatePolicy(unsafe, rows.champion, spec())).toThrow(/replicateIndex.*safe/i);
+    const missingScore = structuredClone(rows.candidate) as any[];
+    delete missingScore[0].taskScore;
+    expect(() => evaluatePolicy(missingScore, rows.champion, spec())).toThrow(/successful.*score|score.*missing/i);
+  });
+
+  it("is invariant to candidate/champion row shuffles and slice-set ordering", () => {
+    const rows = pairedRows(
+      [[0.8, 0.9], [0.7], [0.95]],
+      [[0.9, 0.8], [0.75], [0.9]],
+    );
+    rows.candidate.forEach((candidate) => { candidate.slices = ["safety", "payments"]; });
+    const shuffledCandidate = [...rows.candidate].reverse();
+    const shuffledChampion = [...rows.champion].reverse();
+    shuffledChampion.forEach((champion) => { champion.slices = ["payments", "safety"]; });
+
+    expect(evaluatePolicy(shuffledCandidate, shuffledChampion, spec()))
+      .toEqual(evaluatePolicy(rows.candidate, rows.champion, spec()));
+  });
+
+  it("counts independent groups and critical-slice group coverage rather than correlated cases", () => {
+    const rows = pairedRows(
+      [[0.9], [0.9], [0.9], [0.9]],
+      [[0.9], [0.9], [0.9], [0.9]],
+    );
+    for (const candidate of rows.candidate) {
+      candidate.groupId = candidate.caseId === "case-3" ? "group-b" : "group-a";
+      candidate.slices = candidate.caseId === "case-3" ? ["safety"] : ["payments"];
+    }
+    for (const champion of rows.champion) {
+      champion.groupId = champion.caseId === "case-3" ? "group-b" : "group-a";
+      champion.slices = champion.caseId === "case-3" ? ["safety"] : ["payments"];
+    }
+    const result = evaluatePolicy(rows.candidate, rows.champion, spec({
+      minimumIndependentGroups: 3,
+      minimumCriticalSliceGroups: 2,
+    }));
+
+    expect(result.pairedQuality).toMatchObject({
+      caseCount: 4,
+      replicateCount: 4,
+      groupCount: 2,
+      criticalSliceGroupCoverage: { payments: 1, safety: 1 },
+    });
+    expect(result.gates.find(({ id }) => id === "minimum_independent_groups")).toMatchObject({
+      pass: false,
+      actual: 2,
+      threshold: 3,
+    });
+    expect(result.gates.find(({ id }) => id === "critical_slice_groups:payments")).toMatchObject({
+      pass: false,
+      actual: 1,
+      threshold: 2,
+    });
+    expect(result.passed).toBe(false);
+  });
+
+  it("fails a required service-throughput gate when every serial cascade row is unavailable", () => {
+    const rows = pairedRows([[0.9], [0.9], [0.9]], [[0.9], [0.9], [0.9]]);
+    for (const candidate of rows.candidate) {
+      candidate.attemptedProfileIds = ["fast", "expert"];
+      candidate.escalated = true;
+      candidate.serviceThroughput = {
+        kind: "unavailable",
+        reason: "serial cascade has no measured service-capacity observation",
+      };
+    }
+    const result = evaluatePolicy(rows.candidate, rows.champion, spec());
+
+    expect(result.candidateMetrics.p50TotalTokensPerSecond).toBeNull();
+    expect(result.gates.find(({ id }) => id === "p50_total_tps")).toMatchObject({
+      pass: false,
+      actual: null,
+    });
+  });
+
+  it("fails closed before inference for fewer than the configured independent groups", () => {
+    const rows = pairedRows([[0.9], [0.9]], [[0.9], [0.9]]);
+    const result = evaluatePolicy(rows.candidate, rows.champion, spec());
+    expect(result.pairedQuality).toMatchObject({
+      inferenceAvailable: false,
+      interval: { lo: null, hi: null },
+    });
+    expect(result.gates.find(({ id }) => id === "minimum_independent_groups"))
+      .toMatchObject({ pass: false, actual: 2, threshold: 3 });
+    expect(Number.isFinite(result.pairedQuality.estimate)).toBe(true);
+    expect(Number.isFinite(result.pairedQuality.effectiveTrafficMass)).toBe(true);
+    expect(() => JSON.parse(JSON.stringify(result))).not.toThrow();
   });
 
   it("returns an explicit reason for every absolute and paired gate", () => {
@@ -224,6 +366,9 @@ describe("TASC hard gates", () => {
 
     expect(result.gates.map((gate) => gate.id)).toEqual([
       "paired_quality_non_inferiority",
+      "minimum_independent_groups",
+      "critical_slice_groups:payments",
+      "critical_slice_groups:safety",
       "mean_task_score",
       "critical_slice:payments",
       "critical_slice:safety",
@@ -246,6 +391,9 @@ describe("TASC hard gates", () => {
     rows.candidate.forEach((candidate, index) => {
       candidate.slices = index === 0 ? ["payments"] : ["routine"];
       if (index === 0) candidate.taskScore = 0.2;
+    });
+    rows.champion.forEach((champion, index) => {
+      champion.slices = index === 0 ? ["payments"] : ["routine"];
     });
     const result = evaluatePolicy(rows.candidate, rows.champion, spec());
 
@@ -362,6 +510,7 @@ function nominationSpec(): InferenceSpec {
     minimumCostImprovement: 0,
   });
   value.criticalSlices = [];
+  value.constraints.minimumCriticalSliceGroups = 0;
   value.candidateSpace = {
     confidenceThresholds: [0.5, 0.8],
     inputTokenThresholds: [1_000, 2_000],
@@ -419,7 +568,7 @@ describe("TASC development nomination", () => {
           - right.evaluation.candidateMetrics.costPerRequestUsd
         || left.evaluation.candidateMetrics.p95EndToEndLatencyMs
           - right.evaluation.candidateMetrics.p95EndToEndLatencyMs
-        || left.policy.id.localeCompare(right.policy.id)
+        || compareCodeUnits(left.policy.id, right.policy.id)
       ));
     expect(result.nomination?.policy.id).toBe(orderedFrontier[0].policy.id);
   });
@@ -525,7 +674,7 @@ describe("TASC exact holdout confirmation", () => {
     expect(result.evaluation.gates.some((gate) => gate.id === "development_cost_improvement")).toBe(false);
   });
 
-  it("returns READY_FOR_MANUAL_PRODUCTION only when both datasets are real", () => {
+  it("caps passing real legacy-v1 evidence at HOLD with an explicit migration reason", () => {
     const { activeSpec, nomination } = nominated(false, ATTESTATION_KEY);
     const result = confirmNomination(
       activeSpec,
@@ -534,9 +683,53 @@ describe("TASC exact holdout confirmation", () => {
       { attestationKey: ATTESTATION_KEY },
     );
     expect(result).toMatchObject({
-      status: "READY_FOR_MANUAL_PRODUCTION",
+      status: "HOLD",
       attestationVerified: true,
     });
+    expect(result.statusReason).toMatch(/legacy v1.*migrat|migrat.*v2/i);
+  });
+
+  it("keeps nomination and decision digests stable when case and profile rows are reordered", () => {
+    const activeSpec = nominationSpec();
+    const reorderedSpec = structuredClone(activeSpec);
+    reorderedSpec.profiles.reverse();
+    reorderedSpec.candidateSpace.confidenceThresholds.reverse();
+    reorderedSpec.candidateSpace.inputTokenThresholds.reverse();
+    const original = measurements();
+    const reordered = structuredClone(original);
+    reordered.cases.reverse();
+    reordered.cases.forEach((measurementCase) => measurementCase.observations.reverse());
+
+    expect(nominatePolicy(reorderedSpec, reordered)).toEqual(nominatePolicy(activeSpec, original));
+  });
+
+  it("accepts the pre-default legacy spec digest only for default migration controls", () => {
+    const defaults = nominated();
+    const legacyDefaultSpec = structuredClone(defaults.activeSpec) as any;
+    delete legacyDefaultSpec.constraints.minimumIndependentGroups;
+    delete legacyDefaultSpec.constraints.minimumCriticalSliceGroups;
+    delete legacyDefaultSpec.bootstrap.alpha;
+    defaults.nomination.specDigest = sha256(stableJson(legacyDefaultSpec));
+    const migrated = resignNomination(defaults.nomination);
+    expect(confirmNomination(
+      defaults.activeSpec,
+      measurements({ split: "holdout", groupPrefix: "holdout" }),
+      migrated,
+    ).status).toBe("DEMO_ONLY");
+
+    const nonDefaultSpec = nominationSpec();
+    nonDefaultSpec.bootstrap.alpha = 0.1;
+    const nonDefaultNomination = nominatePolicy(nonDefaultSpec, measurements()).nomination!;
+    const legacyNonDefaultSpec = structuredClone(nonDefaultSpec) as any;
+    delete legacyNonDefaultSpec.constraints.minimumIndependentGroups;
+    delete legacyNonDefaultSpec.constraints.minimumCriticalSliceGroups;
+    delete legacyNonDefaultSpec.bootstrap.alpha;
+    nonDefaultNomination.specDigest = sha256(stableJson(legacyNonDefaultSpec));
+    expect(() => confirmNomination(
+      nonDefaultSpec,
+      measurements({ split: "holdout", groupPrefix: "holdout" }),
+      resignNomination(nonDefaultNomination),
+    )).toThrow(/spec digest mismatch/i);
   });
 
   it("returns HOLD instead of reselecting when the frozen nominee fails holdout gates", () => {
@@ -556,6 +749,7 @@ describe("TASC exact holdout confirmation", () => {
     expect(result.status).toBe("HOLD");
     expect(result.policy.id).toBe(nomination.policy.id);
     expect(result.evaluation.passed).toBe(false);
+    expect(result.statusReason).toMatch(/legacy v1.*migrat|migrat.*v2/i);
   });
 
   it("prevents a re-signed synthetic flag from elevating a development run", () => {

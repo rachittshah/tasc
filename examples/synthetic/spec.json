@@ -29,7 +29,7 @@
     "maxP95TtftMs": 5000,
     "maxP95EndToEndLatencyMs": 12000,
     "minP10PerceivedTokensPerSecond": 20,
-    "minP50TotalTokensPerSecond": 50,
+    "minP50TotalTokensPerSecond": 0,
     "maxErrorRate": 0,
     "maxCostPerThousandRequests": 35,
     "nonInferiorityMargin": -0.08,

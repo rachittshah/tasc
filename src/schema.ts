@@ -32,10 +32,13 @@ export interface InferenceSpec {
     maxCostPerThousandRequests: number;
     nonInferiorityMargin: number;
     minimumCostImprovement: number;
+    minimumIndependentGroups: number;
+    minimumCriticalSliceGroups: number;
   };
   bootstrap: {
     seed: number;
     iterations: number;
+    alpha: number;
   };
 }
 
@@ -102,6 +105,8 @@ const nonEmptyString = z.string().trim().min(1);
 const finiteNonNegative = z.number().finite().nonnegative();
 const score = z.number().finite().min(0).max(1);
 const nonNegativeInteger = z.number().int().finite().nonnegative();
+const boundedGroupCount = z.number().int().finite().nonnegative().max(100_000);
+const boundedSliceArray = z.array(nonEmptyString).max(64);
 
 const profileSchema = z.object({
   id: nonEmptyString,
@@ -110,7 +115,7 @@ const profileSchema = z.object({
   hardware: nonEmptyString,
 }).strict();
 
-export const inferenceSpecSchema: z.ZodType<InferenceSpec> = z.object({
+export const inferenceSpecSchema: z.ZodType<InferenceSpec, z.ZodTypeDef, unknown> = z.object({
   version: z.literal("tasc-inference-spec-v1"),
   id: nonEmptyString,
   profiles: z.array(profileSchema).min(2),
@@ -121,7 +126,7 @@ export const inferenceSpecSchema: z.ZodType<InferenceSpec> = z.object({
     inputTokenThresholds: z.array(nonNegativeInteger).min(1),
     includeFastOnly: z.boolean(),
   }).strict(),
-  criticalSlices: z.array(nonEmptyString),
+  criticalSlices: boundedSliceArray,
   constraints: z.object({
     taskScoreFloor: score,
     criticalSliceScoreFloor: score,
@@ -133,10 +138,13 @@ export const inferenceSpecSchema: z.ZodType<InferenceSpec> = z.object({
     maxCostPerThousandRequests: finiteNonNegative,
     nonInferiorityMargin: z.number().finite().min(-1).max(1),
     minimumCostImprovement: score,
+    minimumIndependentGroups: boundedGroupCount.positive().default(3),
+    minimumCriticalSliceGroups: boundedGroupCount.default(0),
   }).strict(),
   bootstrap: z.object({
-    seed: z.number().int().finite(),
-    iterations: z.number().int().finite().positive(),
+    seed: z.number().int().finite().safe(),
+    iterations: z.number().int().finite().positive().max(1_000_000),
+    alpha: z.number().finite().gt(0).lt(1).default(0.05),
   }).strict(),
 }).strict();
 
@@ -190,7 +198,7 @@ export const measurementSetSchema: z.ZodType<MeasurementSet> = z.object({
     mode: nonEmptyString,
     critical: z.boolean(),
     trafficWeight: z.number().finite().positive(),
-    slices: z.array(nonEmptyString),
+    slices: boundedSliceArray,
     observations: z.array(z.object({
       profileId: nonEmptyString,
       replicates: z.array(observationSchema).min(1),
@@ -214,6 +222,12 @@ export function assertInferenceSpecSemantics(spec: InferenceSpec): void {
   if (spec.championProfileId === spec.primaryProfileId) {
     throw new Error("champion and primary profiles must be different");
   }
+  if (new Set(spec.criticalSlices).size !== spec.criticalSlices.length) {
+    throw new Error("duplicate critical slice");
+  }
+  if (spec.criticalSlices.length === 0 && spec.constraints.minimumCriticalSliceGroups > 0) {
+    throw new Error("critical-slice group minimum must be zero when no critical slices are declared");
+  }
 }
 
 /** Check cross-record measurement invariants that cannot be expressed by Zod alone. */
@@ -226,6 +240,9 @@ export function assertMeasurementSetSemantics(measurements: MeasurementSet): voi
   for (const measurementCase of measurements.cases) {
     if (caseIds.has(measurementCase.id)) throw new Error(`duplicate case id "${measurementCase.id}"`);
     caseIds.add(measurementCase.id);
+    if (new Set(measurementCase.slices).size !== measurementCase.slices.length) {
+      throw new Error(`case "${measurementCase.id}" has a duplicate slice label`);
+    }
 
     const profileIds = new Set<string>();
     for (const observationSet of measurementCase.observations) {
@@ -262,6 +279,17 @@ export function assertMeasurementSetSemantics(measurements: MeasurementSet): voi
 
 export function parseInferenceSpec(input: unknown): InferenceSpec {
   const spec = inferenceSpecSchema.parse(input);
+  const rawConstraints = typeof input === "object" && input !== null
+    ? (input as { constraints?: unknown }).constraints
+    : undefined;
+  const minimumCriticalSliceGroupsWasOmitted = (
+    typeof rawConstraints === "object"
+    && rawConstraints !== null
+    && !Object.prototype.hasOwnProperty.call(rawConstraints, "minimumCriticalSliceGroups")
+  );
+  if (minimumCriticalSliceGroupsWasOmitted && spec.criticalSlices.length > 0) {
+    spec.constraints.minimumCriticalSliceGroups = 1;
+  }
   assertInferenceSpecSemantics(spec);
   return spec;
 }

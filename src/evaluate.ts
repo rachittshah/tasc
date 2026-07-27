@@ -1,5 +1,10 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { bootstrapMeanCI, median, type BootstrapCI } from "./statistics.js";
+import {
+  bootstrapGroupedWeightedMeanCI,
+  median,
+  type BootstrapCI,
+  type GroupedCaseEffect,
+} from "./statistics.js";
 import { canonicalJson, compareCodeUnits } from "./determinism.js";
 import { sha256 } from "./integrity.js";
 import { assertMeasurementMatrix, type InferenceSpec, type MeasurementSet } from "./schema.js";
@@ -27,7 +32,7 @@ export interface PolicyMetrics {
   p95EndToEndLatencyMs: number;
   p99EndToEndLatencyMs: number;
   p10PerceivedTokensPerSecond: number;
-  p50TotalTokensPerSecond: number;
+  p50TotalTokensPerSecond: number | null;
   costPerRequestUsd: number;
   costPerThousandRequestsUsd: number;
   escalationRate: number;
@@ -44,9 +49,34 @@ export interface GateResult {
 }
 
 export interface PairedQualityResult {
+  method: "paired-group-percentile-v1";
+  alpha: number;
   caseCount: number;
+  replicateCount: number;
+  groupCount: number;
+  effectiveTrafficMass: number;
   deltas: number[];
-  bootstrap: BootstrapCI;
+  replicateDeltas: Array<{
+    caseId: string;
+    replicateId: string;
+    delta: number;
+  }>;
+  caseEffects: GroupedCaseEffect[];
+  criticalSliceGroupCoverage: Record<string, number>;
+  estimate: number;
+  interval: {
+    lo: number | null;
+    hi: number | null;
+  };
+  iterations: number;
+  seed: number;
+  inferenceAvailable: boolean;
+  unavailableReason?: string;
+  /** Compatibility projection for existing v1 artifact readers. */
+  bootstrap: Omit<BootstrapCI, "lo" | "hi"> & {
+    lo: number | null;
+    hi: number | null;
+  };
 }
 
 export interface PolicyEvaluation {
@@ -113,7 +143,7 @@ export interface NominationResult {
 
 export interface ConfirmationResult {
   version: "tasc-confirmation-v1";
-  status: "DEMO_ONLY" | "READY_FOR_MANUAL_PRODUCTION" | "HOLD";
+  status: "DEMO_ONLY" | "HOLD";
   specDigest: string;
   holdoutDatasetDigest: string;
   nominationDigest: string;
@@ -201,19 +231,31 @@ function assertDirectEvaluationWorkBudget(
 
 function effectiveWeightedRows(rows: readonly ReplayedRow[]): Array<{ row: ReplayedRow; weight: number }> {
   const replicatesByCase = new Map<string, number>();
-  for (const row of rows) {
+  const orderedRows = [...rows].sort((left, right) => (
+    compareCodeUnits(left.caseId, right.caseId)
+    || left.replicateIndex - right.replicateIndex
+  ));
+  for (const row of orderedRows) {
     replicatesByCase.set(row.caseId, (replicatesByCase.get(row.caseId) ?? 0) + 1);
   }
-  return rows.map((row) => ({
+  return orderedRows.map((row) => ({
     row,
     weight: row.trafficWeight / replicatesByCase.get(row.caseId)!,
   }));
 }
 
 function weightedMean(values: readonly WeightedValue[]): number {
-  const totalWeight = values.reduce((sum, entry) => sum + entry.weight, 0);
+  let totalWeight = 0;
+  let numerator = 0;
+  for (const entry of values) {
+    totalWeight += entry.weight;
+    numerator += entry.value * entry.weight;
+    if (!Number.isFinite(totalWeight) || !Number.isFinite(numerator)) {
+      throw new Error("weighted metric accumulation exceeds the finite numeric range");
+    }
+  }
   if (totalWeight === 0) return 0;
-  return values.reduce((sum, entry) => sum + entry.value * entry.weight, 0) / totalWeight;
+  return numerator / totalWeight;
 }
 
 /**
@@ -242,6 +284,20 @@ export function computePolicyMetrics(rows: ReplayedRow[], criticalSlices: string
   const scoreValues = values((row) => row.status === "failure" ? 0 : row.taskScore);
   const costPerRequestUsd = weightedMean(values((row) => row.costUsd));
   const criticalSliceTaskScore: Record<string, number | null> = {};
+  const serviceThroughputValues: WeightedValue[] = [];
+  let serviceThroughputUnavailable = false;
+  for (const { row, weight } of weightedRows) {
+    const observation = row.serviceThroughput;
+    if (
+      observation?.kind === "measured"
+      && Number.isFinite(observation.tokensPerSecond)
+      && observation.tokensPerSecond >= 0
+    ) {
+      serviceThroughputValues.push({ value: observation.tokensPerSecond, weight });
+    } else {
+      serviceThroughputUnavailable = true;
+    }
+  }
 
   for (const slice of criticalSlices) {
     const sliceRows = weightedRows
@@ -263,10 +319,9 @@ export function computePolicyMetrics(rows: ReplayedRow[], criticalSlices: string
       values((row) => row.status === "failure" ? 0 : row.perceivedTokensPerSecond),
       0.1,
     ),
-    p50TotalTokensPerSecond: weightedQuantile(
-      values((row) => row.status === "failure" ? 0 : row.totalTokensPerSecond),
-      0.5,
-    ),
+    p50TotalTokensPerSecond: serviceThroughputUnavailable
+      ? null
+      : weightedQuantile(serviceThroughputValues, 0.5),
     costPerRequestUsd,
     costPerThousandRequestsUsd: costPerRequestUsd * 1_000,
     escalationRate: weightedMean(values((row) => row.escalated ? 1 : 0)),
@@ -288,14 +343,158 @@ function gate(
   return { id, pass, actual, threshold, comparison, reason };
 }
 
-function caseScores(rows: readonly ReplayedRow[]): Map<string, number[]> {
-  const byCase = new Map<string, number[]>();
+function serviceThroughputGate(actual: number | null, threshold: number): GateResult {
+  if (actual === null && threshold === 0) {
+    return {
+      id: "p50_total_tps",
+      pass: true,
+      actual: null,
+      threshold,
+      comparison: ">=",
+      reason: "p50_total_tps is unavailable and the zero threshold explicitly disables the capacity requirement",
+    };
+  }
+  return gate(
+    "p50_total_tps",
+    actual,
+    threshold,
+    ">=",
+    "p50_total_tps is unavailable for the exact policy and the required capacity gate fails closed",
+  );
+}
+
+interface PairedCase {
+  caseId: string;
+  groupId: string;
+  trafficWeight: number;
+  slices: string[];
+  critical: boolean;
+  replicateDeltas: Array<{
+    caseId: string;
+    replicateId: string;
+    delta: number;
+  }>;
+}
+
+function normalizedSlices(row: ReplayedRow, label: string): string[] {
+  if (!Array.isArray(row.slices)) throw new Error(`${label} slices must be an array`);
+  const slices = [...row.slices].sort(compareCodeUnits);
+  if (new Set(slices).size !== slices.length) {
+    throw new Error(`${label} has duplicate slice labels`);
+  }
+  return slices;
+}
+
+function rowScore(row: ReplayedRow, label: string): number {
+  if (row.status === "failure") return 0;
+  if (!Number.isFinite(row.taskScore) || row.taskScore < 0 || row.taskScore > 1) {
+    throw new Error(`${label} successful row is missing a finite task score in [0, 1]`);
+  }
+  return row.taskScore;
+}
+
+function assertRowIdentity(row: ReplayedRow, label: string): void {
+  if (typeof row.caseId !== "string" || row.caseId.length === 0) {
+    throw new Error(`${label} caseId must be non-empty`);
+  }
+  if (!Number.isSafeInteger(row.replicateIndex) || row.replicateIndex < 0) {
+    throw new Error(`${label} replicateIndex must be a safe non-negative integer`);
+  }
+  if (typeof row.groupId !== "string" || row.groupId.length === 0) {
+    throw new Error(`${label} groupId must be non-empty`);
+  }
+  if (!Number.isFinite(row.trafficWeight) || row.trafficWeight <= 0) {
+    throw new Error(`${label} trafficWeight must be finite and positive`);
+  }
+  if (typeof row.critical !== "boolean") throw new Error(`${label} critical must be boolean`);
+  normalizedSlices(row, label);
+  rowScore(row, label);
+}
+
+function sameSlices(left: ReplayedRow, right: ReplayedRow, label: string): boolean {
+  const leftSlices = normalizedSlices(left, `${label} candidate`);
+  const rightSlices = normalizedSlices(right, `${label} champion`);
+  return (
+    leftSlices.length === rightSlices.length
+    && leftSlices.every((slice, index) => slice === rightSlices[index])
+  );
+}
+
+function assertLineage(left: ReplayedRow, right: ReplayedRow, label: string): void {
+  if (left.groupId !== right.groupId) throw new Error(`${label} has group lineage drift`);
+  if (left.trafficWeight !== right.trafficWeight) throw new Error(`${label} has traffic-weight lineage drift`);
+  if (!sameSlices(left, right, label)) throw new Error(`${label} has slice-set lineage drift`);
+  if (left.critical !== right.critical) throw new Error(`${label} has critical lineage drift`);
+}
+
+function indexRows(rows: readonly ReplayedRow[], label: string): Map<string, Map<number, ReplayedRow>> {
+  const byCase = new Map<string, Map<number, ReplayedRow>>();
+  const caseBaseline = new Map<string, ReplayedRow>();
   for (const row of rows) {
-    const scores = byCase.get(row.caseId) ?? [];
-    scores.push(row.status === "failure" ? 0 : row.taskScore);
-    byCase.set(row.caseId, scores);
+    assertRowIdentity(row, label);
+    const baseline = caseBaseline.get(row.caseId);
+    if (baseline === undefined) caseBaseline.set(row.caseId, row);
+    else assertLineage(row, baseline, `${label} case "${row.caseId}"`);
+    const byReplicate = byCase.get(row.caseId) ?? new Map<number, ReplayedRow>();
+    if (byReplicate.has(row.replicateIndex)) {
+      throw new Error(
+        `${label} has duplicate (caseId, replicateIndex) pair ("${row.caseId}", ${row.replicateIndex})`,
+      );
+    }
+    byReplicate.set(row.replicateIndex, row);
+    byCase.set(row.caseId, byReplicate);
   }
   return byCase;
+}
+
+function pairRows(
+  candidateRows: readonly ReplayedRow[],
+  championRows: readonly ReplayedRow[],
+): PairedCase[] {
+  const candidateByCase = indexRows(candidateRows, "candidate");
+  const championByCase = indexRows(championRows, "champion");
+  const caseIds = [...new Set([...candidateByCase.keys(), ...championByCase.keys()])].sort(compareCodeUnits);
+  const pairedCases: PairedCase[] = [];
+  for (const caseId of caseIds) {
+    const candidateReplicates = candidateByCase.get(caseId);
+    const championReplicates = championByCase.get(caseId);
+    if (candidateReplicates === undefined || championReplicates === undefined) {
+      throw new Error(`missing paired case-replicate rows for case "${caseId}"`);
+    }
+    const replicateIndexes = [...new Set([
+      ...candidateReplicates.keys(),
+      ...championReplicates.keys(),
+    ])].sort((left, right) => left - right);
+    const replicateDeltas: PairedCase["replicateDeltas"] = [];
+    let baseline: ReplayedRow | undefined;
+    for (const replicateIndex of replicateIndexes) {
+      const candidate = candidateReplicates.get(replicateIndex);
+      const champion = championReplicates.get(replicateIndex);
+      if (candidate === undefined || champion === undefined) {
+        throw new Error(
+          `missing (caseId, replicateIndex) pair ("${caseId}", ${replicateIndex})`,
+        );
+      }
+      assertLineage(candidate, champion, `paired case "${caseId}" replicate ${replicateIndex}`);
+      if (baseline === undefined) baseline = candidate;
+      else assertLineage(candidate, baseline, `candidate case "${caseId}"`);
+      replicateDeltas.push({
+        caseId,
+        replicateId: `legacy-replicate-${replicateIndex}`,
+        delta: rowScore(candidate, "candidate") - rowScore(champion, "champion"),
+      });
+    }
+    const row = baseline!;
+    pairedCases.push({
+      caseId,
+      groupId: row.groupId,
+      trafficWeight: row.trafficWeight,
+      slices: normalizedSlices(row, `case "${caseId}"`),
+      critical: row.critical,
+      replicateDeltas,
+    });
+  }
+  return pairedCases;
 }
 
 function evaluatePolicyInternal(
@@ -304,24 +503,85 @@ function evaluatePolicyInternal(
   spec: InferenceSpec,
   requireDevelopmentCostImprovement: boolean,
 ): PolicyEvaluation {
-  const candidateByCase = caseScores(candidateRows);
-  const championByCase = caseScores(championRows);
-  const pairedCaseIds = [...candidateByCase.keys()]
-    .filter((caseId) => championByCase.has(caseId))
-    .sort(compareCodeUnits);
-  if (pairedCaseIds.length < 3) {
-    throw new Error(`at least 3 unique paired cases are required; received ${pairedCaseIds.length}`);
+  const criticalSlices = [...new Set(spec.criticalSlices)].sort(compareCodeUnits);
+  const pairedCases = pairRows(candidateRows, championRows);
+  if (pairedCases.length === 0) throw new Error("at least one exact paired case is required");
+  const replicateDeltas = pairedCases.flatMap((pairedCase) => pairedCase.replicateDeltas);
+  const deltas = replicateDeltas.map(({ delta }) => delta);
+  const caseEffects: GroupedCaseEffect[] = pairedCases.map((pairedCase) => ({
+    caseId: pairedCase.caseId,
+    groupId: pairedCase.groupId,
+    effect: median(pairedCase.replicateDeltas.map(({ delta }) => delta)),
+    trafficWeight: pairedCase.trafficWeight,
+  }));
+  const groupCount = new Set(pairedCases.map(({ groupId }) => groupId)).size;
+  const criticalSliceGroupCoverage = Object.fromEntries(criticalSlices
+    .map((slice): [string, number] => [
+      slice,
+      new Set(pairedCases.filter((pairedCase) => pairedCase.slices.includes(slice))
+        .map(({ groupId }) => groupId)).size,
+    ])
+    .sort(([left], [right]) => compareCodeUnits(left, right)));
+  const coverageFailures = [
+    ...(groupCount < spec.constraints.minimumIndependentGroups
+      ? [`independent groups ${groupCount} < ${spec.constraints.minimumIndependentGroups}`]
+      : []),
+    ...criticalSlices
+      .filter((slice) => criticalSliceGroupCoverage[slice] < spec.constraints.minimumCriticalSliceGroups)
+      .map((slice) => (
+        `critical slice "${slice}" groups ${criticalSliceGroupCoverage[slice]}`
+        + ` < ${spec.constraints.minimumCriticalSliceGroups}`
+      )),
+  ];
+  const inferenceAvailable = coverageFailures.length === 0;
+  const groupedBootstrap = inferenceAvailable
+    ? bootstrapGroupedWeightedMeanCI(caseEffects, {
+      alpha: spec.bootstrap.alpha,
+      seed: spec.bootstrap.seed,
+      iters: spec.bootstrap.iterations,
+    })
+    : undefined;
+  let effectiveTrafficMass = 0;
+  let weightedEffect = 0;
+  for (const effect of caseEffects) {
+    effectiveTrafficMass += effect.trafficWeight;
+    weightedEffect += effect.effect * effect.trafficWeight;
+    if (!Number.isFinite(effectiveTrafficMass) || !Number.isFinite(weightedEffect)) {
+      throw new Error("paired-quality traffic accumulation exceeds the finite numeric range");
+    }
   }
-
-  const deltas = pairedCaseIds.map((caseId) => (
-    median(candidateByCase.get(caseId)!) - median(championByCase.get(caseId)!)
-  ));
-  const bootstrap = bootstrapMeanCI(deltas, {
-    seed: spec.bootstrap.seed,
+  const estimate = groupedBootstrap?.estimate ?? weightedEffect / effectiveTrafficMass;
+  const bootstrap = {
+    mean: estimate,
+    lo: groupedBootstrap?.interval.lo ?? null,
+    hi: groupedBootstrap?.interval.hi ?? null,
     iters: spec.bootstrap.iterations,
-  });
-  const candidateMetrics = computePolicyMetrics(candidateRows, spec.criticalSlices);
-  const championMetrics = computePolicyMetrics(championRows, spec.criticalSlices);
+    positive: (groupedBootstrap?.interval.lo ?? Number.NEGATIVE_INFINITY) > 0,
+  };
+  const pairedQuality: PairedQualityResult = {
+    method: "paired-group-percentile-v1",
+    alpha: spec.bootstrap.alpha,
+    caseCount: pairedCases.length,
+    replicateCount: replicateDeltas.length,
+    groupCount,
+    effectiveTrafficMass,
+    deltas,
+    replicateDeltas,
+    caseEffects,
+    criticalSliceGroupCoverage,
+    estimate,
+    interval: {
+      lo: groupedBootstrap?.interval.lo ?? null,
+      hi: groupedBootstrap?.interval.hi ?? null,
+    },
+    iterations: spec.bootstrap.iterations,
+    seed: spec.bootstrap.seed,
+    inferenceAvailable,
+    ...(inferenceAvailable ? {} : { unavailableReason: `Coverage failed before inference: ${coverageFailures.join("; ")}` }),
+    bootstrap,
+  };
+  const candidateMetrics = computePolicyMetrics(candidateRows, criticalSlices);
+  const championMetrics = computePolicyMetrics(championRows, criticalSlices);
   const championCost = championMetrics.costPerRequestUsd;
   const costImprovement = championCost === 0
     ? null
@@ -330,12 +590,25 @@ function evaluatePolicyInternal(
   const gates: GateResult[] = [
     gate(
       "paired_quality_non_inferiority",
-      bootstrap.lo,
+      pairedQuality.interval.lo,
       spec.constraints.nonInferiorityMargin,
       ">=",
+      pairedQuality.unavailableReason,
     ),
+    gate(
+      "minimum_independent_groups",
+      groupCount,
+      spec.constraints.minimumIndependentGroups,
+      ">=",
+    ),
+    ...criticalSlices.map((slice) => gate(
+      `critical_slice_groups:${slice}`,
+      criticalSliceGroupCoverage[slice],
+      spec.constraints.minimumCriticalSliceGroups,
+      ">=",
+    )),
     gate("mean_task_score", candidateMetrics.meanTaskScore, spec.constraints.taskScoreFloor, ">="),
-    ...spec.criticalSlices.map((slice) => gate(
+    ...criticalSlices.map((slice) => gate(
       `critical_slice:${slice}`,
       candidateMetrics.criticalSliceTaskScore[slice],
       spec.constraints.criticalSliceScoreFloor,
@@ -355,11 +628,9 @@ function evaluatePolicyInternal(
       spec.constraints.minP10PerceivedTokensPerSecond,
       ">=",
     ),
-    gate(
-      "p50_total_tps",
+    serviceThroughputGate(
       candidateMetrics.p50TotalTokensPerSecond,
       spec.constraints.minP50TotalTokensPerSecond,
-      ">=",
     ),
     gate("error_rate", candidateMetrics.errorRate, spec.constraints.maxErrorRate, "<="),
     gate(
@@ -386,7 +657,7 @@ function evaluatePolicyInternal(
   return {
     candidateMetrics,
     championMetrics,
-    pairedQuality: { caseCount: pairedCaseIds.length, deltas, bootstrap },
+    pairedQuality,
     costImprovement,
     gates,
     passed: gates.every((result) => result.pass),
@@ -412,6 +683,58 @@ function digest(value: unknown): string {
   return sha256(canonicalJson(value));
 }
 
+function normalizedSpecForDigest(spec: InferenceSpec): InferenceSpec {
+  const normalized = structuredClone(spec);
+  normalized.profiles.sort((left, right) => compareCodeUnits(left.id, right.id));
+  normalized.candidateSpace.confidenceThresholds = [
+    ...new Set(normalized.candidateSpace.confidenceThresholds),
+  ].sort((left, right) => left - right);
+  normalized.candidateSpace.inputTokenThresholds = [
+    ...new Set(normalized.candidateSpace.inputTokenThresholds),
+  ].sort((left, right) => left - right);
+  normalized.criticalSlices = [...new Set(normalized.criticalSlices)].sort(compareCodeUnits);
+  return normalized;
+}
+
+function specDigest(spec: InferenceSpec): string {
+  return digest(normalizedSpecForDigest(spec));
+}
+
+function legacySpecProjection(spec: InferenceSpec): unknown {
+  const legacy = structuredClone(spec);
+  const legacyConstraints = legacy.constraints as unknown as Record<string, unknown>;
+  const legacyBootstrap = legacy.bootstrap as unknown as Record<string, unknown>;
+  delete legacyConstraints.minimumIndependentGroups;
+  delete legacyConstraints.minimumCriticalSliceGroups;
+  delete legacyBootstrap.alpha;
+  return legacy;
+}
+
+function hasLegacyDefaultInferenceControls(spec: InferenceSpec): boolean {
+  return (
+    spec.bootstrap.alpha === 0.05
+    && spec.constraints.minimumIndependentGroups === 3
+    && spec.constraints.minimumCriticalSliceGroups === (spec.criticalSlices.length === 0 ? 0 : 1)
+  );
+}
+
+function normalizedMeasurementsForDigest(measurements: MeasurementSet): MeasurementSet {
+  const normalized = structuredClone(measurements);
+  normalized.cases = normalized.cases
+    .map((measurementCase) => ({
+      ...measurementCase,
+      slices: [...measurementCase.slices].sort(compareCodeUnits),
+      observations: [...measurementCase.observations]
+        .sort((left, right) => compareCodeUnits(left.profileId, right.profileId)),
+    }))
+    .sort((left, right) => compareCodeUnits(left.id, right.id));
+  return normalized;
+}
+
+function measurementDigest(measurements: MeasurementSet): string {
+  return digest(normalizedMeasurementsForDigest(measurements));
+}
+
 function dominates(left: PolicyMetrics, right: PolicyMetrics): boolean {
   const higherIsBetter: Array<keyof PolicyMetrics> = [
     "meanTaskScore",
@@ -424,13 +747,22 @@ function dominates(left: PolicyMetrics, right: PolicyMetrics): boolean {
     "p95EndToEndLatencyMs",
     "costPerRequestUsd",
   ];
+  const comparable = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value);
   const neverWorse = (
-    higherIsBetter.every((key) => (left[key] as number) >= (right[key] as number))
-    && lowerIsBetter.every((key) => (left[key] as number) <= (right[key] as number))
+    higherIsBetter.every((key) => (
+      comparable(left[key]) && comparable(right[key]) && left[key] >= right[key]
+    ))
+    && lowerIsBetter.every((key) => (
+      comparable(left[key]) && comparable(right[key]) && left[key] <= right[key]
+    ))
   );
   const strictlyBetter = (
-    higherIsBetter.some((key) => (left[key] as number) > (right[key] as number))
-    || lowerIsBetter.some((key) => (left[key] as number) < (right[key] as number))
+    higherIsBetter.some((key) => (
+      comparable(left[key]) && comparable(right[key]) && left[key] > right[key]
+    ))
+    || lowerIsBetter.some((key) => (
+      comparable(left[key]) && comparable(right[key]) && left[key] < right[key]
+    ))
   );
   return neverWorse && strictlyBetter;
 }
@@ -494,7 +826,7 @@ export function nominatePolicy(
   }
 
   const selected = orderedFrontier[0];
-  const specDigest = digest(spec);
+  const resolvedSpecDigest = specDigest(spec);
   const policyDigest = fingerprintPolicy(selected.policy);
   const decisionDigest = digest({
     evaluations,
@@ -503,8 +835,8 @@ export function nominatePolicy(
   });
   const artifactBody: NominationArtifactBody = {
     version: "tasc-nomination-v1",
-    specDigest,
-    developmentDatasetDigest: digest(dev),
+    specDigest: resolvedSpecDigest,
+    developmentDatasetDigest: measurementDigest(dev),
     evaluator: structuredClone(dev.evaluator),
     developmentGroupIds: [...new Set(dev.cases.map((measurementCase) => measurementCase.groupId))]
       .sort(compareCodeUnits),
@@ -574,6 +906,37 @@ function evaluatorMatches(
   );
 }
 
+function isRegisteredLegacyCandidate(policy: InferencePolicy, spec: InferenceSpec): boolean {
+  if (
+    policy.version !== "tasc-policy-v1"
+    || policy.kind === "expert-only"
+    || policy.primaryProfileId !== spec.primaryProfileId
+    || policy.expertProfileId !== spec.championProfileId
+    || policy.criticalSlices.length !== spec.criticalSlices.length
+    || policy.criticalSlices.some((slice, index) => slice !== spec.criticalSlices[index])
+  ) {
+    return false;
+  }
+  if (
+    policy.kind === "fast-only"
+      ? (
+        !spec.candidateSpace.includeFastOnly
+        || policy.confidenceThreshold !== undefined
+        || policy.inputTokenThreshold !== undefined
+      )
+      : (
+        policy.confidenceThreshold === undefined
+        || policy.inputTokenThreshold === undefined
+        || !spec.candidateSpace.confidenceThresholds.includes(policy.confidenceThreshold)
+        || !spec.candidateSpace.inputTokenThresholds.includes(policy.inputTokenThreshold)
+      )
+  ) {
+    return false;
+  }
+  const { id: _id, ...body } = policy;
+  return policy.id === `${policy.kind}-${sha256(canonicalJson(body)).slice(0, 16)}`;
+}
+
 export function confirmNomination(
   spec: InferenceSpec,
   holdout: MeasurementSet,
@@ -593,8 +956,12 @@ export function confirmNomination(
   const attestationVerified = attestationKey !== undefined;
   assertAssessmentWorkBudget(spec, holdout, options.workBudget ?? DEFAULT_ASSESSMENT_WORK_BUDGET);
 
-  const specDigest = digest(spec);
-  if (nomination.specDigest !== specDigest) {
+  const resolvedSpecDigest = specDigest(spec);
+  const matchesLegacySpecDigest = (
+    hasLegacyDefaultInferenceControls(spec)
+    && nomination.specDigest === digest(legacySpecProjection(spec))
+  );
+  if (nomination.specDigest !== resolvedSpecDigest && !matchesLegacySpecDigest) {
     throw new Error("spec digest mismatch: nomination was produced from a different inference spec");
   }
   if (nomination.policyDigest !== fingerprintPolicy(nomination.policy)) {
@@ -605,7 +972,11 @@ export function confirmNomination(
     candidate.id === nomination.policy.id
     && fingerprintPolicy(candidate) === nomination.policyDigest
     && canonicalJson(candidate) === canonicalJson(nomination.policy)
-  ));
+  )) ?? (
+    matchesLegacySpecDigest && isRegisteredLegacyCandidate(nomination.policy, spec)
+      ? structuredClone(nomination.policy)
+      : undefined
+  );
   if (!regenerated) {
     throw new Error("policy drift: nomination does not exactly match a regenerated candidate");
   }
@@ -632,22 +1003,26 @@ export function confirmNomination(
   if (!evaluation.passed) {
     status = "HOLD";
     const failedGateIds = evaluation.gates.filter((gateResult) => !gateResult.pass).map((gateResult) => gateResult.id);
-    statusReason = `Holdout hard gates failed: ${failedGateIds.join(", ")}`;
+    statusReason = `Holdout hard gates failed: ${failedGateIds.join(", ")}`
+      + (
+        nomination.developmentSynthetic || holdout.dataset.synthetic
+          ? ""
+          : "; legacy v1 migration to a registered v2 protocol is required for any production recommendation"
+      );
   } else if (nomination.developmentSynthetic || holdout.dataset.synthetic) {
     status = "DEMO_ONLY";
     statusReason = "Passing gates are demo-only because development or holdout evidence is synthetic";
-  } else if (attestationVerified) {
-    status = "READY_FOR_MANUAL_PRODUCTION";
-    statusReason = "Passing real evidence has a verified nomination attestation; manual production review is required";
   } else {
     status = "HOLD";
-    statusReason = "Production readiness requires a verified nomination attestation";
+    statusReason = attestationVerified
+      ? "Passing real legacy v1 evidence is capped at HOLD; migrate to a registered v2 protocol for any production recommendation"
+      : "Production readiness requires migration from legacy v1 to a registered v2 protocol with verified attestation provenance";
   }
   const confirmationBody = {
     version: "tasc-confirmation-v1" as const,
     status,
-    specDigest,
-    holdoutDatasetDigest: digest(holdout),
+    specDigest: resolvedSpecDigest,
+    holdoutDatasetDigest: measurementDigest(holdout),
     nominationDigest: nomination.selfDigest,
     evaluator: structuredClone(holdout.evaluator),
     holdoutGroupIds: [...new Set(holdout.cases.map((measurementCase) => measurementCase.groupId))]

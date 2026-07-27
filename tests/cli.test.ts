@@ -181,6 +181,59 @@ describe("TASC CLI synthetic end-to-end example", () => {
     )).rejects.toThrow(/provenance.*synthetic/i);
   }, 30_000);
 
+  it("produces the same nomination and digest under distinct locale environments", async () => {
+    const root = await mkdtemp(resolve(tmpdir(), "tasc-locale-"));
+    const firstOut = resolve(root, "first");
+    const secondOut = resolve(root, "second");
+    const first = runCli([
+      "nominate", "--spec", SPEC, "--measurements", DEV, "--out", firstOut,
+    ], { LANG: "de_DE.UTF-8", LC_ALL: "de_DE.UTF-8" });
+    const second = runCli([
+      "nominate", "--spec", SPEC, "--measurements", DEV, "--out", secondOut,
+    ], { LANG: "sv_SE.UTF-8", LC_ALL: "sv_SE.UTF-8" });
+
+    expect(first.status, first.stderr).toBe(0);
+    expect(second.status, second.stderr).toBe(0);
+    expect(await json(resolve(firstOut, "nomination.json")))
+      .toEqual(await json(resolve(secondOut, "nomination.json")));
+    expect(await digest(resolve(firstOut, "nomination.json")))
+      .toBe(await digest(resolve(secondOut, "nomination.json")));
+  }, 30_000);
+
+  it("reports passing real legacy confirmation as HOLD with a v2 migration reason", async () => {
+    const root = await mkdtemp(resolve(tmpdir(), "tasc-legacy-real-"));
+    const devPath = resolve(root, "dev.json");
+    const holdoutPath = resolve(root, "holdout.json");
+    const devOut = resolve(root, "dev-out");
+    const holdoutOut = resolve(root, "holdout-out");
+    const dev = await json(DEV);
+    const holdout = await json(HOLDOUT);
+    dev.dataset.synthetic = false;
+    holdout.dataset.synthetic = false;
+    await writeFile(devPath, `${JSON.stringify(dev, null, 2)}\n`);
+    await writeFile(holdoutPath, `${JSON.stringify(holdout, null, 2)}\n`);
+    const key = "task4-real-legacy-attestation-key-at-least-32-bytes";
+
+    const nominated = runCli([
+      "nominate", "--spec", SPEC, "--measurements", devPath, "--out", devOut,
+    ], { TASC_ATTESTATION_KEY: key });
+    expect(nominated.status, nominated.stderr).toBe(0);
+    const confirmed = runCli([
+      "confirm",
+      "--spec", SPEC,
+      "--measurements", holdoutPath,
+      "--nomination", resolve(devOut, "nomination.json"),
+      "--out", holdoutOut,
+    ], { TASC_ATTESTATION_KEY: key });
+
+    expect(confirmed.status, confirmed.stderr).toBe(0);
+    expect(confirmed.stdout).toContain("HOLD");
+    const confirmation = await json(resolve(holdoutOut, "confirmation.json"));
+    expect(confirmation.status).toBe("HOLD");
+    expect(confirmation.statusReason).toMatch(/legacy v1.*migrat|migrat.*v2/i);
+    expect(await readFile(resolve(holdoutOut, "report.md"), "utf8")).toMatch(/legacy v1.*migrat|migrat.*v2/i);
+  }, 30_000);
+
   it("writes diagnostic artifacts and exits normally when no candidate passes", async () => {
     const root = await mkdtemp(resolve(tmpdir(), "tasc-no-candidate-"));
     const impossibleSpecPath = resolve(root, "spec.json");

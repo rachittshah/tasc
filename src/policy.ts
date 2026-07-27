@@ -36,7 +36,13 @@ export interface ReplayedRow {
   endToEndLatencyMs: number;
   outputTokens: number;
   perceivedTokensPerSecond: number;
-  totalTokensPerSecond: number;
+  serviceThroughput: {
+    kind: "measured";
+    tokensPerSecond: number;
+  } | {
+    kind: "unavailable";
+    reason: string;
+  };
   costUsd: number;
   cacheHit?: boolean;
   failureCode?: string;
@@ -52,6 +58,15 @@ function withStableId(body: PolicyBody): InferencePolicy {
   return { ...body, id };
 }
 
+const CASCADE_THROUGHPUT_UNAVAILABLE = Object.freeze({
+  kind: "unavailable" as const,
+  reason: "legacy cascade has no exact-policy window service-capacity observation",
+});
+
+function normalizedCriticalSlices(slices: readonly string[]): string[] {
+  return [...new Set(slices)].sort(compareCodeUnits);
+}
+
 /** A policy digest is order-insensitive for object keys and stable across processes. */
 export function fingerprintPolicy(policy: InferencePolicy): string {
   return sha256(canonicalJson(policy));
@@ -64,7 +79,7 @@ export function championPolicy(spec: InferenceSpec): InferencePolicy {
     kind: "expert-only",
     primaryProfileId: spec.primaryProfileId,
     expertProfileId: spec.championProfileId,
-    criticalSlices: [...spec.criticalSlices],
+    criticalSlices: normalizedCriticalSlices(spec.criticalSlices),
   });
 }
 
@@ -86,7 +101,7 @@ export function generateCandidatePolicies(spec: InferenceSpec): InferencePolicy[
         expertProfileId: spec.championProfileId,
         confidenceThreshold,
         inputTokenThreshold,
-        criticalSlices: [...spec.criticalSlices],
+        criticalSlices: normalizedCriticalSlices(spec.criticalSlices),
       }));
     }
   }
@@ -97,7 +112,7 @@ export function generateCandidatePolicies(spec: InferenceSpec): InferencePolicy[
       kind: "fast-only",
       primaryProfileId: spec.primaryProfileId,
       expertProfileId: spec.championProfileId,
-      criticalSlices: [...spec.criticalSlices],
+      criticalSlices: normalizedCriticalSlices(spec.criticalSlices),
     }));
   }
 
@@ -131,7 +146,9 @@ function replayedSuccess(
     endToEndLatencyMs: observation.endToEndLatencyMs,
     outputTokens: observation.outputTokens,
     perceivedTokensPerSecond: observation.perceivedTokensPerSecond,
-    totalTokensPerSecond: observation.totalTokensPerSecond,
+    serviceThroughput: policy.kind === "cascade"
+      ? CASCADE_THROUGHPUT_UNAVAILABLE
+      : { kind: "measured", tokensPerSecond: observation.totalTokensPerSecond },
     costUsd: observation.costUsd,
     ...(observation.cacheHit === undefined ? {} : { cacheHit: observation.cacheHit }),
     trafficWeight: measurementCase.trafficWeight,
@@ -163,7 +180,9 @@ function replayedFailure(
     endToEndLatencyMs: observation.elapsedMs,
     outputTokens: 0,
     perceivedTokensPerSecond: 0,
-    totalTokensPerSecond: 0,
+    serviceThroughput: policy.kind === "cascade"
+      ? CASCADE_THROUGHPUT_UNAVAILABLE
+      : { kind: "unavailable", reason: "failed execution has no measured service-throughput observation" },
     costUsd: observation.costUsd,
     failureCode: observation.failureCode,
     trafficWeight: measurementCase.trafficWeight,

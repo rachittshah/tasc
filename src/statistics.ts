@@ -1,3 +1,5 @@
+import { compareCodeUnits } from "./determinism.js";
+
 /** Deterministic PRNG used to make bootstrap decisions reproducible. */
 export function mulberry32(seed: number): () => number {
   let state = seed >>> 0;
@@ -42,6 +44,132 @@ export interface BootstrapCI {
   hi: number;
   iters: number;
   positive: boolean;
+}
+
+export interface GroupedCaseEffect {
+  caseId: string;
+  groupId: string;
+  effect: number;
+  trafficWeight: number;
+}
+
+export interface GroupedWeightedBootstrapCI {
+  method: "paired-group-percentile-v1";
+  alpha: number;
+  caseCount: number;
+  groupCount: number;
+  effectiveTrafficMass: number;
+  estimate: number;
+  interval: {
+    lo: number;
+    hi: number;
+  };
+  iterations: number;
+  seed: number;
+  positive: boolean;
+}
+
+interface GroupAccumulator {
+  groupId: string;
+  numerator: number;
+  mass: number;
+}
+
+function checkedFiniteAdd(left: number, right: number, name: string): number {
+  const result = left + right;
+  if (!Number.isFinite(result)) throw new Error(`${name} exceeds the finite numeric range`);
+  return result;
+}
+
+/**
+ * Percentile bootstrap over independent groups. Each draw samples sorted group IDs
+ * uniformly with replacement and retains case traffic mass inside the sampled group.
+ */
+export function bootstrapGroupedWeightedMeanCI(
+  caseEffects: readonly GroupedCaseEffect[],
+  options: { iters?: number; alpha?: number; seed?: number } = {},
+): GroupedWeightedBootstrapCI {
+  const iters = options.iters ?? 10_000;
+  const alpha = options.alpha ?? 0.05;
+  const seed = options.seed ?? 0x9e3779b9;
+  if (!Number.isSafeInteger(iters) || iters < 1 || iters > 1_000_000) {
+    throw new Error("bootstrap iterations must be a bounded positive integer");
+  }
+  if (!Number.isFinite(alpha) || alpha <= 0 || alpha >= 1) {
+    throw new Error("bootstrap alpha must be between 0 and 1");
+  }
+  if (!Number.isSafeInteger(seed)) throw new Error("bootstrap seed must be a safe integer");
+  if (caseEffects.length === 0) throw new Error("grouped bootstrap requires at least one case effect");
+  if (caseEffects.length > 100_000) {
+    throw new Error("grouped bootstrap case effects exceed the bounded maximum");
+  }
+
+  const caseIds = new Set<string>();
+  for (const entry of caseEffects) {
+    if (entry.caseId.length === 0 || entry.groupId.length === 0) {
+      throw new Error("grouped bootstrap case and group IDs must be non-empty");
+    }
+    if (caseIds.has(entry.caseId)) throw new Error(`duplicate grouped-bootstrap case ID "${entry.caseId}"`);
+    caseIds.add(entry.caseId);
+    if (!Number.isFinite(entry.effect)) throw new Error(`case "${entry.caseId}" effect must be finite`);
+    if (!Number.isFinite(entry.trafficWeight) || entry.trafficWeight <= 0) {
+      throw new Error(`case "${entry.caseId}" traffic weight must be finite and positive`);
+    }
+  }
+
+  const byGroup = new Map<string, GroupAccumulator>();
+  let totalNumerator = 0;
+  let effectiveTrafficMass = 0;
+  for (const entry of [...caseEffects].sort((left, right) => (
+    compareCodeUnits(left.groupId, right.groupId)
+    || compareCodeUnits(left.caseId, right.caseId)
+  ))) {
+    const weightedEffect = entry.effect * entry.trafficWeight;
+    if (!Number.isFinite(weightedEffect)) {
+      throw new Error(`case "${entry.caseId}" weighted effect exceeds the finite numeric range`);
+    }
+    totalNumerator = checkedFiniteAdd(totalNumerator, weightedEffect, "weighted effect");
+    effectiveTrafficMass = checkedFiniteAdd(effectiveTrafficMass, entry.trafficWeight, "traffic mass");
+    const group = byGroup.get(entry.groupId) ?? {
+      groupId: entry.groupId,
+      numerator: 0,
+      mass: 0,
+    };
+    group.numerator = checkedFiniteAdd(group.numerator, weightedEffect, `group "${entry.groupId}" numerator`);
+    group.mass = checkedFiniteAdd(group.mass, entry.trafficWeight, `group "${entry.groupId}" traffic mass`);
+    byGroup.set(entry.groupId, group);
+  }
+  const groups = [...byGroup.values()].sort((left, right) => compareCodeUnits(left.groupId, right.groupId));
+  if (groups.length > 100_000 || iters > Math.floor(100_000_000 / groups.length)) {
+    throw new Error("grouped bootstrap iterations times independent groups exceed the bounded work maximum");
+  }
+
+  const random = mulberry32(seed);
+  const estimates = new Array<number>(iters);
+  for (let bootstrapIndex = 0; bootstrapIndex < iters; bootstrapIndex += 1) {
+    let numerator = 0;
+    let mass = 0;
+    for (let sampleIndex = 0; sampleIndex < groups.length; sampleIndex += 1) {
+      const sampled = groups[Math.floor(random() * groups.length)];
+      numerator = checkedFiniteAdd(numerator, sampled.numerator, "bootstrap numerator");
+      mass = checkedFiniteAdd(mass, sampled.mass, "bootstrap traffic mass");
+    }
+    estimates[bootstrapIndex] = numerator / mass;
+  }
+  const lo = quantile(estimates, alpha / 2);
+  const hi = quantile(estimates, 1 - alpha / 2);
+  return {
+    method: "paired-group-percentile-v1",
+    alpha,
+    caseCount: caseEffects.length,
+    groupCount: groups.length,
+    effectiveTrafficMass,
+    estimate: totalNumerator / effectiveTrafficMass,
+    interval: { lo, hi },
+    iterations: iters,
+    seed,
+    positive: lo > 0,
+  };
 }
 
 /** Percentile bootstrap confidence interval over a paired-delta mean. */
