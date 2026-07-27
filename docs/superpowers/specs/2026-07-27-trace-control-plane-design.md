@@ -106,8 +106,9 @@ the core contracts, never the other way around.
 3. **Runtime:** may report model identity, token counts, timings, and metrics.
    These remain labeled `provider_reported`; they never overwrite observer
    evidence.
-4. **External evaluator:** owns quality scores. TASC validates their shape and
-   lineage but does not assert that a rubric is correct.
+4. **External evaluator:** owns quality scores. TASC verifies producer
+   signatures and lineage against an operator-controlled trust store but does
+   not assert that a rubric is correct.
 5. **Control plane:** performs immutable joins and deterministic decisions. It
    cannot rewrite source evidence.
 6. **Experiment proposer:** can suggest one bounded experiment. It cannot change
@@ -115,50 +116,62 @@ the core contracts, never the other way around.
 7. **Deployment authority:** a human or existing release system applies or
    rejects recommendations.
 8. **Payload store:** raw prompts and responses remain outside TASC by default.
-   Evidence contains digests and controlled references unless an operator
-   explicitly enables payload capture.
+   Evidence contains per-study keyed identities and allowlisted controlled
+   references unless an operator explicitly enables encrypted payload capture.
+9. **Collector trust policy:** local operator configuration, not an imported
+   experiment protocol, is authoritative for endpoints, evaluator keys, payload
+   stores, and secret references. A protocol may only narrow that authority.
 
 ## 6. Versioned contracts
 
-Every contract uses strict runtime validation, explicit finite bounds, canonical
-serialization, and a content digest. Unknown fields are rejected so typos cannot
-silently weaken an experiment.
+Every contract uses strict runtime validation, explicit finite bounds,
+versioned RFC 8785 JSON Canonicalization Scheme (JCS) bytes, and a content
+digest. Unknown fields and non-I-JSON values are rejected so typos or ambiguous
+serialization cannot silently weaken an experiment. Cross-language official JCS
+vectors define number, Unicode, escaping, and key-order behavior.
 
 ### 6.1 `ExperimentProtocol`
 
 `tasc-experiment-protocol-v2` freezes:
 
 - study ID, protocol version, owner, creation time, and expiry;
-- deterministic development, holdout, and online-window membership rules;
+- deterministic development/holdout membership using a named, seeded
+  group-bucket algorithm and online-window membership rules;
 - champion and candidate execution profiles;
 - model, tokenizer, runtime, backend, hardware, quantization, chat-template,
   orchestration, and deployment-configuration identities;
 - route-signal definition, version, range, direction, and calibration digest;
 - external evaluator ID, rubric version, calibration digest, producer kind, and
-  validation state;
+  required trusted key IDs;
 - candidate policy space and exact declarative predicates;
 - quality, reliability, latency, cost, and coverage gates;
 - independent-group and critical-slice minimums;
 - bootstrap seed, method, and bounded iteration count;
 - shadow sampling budget, concurrency, timeout, retry, and payload policy;
 - an explicit cost-allocation model or `unavailable`;
-- the allowed endpoint hosts and runtime capabilities required by the study.
+- endpoint requirements that may narrow, but never widen, the local
+  `CollectorTrustPolicy`;
+- runtime capabilities required by the study.
 
 The protocol digest is derived from canonical content. It is never supplied as a
-trusted input.
+trusted input. A protocol must be registered through the local trust policy
+before it can authorize live work.
 
 ### 6.2 `TraceEnvelope`
 
-`tasc-trace-envelope-v2` records one case replicate:
+`tasc-trace-envelope-v2` records one logical execution of one profile for one
+case replicate. A paired study therefore produces one envelope per profile for
+the same `(caseId, replicateId)`:
 
 - study, protocol, trace, case, group, replicate, split, and collection-window
   IDs;
 - source mode: `imported`, `observed`, or `shadow`;
-- policy digest and route actually observed;
+- profile ID, execution-profile digest, policy digest, and route actually
+  observed;
 - workload and declared traffic weight;
 - slice labels;
 - route-signal value plus definition and calibration identities;
-- ordered attempt events for each execution profile;
+- ordered transport attempts for this logical profile execution;
 - observer timestamps for start, headers, first byte, first meaningful token,
   and completion;
 - status, finish reason, partial-output state, abort lifecycle, and normalized
@@ -166,11 +179,16 @@ trusted input.
 - requested and resolved model identities;
 - token usage with source and semantics;
 - provider-reported timings and metrics in a separate namespace;
-- request, response, and event-stream digests or controlled payload references;
-- collector version and execution-profile digest.
+- keyed request, response, and event-stream identities or controlled payload
+  references;
+- keyed terminal-output ID used by any evaluator evidence;
+- collector version.
 
 `TraceEnvelope` contains no evaluator score. Authorization headers, secret
-values, and raw environment variables are forbidden.
+values, raw environment variables, and plain hashes of private payloads are
+forbidden. Attempt dispatch state is explicit:
+`not_sent | sent_unknown | completed`; a timeout never proves the provider did
+not execute a request.
 
 ### 6.3 `EvaluatorEvidence`
 
@@ -179,35 +197,66 @@ values, and raw environment variables are forbidden.
 - study, protocol, trace, case, replicate, profile, and split identities;
 - evaluator, rubric, calibration, and producer identities;
 - score, score range, and optional structured subscores;
-- evidence source digest or controlled reference;
-- production time, validation state, and optional signature;
+- the exact keyed terminal-output ID being scored;
+- evidence source digest or allowlisted controlled reference;
+- production time, key ID, approved signature algorithm, and signature over
+  canonical bytes covering every identity, lineage, score, and source field;
 - explicit `missing`, `invalid`, and `abstained` outcomes.
 
 Changing the evaluator, rubric, or calibration makes prior evidence stale for a
-new study. TASC never converts output log probabilities into this contract.
+new study. Trust state is derived by verification against a local key store,
+revocation data, and freshness/clock-skew policy; it is not accepted from the
+evidence producer. Production recommendations fail closed for unsigned,
+untrusted, revoked, or stale evidence. TASC never converts output log
+probabilities into this contract.
 
 ### 6.4 `AssessmentDataset`
 
-The join is deterministic on
-`(protocolDigest, caseId, replicateId, profileId)`. It:
+The evidence join is authoritative on
+`(protocolDigest, traceId, profileId, terminalOutputId)`. After that
+identity and signature check, policy pairing is authoritative on
+`(protocolDigest, caseId, replicateId)` across the required profile IDs. It:
 
 - rejects duplicates and identity conflicts;
 - retains failed attempts and missing evaluator evidence;
-- rejects cross-split group leakage;
+- recomputes development/holdout membership from the frozen group-bucket rule,
+  rejects a trace-declared split that disagrees, and rejects cross-split group
+  leakage;
 - reports unmatched traces and evidence rather than dropping them;
 - preserves source digests;
 - separates measured, reported, modeled, and unavailable fields.
 
-### 6.5 `PolicyBundle`
+A failed terminal execution needs no fabricated evaluator score and contributes
+the protocol's preregistered failure score, which is zero in v2. A successful
+execution without valid evaluator evidence fails coverage before statistical
+inference.
+
+### 6.5 `WindowManifest`
+
+`tasc-window-manifest-v2` seals one offline or shadow-online assessment window:
+
+- protocol and frozen-policy digests;
+- event-time start and end;
+- ingestion watermark and closure reason;
+- deterministic membership rule and membership digest;
+- revision and optional predecessor-manifest digest;
+- trace-set and evaluator-set digests.
+
+Late evidence creates a new manifest revision linked to its predecessor. An
+existing manifest and assessment are never edited in place. Window assessment
+recomputes event-time and sampling membership from the manifest and rejects any
+declared window ID or membership digest that disagrees.
+
+### 6.6 `PolicyBundle`
 
 A recommendation contains only declarative routing predicates, named execution
 profiles, fallback behavior, compatibility version, protocol and policy
 digests, issue and expiry times, and optional signer metadata. It contains no
 arbitrary code and TASC does not install it.
 
-### 6.6 `AssessmentArtifact`
+### 6.7 `AssessmentDecision` and `AssessmentPacket`
 
-Each result records:
+A pure `AssessmentDecision` records:
 
 - engine and schema versions;
 - protocol, trace-set, evaluator-set, policy, and source digests;
@@ -217,7 +266,25 @@ Each result records:
 - every gate's operator, threshold, actual value, evidence class, and result;
 - all candidate decisions, not only the selected policy;
 - warnings, stale conditions, and unavailable metrics;
-- attestation state and a completion manifest.
+- attestation state.
+
+The artifact writer wraps that decision in an `AssessmentPacket` whose
+completion manifest records exact file bytes, sizes, hashes, schema versions,
+and durability level. Pure assessment code never manufactures filesystem
+completion evidence.
+
+### 6.8 `AssessmentContext`
+
+Every deterministic decision receives
+`tasc-assessment-context-v2` explicitly. It contains:
+
+- `asOf`, used for protocol, evaluator, policy, and evidence freshness;
+- the operator trust-policy snapshot digest;
+- the evaluator-key revocation snapshot digest;
+- its JCS content digest.
+
+Assessment code never reads the wall clock or live trust configuration. The
+context digest is bound into every decision and packet.
 
 ## 7. Deterministic controller
 
@@ -241,9 +308,15 @@ online regression    -> ROLLBACK_RECOMMENDED
 final lifecycle      -> RETIRED
 ```
 
-State transitions are pure functions of a frozen protocol and source evidence.
-Replaying the same content must produce byte-identical decision JSON apart from
-explicitly excluded wall-clock envelope metadata.
+The persisted controller log uses versioned `ControllerEvent` records with
+stable event IDs. A `ControllerSnapshot` binds the last applied event, state,
+protocol, frozen policy, evidence sets, window manifests, and assessment
+digests. Replay is append-only and idempotent, and invalid transitions fail
+closed.
+
+State transitions are pure functions of a frozen protocol, versioned events,
+and source evidence. Replaying the same content must produce byte-identical
+decision JSON apart from explicitly excluded wall-clock envelope metadata.
 
 “Online grading” means repeatedly assessing immutable, sealed windows of live
 or shadow traces. A window has an event-time range, ingestion watermark, source
@@ -256,16 +329,30 @@ Decision-affecting order uses a locale-independent UTF-16 code-unit comparator.
 `localeCompare` is forbidden in canonicalization, sampling order, tie-breaking,
 and artifact order.
 
-Quality comparison follows the evidence hierarchy:
+Assessment has three structurally separate entry points:
 
-1. pair champion and candidate outcomes by case and replicate;
+- development nomination may enumerate candidates;
+- holdout confirmation requires a nomination and evaluates only its frozen
+  policy;
+- window assessment requires a frozen policy and a `WindowManifest`.
+
+Holdout and window APIs cannot accept a candidate space. Quality comparison
+then follows this exact evidence hierarchy:
+
+1. pair champion and candidate outcomes by `(caseId, replicateId)`;
 2. calculate the paired score delta for each replicate;
-3. summarize replicates within a case using the preregistered estimator;
-4. preserve case traffic weights;
-5. aggregate related cases within `groupId`;
-6. cluster-bootstrap independent groups with replacement;
-7. recalculate the traffic-weighted estimand inside every draw;
-8. compare the preregistered confidence bound with the non-inferiority margin.
+3. use score zero for a failed terminal execution and fail coverage for a
+   successful execution without trusted evaluator evidence;
+4. summarize replicate deltas within a case with their median;
+5. preserve each case's preregistered traffic weight;
+6. calculate each group effect as the traffic-weighted mean of its case effects;
+7. calculate the point estimate as the traffic-weighted mean across all case
+   effects;
+8. resample independent groups uniformly with replacement, retaining the
+   original case traffic weights inside every sampled group;
+9. recalculate the traffic-weighted estimate inside every draw;
+10. use the preregistered two-sided percentile interval and alpha;
+11. compare the lower bound with the non-inferiority margin.
 
 The artifact reports method, estimate, interval, iterations, seed, case count,
 replicate count, group count, and effective traffic mass. Coverage gates are
@@ -301,9 +388,10 @@ policy holdout.
 
 ## 10. P1 live inference collection
 
-The collector uses Node's native `fetch`, streaming readers, and `AbortSignal`.
-Vendor SDKs are avoided because they commonly hide raw frames, first-byte
-timing, nonstandard fields, and mid-stream failures.
+The collector uses a fetch-compatible Undici transport with a controlled
+connection dispatcher, streaming readers, and `AbortSignal`. Vendor SDKs are
+avoided because they commonly hide raw frames, first-byte timing, nonstandard
+fields, and mid-stream failures.
 
 Shared wire codecs cover:
 
@@ -330,39 +418,55 @@ configuration digest. Startup probes independently cover transport liveness,
 model readiness, model discovery, streaming framing, final usage, log
 probabilities, structured output, cancellation, and metrics.
 
-Ray Serve and SkyPilot/SkyServe are orchestration descriptors or optional
-endpoint-discovery plugins. The underlying runtime profile still owns the wire
-contract. P1 will not import Ray, Kubernetes, or SkyPilot SDKs into the
-TypeScript core and will not create or mutate deployments.
+Ray Serve and SkyPilot/SkyServe are declarative orchestration descriptors. The
+underlying runtime profile still owns the wire contract. P1 will not load
+plugins, execute discovery code, import Ray, Kubernetes, or SkyPilot SDKs into
+the TypeScript core, or create or mutate deployments.
 
 The shadow runner:
 
 - counterbalances champion/candidate invocation order;
-- uses stable replicate IDs and idempotency keys;
+- uses stable replicate and attempt IDs;
 - enforces bounded concurrency, per-attempt deadlines, total work budgets, and
   response/event-size limits;
-- records every retry as evidence;
+- records durable dispatch intent before sending and preserves
+  `not_sent | sent_unknown | completed`;
+- retries only an explicitly retry-safe runtime outcome; ambiguous requests are
+  retained and fail coverage rather than being assumed deduplicated;
 - aborts outstanding requests on cancellation;
 - checkpoints accepted envelopes atomically;
-- resumes without duplicating completed `(case, replicate, profile)` keys;
+- resumes without duplicating accepted `(case, replicate, profile)` envelopes;
 - never logs authentication material;
 - sanitizes provider errors before persistence.
 
 ## 11. Security and failure handling
 
-- Configured endpoint hosts are explicit. Cloud metadata and link-local
-  addresses are denied unless an operator opts in with a dedicated unsafe flag.
+- An operator-controlled `CollectorTrustPolicy` allows exact origins, schemes,
+  ports, runtime paths, evaluator keys, payload-store roots, and secret
+  references. Imported protocols can only narrow it.
+- Remote endpoints default to HTTPS and public addresses. Redirects are disabled
+  or every hop is fully revalidated. DNS results, IPv4/IPv6 forms, loopback,
+  private, link-local, CGNAT, ULA, unspecified, and metadata ranges are checked
+  at connection time. A controlled lookup/dispatcher pins a validated address
+  for the actual connection while preserving TLS hostname verification, and
+  every new connection is revalidated. Local inference requires an exact
+  loopback-origin opt-in.
 - Authentication is supplied through environment-variable references or an
   injected header factory. Secret values never enter parsed config or artifacts.
-- Raw payload capture defaults to `digest-only`; controlled references and
-  encrypted external stores are opt-in.
-- JSON, SSE, NDJSON, metrics, and output files have strict byte, depth, item, and
-  duration limits.
+- Raw payload identity defaults to a per-study HMAC whose key is never
+  serialized. Controlled references are limited to configured store schemes and
+  roots; inline, `file:`, and arbitrary URL references are forbidden.
+- Bounded, fatal-UTF-8 parsing occurs before materialization. JSON, SSE, NDJSON,
+  metrics, headers, and output files have strict byte, depth, key, token,
+  string, line, event, item, and duration limits. Duplicate JSON keys and
+  compressed responses are rejected.
 - Work estimates are calculated before candidate expansion, bootstrap, or live
   calls. Inputs exceeding the budget fail before partial execution.
-- Artifact output uses a same-parent private staging directory, exclusive files,
-  restrictive permissions, flushed content, a manifest written last, and atomic
-  rename.
+- Artifact output rejects symlinks and existing targets, verifies realpath
+  containment, uses a same-parent `0700` staging directory and exclusive `0600`
+  files, fsyncs content, writes a manifest of exact byte sizes/hashes last,
+  fsyncs the directory, atomically renames, and fsyncs the parent. Platforms
+  lacking a guarantee report degraded durability.
 - Import paths and benchmark-derived filenames use strict slugs and verified
   containment.
 - Partial runtime success never becomes a successful trace; final usage absence,
@@ -378,8 +482,9 @@ The intended CLI:
 tasc protocol validate <protocol.json>
 tasc traces validate <traces.ndjson>
 tasc evidence validate <evaluator-evidence.ndjson>
-tasc assess offline --protocol ... --traces ... --evidence ... --out ...
-tasc assess window  --protocol ... --traces ... --evidence ... --out ...
+tasc assess development --protocol ... --traces ... --evidence ... --context ... --out ...
+tasc assess holdout --protocol ... --traces ... --evidence ... --context ... --nomination ... --out ...
+tasc assess window --protocol ... --traces ... --evidence ... --context ... --policy ... --window ... --out ...
 tasc experiment next --assessment ... --history ... --out ...
 tasc runtime probe --endpoint ... --runtime ...
 tasc shadow run --protocol ... --cases ... --out ...
@@ -410,9 +515,14 @@ The repository will include:
   and security analysis;
 - a regenerated cross-platform npm lockfile with integrity metadata;
 - `prepack` build behavior so a pristine package contains its runtime;
+- a deliberate public package manifest with scoped public access; publishing is
+  not attempted until the repository's protected trusted-publisher environment
+  is configured;
 - release notes, migration guide, architecture, threat model, runtime support
   matrix, operating guide, and contribution instructions;
-- an opt-in release workflow that publishes only an immutable, verified tag.
+- a public-package release workflow using protected OIDC trusted publishing:
+  build and test one tarball, record its SHA-512, and publish that exact tarball
+  only from the verified tagged commit.
 
 Commits are divided by coherent behavior so each can be reviewed and reverted
 without relying on empty or cosmetic history.
@@ -464,10 +574,10 @@ The release is acceptable only when:
   documented CLI smoke;
 - all mandatory Linux, macOS, Node, Python, package, audit, and security checks
   are green;
-- one real endpoint call is recorded as a sanitized trace without secret
-  leakage;
+- one explicitly authorized real endpoint call is recorded manually as a
+  sanitized trace without secret leakage; CI never calls an arbitrary live
+  endpoint;
 - Codex specialty reviews and Claude Code review have no unresolved critical or
   important findings;
 - the pull request documents the trust boundary, verification evidence,
   limitations, and follow-up work.
-
