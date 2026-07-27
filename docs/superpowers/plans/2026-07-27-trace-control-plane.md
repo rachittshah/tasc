@@ -272,6 +272,9 @@ profile executions, mismatched replicate IDs, terminal-output mismatches,
 untrusted signatures, and evidence for failed attempts. A failed terminal
 execution receives the protocol's score zero without fabricated evidence; a
 successful execution without trusted evidence fails coverage.
+Evidence signed by a locally trusted key still fails when its `keyId` is not
+pinned by the protocol's `evaluator.requiredTrustedKeyIds`; Task 2 verification
+has no protocol argument, so this pinning belongs at the Task 3 join boundary.
 
 Recompute development/holdout membership with the protocol's seeded
 group-bucket algorithm. Reject trace-declared splits that disagree and prove all
