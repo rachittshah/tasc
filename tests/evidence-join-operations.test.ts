@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 const operations = vi.hoisted(() => ({
   canonicalValues: vi.fn(),
+  contractSnapshots: vi.fn(),
   evidenceFingerprints: vi.fn(),
 }));
 
@@ -27,6 +28,10 @@ vi.mock("../src/evidence.js", async (importOriginal) => {
     ) {
       operations.evidenceFingerprints(evidence);
       return actual.fingerprintNormalizedEvaluatorEvidence(evidence);
+    },
+    snapshotBoundedContractInput(input: unknown) {
+      operations.contractSnapshots(input);
+      return actual.snapshotBoundedContractInput(input);
     },
   };
 });
@@ -103,12 +108,116 @@ describe("assessment join operation bounds", () => {
     );
 
     expect(joined.diagnostics.invalidEvidence).toHaveLength(1);
+    expect(joined.executions[0].outcome).toMatchObject({
+      kind: "invalid-evidence",
+      evidenceDigest: receipt.evidenceDigest,
+      evidence: receipt.evidence,
+      evidenceAccepted: false,
+    });
     expect(
       operations.canonicalValues.mock.calls
         .map(([value]) => value)
         .filter(embedsFullEvaluatorEvidence),
     ).toEqual([]);
     expect(operations.evidenceFingerprints).not.toHaveBeenCalled();
+  });
+
+  it("treats a forged receipt as an opaque constant-work row", () => {
+    const protocol = parseExperimentProtocol(
+      validProtocolInput(),
+      TEST_WORK_BUDGET,
+    );
+    const filler = Array.from(
+      { length: 100 },
+      () => Array<number>(256).fill(0),
+    );
+    let forgedPropertyOperations = 0;
+    const forged = new Proxy({ filler }, {
+      get(target, property, receiver) {
+        forgedPropertyOperations += 1;
+        return Reflect.get(target, property, receiver);
+      },
+      getOwnPropertyDescriptor(target, property) {
+        forgedPropertyOperations += 1;
+        return Reflect.getOwnPropertyDescriptor(target, property);
+      },
+      ownKeys(target) {
+        forgedPropertyOperations += 1;
+        return Reflect.ownKeys(target);
+      },
+    });
+    operations.contractSnapshots.mockClear();
+    operations.evidenceFingerprints.mockClear();
+
+    const joined = joinAssessmentEvidence(
+      protocol,
+      [],
+      [forged as never],
+      {
+        ...TEST_WORK_BUDGET,
+        maxTraceRows: 0,
+        maxEvidenceRows: 1,
+        maxIndependentGroups: 0,
+        maxAssessmentWork: 11,
+      },
+    );
+
+    expect(joined.work).toMatchObject({
+      evidenceRows: 1,
+      traceRows: 0,
+      chargedUnits: 11,
+    });
+    expect(joined.diagnostics.invalidEvidence).toEqual([{
+      evidence: null,
+      evidenceDigest: null,
+      traceId: null,
+      profileId: null,
+      reason: "inauthentic-verification-receipt",
+      verification: {
+        authentic: false,
+        status: "inauthentic",
+        trusted: false,
+        reason: "object was not emitted by the local evaluator verifier",
+        keyId: null,
+        assessedAt: null,
+        assessmentContextDigest: null,
+        operatorTrustPolicySnapshotDigest: null,
+        evaluatorRevocationSnapshotDigest: null,
+      },
+    }]);
+    expect(forgedPropertyOperations).toBe(0);
+    expect(operations.contractSnapshots).not.toHaveBeenCalled();
+    expect(operations.evidenceFingerprints).not.toHaveBeenCalled();
+  });
+
+  it("keeps a successful trace missing when its only receipt is forged", () => {
+    const forged = new Proxy({}, {
+      get() {
+        throw new Error("forged receipt property was read");
+      },
+      getOwnPropertyDescriptor() {
+        throw new Error("forged receipt descriptor was read");
+      },
+      ownKeys() {
+        throw new Error("forged receipt keys were read");
+      },
+    });
+
+    const joined = joinAssessmentEvidence(
+      parseExperimentProtocol(validProtocolInput(), TEST_WORK_BUDGET),
+      [parseTraceEnvelope(validTraceInput(), TEST_WORK_BUDGET)],
+      [forged as never],
+      TEST_WORK_BUDGET,
+    );
+
+    expect(joined.executions[0].outcome).toMatchObject({
+      kind: "missing-evidence",
+      evidence: null,
+      evidenceDigest: null,
+      evidenceAccepted: false,
+    });
+    expect(joined.diagnostics.invalidEvidence).toHaveLength(1);
+    expect(joined.diagnostics.missingEvidence).toHaveLength(1);
   });
 
   it("orders same-digest diagnostics by compact status and context identities", () => {

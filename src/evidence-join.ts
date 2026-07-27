@@ -6,12 +6,9 @@ import {
   deepFreezeContract,
   domainSeparatedDigest,
   fingerprintExecutionProfile,
-  fingerprintNormalizedEvaluatorEvidence,
   fingerprintNormalizedProtocol,
   normalizeExperimentProtocol,
-  normalizeEvaluatorEvidence,
   parseTraceEnvelope,
-  snapshotBoundedContractInput,
   type DeepReadonly,
   type EvaluatorEvidence,
   type ExperimentProtocol,
@@ -864,31 +861,6 @@ function validateTraceMetadata(records: readonly TraceRecord[]): void {
   }
 }
 
-function normalizeInauthenticEvidence(value: unknown): {
-  evidence: EvaluatorEvidence | null;
-  evidenceDigest: string | null;
-} {
-  try {
-    const snapshot = snapshotBoundedContractInput(value);
-    if (
-      snapshot === null
-      || typeof snapshot !== "object"
-      || !Object.hasOwn(snapshot, "evidence")
-    ) {
-      return { evidence: null, evidenceDigest: null };
-    }
-    const evidence = normalizeEvaluatorEvidence(
-      (snapshot as { evidence: unknown }).evidence,
-    );
-    return {
-      evidence,
-      evidenceDigest: fingerprintNormalizedEvaluatorEvidence(evidence),
-    };
-  } catch {
-    return { evidence: null, evidenceDigest: null };
-  }
-}
-
 function evidenceJoinKey(evidence: EvaluatorEvidence): string {
   return identity("tasc/assessment-trace-join-key/v2", {
     protocolDigest: evidence.protocolDigest,
@@ -1195,10 +1167,9 @@ export function joinAssessmentEvidence(
 
   for (const input of verificationSnapshot) {
     if (!isAuthenticEvaluatorEvidenceVerification(input)) {
-      const normalized = normalizeInauthenticEvidence(input);
       rejectEvidence(
-        normalized.evidence,
-        normalized.evidenceDigest,
+        null,
+        null,
         "inauthentic-verification-receipt",
         inauthenticVerificationProvenance(),
       );
