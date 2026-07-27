@@ -5,6 +5,7 @@ import { sha256, stableJson } from "../src/integrity.js";
 import {
   computePolicyMetrics,
   confirmNomination,
+  DEFAULT_ASSESSMENT_WORK_BUDGET,
   evaluatePolicy,
   nominatePolicy,
   type NominationArtifact,
@@ -51,9 +52,20 @@ function spec(overrides: Partial<InferenceSpec["constraints"]> = {}): InferenceS
   };
 }
 
+function withoutTask4Controls(value: InferenceSpec): InferenceSpec {
+  const {
+    minimumIndependentGroups: _minimumIndependentGroups,
+    minimumCriticalSliceGroups: _minimumCriticalSliceGroups,
+    ...constraints
+  } = value.constraints;
+  const { alpha: _alpha, ...bootstrap } = value.bootstrap;
+  return { ...value, constraints, bootstrap };
+}
+
 function row(overrides: Partial<ReplayedRow> = {}): ReplayedRow {
   return {
     policyId: "candidate",
+    policyKind: "fast-only",
     caseId: "case-1",
     groupId: "group-1",
     replicateIndex: 0,
@@ -91,6 +103,7 @@ function pairedRows(
       }));
       champion.push(row({
         policyId: "champion",
+        policyKind: "expert-only",
         selectedProfileId: "expert",
         attemptedProfileIds: ["expert"],
         caseId: `case-${caseIndex}`,
@@ -102,6 +115,30 @@ function pairedRows(
     }
   }
   return { candidate, champion };
+}
+
+function legacyRow(overrides: Partial<ReplayedRow> = {}): ReplayedRow {
+  return {
+    policyId: "legacy-fast-only",
+    caseId: "legacy-case",
+    groupId: "legacy-group",
+    replicateIndex: 0,
+    status: "success",
+    selectedProfileId: "fast",
+    attemptedProfileIds: ["fast"],
+    escalated: false,
+    taskScore: 0.9,
+    ttftMs: 100,
+    endToEndLatencyMs: 400,
+    outputTokens: 40,
+    perceivedTokensPerSecond: 80,
+    totalTokensPerSecond: 70,
+    costUsd: 0.01,
+    trafficWeight: 1,
+    slices: ["payments", "safety"],
+    critical: true,
+    ...overrides,
+  };
 }
 
 describe("TASC policy metrics", () => {
@@ -165,6 +202,11 @@ describe("TASC policy metrics", () => {
     expect(metrics.criticalSliceTaskScore.payments).toBeCloseTo(0.75);
     expect(metrics.criticalSliceTaskScore.absent).toBeNull();
   });
+
+  it("keeps legacy direct rows source-compatible without trusting numeric capacity", () => {
+    const metrics = computePolicyMetrics([legacyRow()], []);
+    expect(metrics.p50TotalTokensPerSecond).toBeNull();
+  });
 });
 
 describe("TASC hard gates", () => {
@@ -183,6 +225,24 @@ describe("TASC hard gates", () => {
         maxAssessmentWork: Number.MAX_SAFE_INTEGER,
       },
     })).toThrow(/bootstrap draws exceeds caller work budget/i);
+  });
+
+  it("snapshots direct-evaluation work-budget options without invoking accessors", () => {
+    const rows = pairedRows([[0.9], [0.9], [0.9]], [[0.9], [0.9], [0.9]]);
+    let budgetReads = 0;
+    const workBudget = { ...DEFAULT_ASSESSMENT_WORK_BUDGET };
+    Object.defineProperty(workBudget, "maxCandidates", {
+      enumerable: true,
+      get() {
+        budgetReads += 1;
+        throw new Error("work-budget getter must not run");
+      },
+    });
+
+    expect(() => evaluatePolicy(rows.candidate, rows.champion, spec(), {
+      workBudget,
+    })).toThrow(/evaluation options.*maxCandidates.*accessor|accessor.*maxCandidates/i);
+    expect(budgetReads).toBe(0);
   });
 
   it("uses case-level median deltas and the preregistered deterministic bootstrap", () => {
@@ -211,7 +271,8 @@ describe("TASC hard gates", () => {
     ));
 
     expect(result.pairedQuality.caseCount).toBe(3);
-    expect(result.pairedQuality.deltas).toEqual(replicateDeltas);
+    expect(result.pairedQuality.deltas).toEqual(caseDeltas);
+    expect(result.pairedQuality.replicateDeltas.map(({ delta }) => delta)).toEqual(replicateDeltas);
     expect(result.pairedQuality.caseEffects.map(({ effect }) => effect)).toEqual(caseDeltas);
     expect(result.pairedQuality.bootstrap).toEqual(bootstrapMeanCI(caseDeltas, {
       alpha: 0.05,
@@ -233,7 +294,8 @@ describe("TASC hard gates", () => {
       minimumCostImprovement: 0,
     }));
 
-    expect(result.pairedQuality.deltas).toEqual([0, -1, 0, 0, 0]);
+    expect(result.pairedQuality.deltas).toEqual([0, 0, 0]);
+    expect(result.pairedQuality.replicateDeltas.map(({ delta }) => delta)).toEqual([0, -1, 0, 0, 0]);
     expect(result.pairedQuality.caseEffects).toEqual([
       { caseId: "case-0", groupId: "group-0", effect: 0, trafficWeight: 1 },
       { caseId: "case-1", groupId: "group-1", effect: 0, trafficWeight: 1 },
@@ -344,6 +406,207 @@ describe("TASC hard gates", () => {
       pass: false,
       actual: null,
     });
+  });
+
+  it("does not let direct callers forge capacity for serial or explicitly cascade rows", () => {
+    const serial = pairedRows([[0.9], [0.9], [0.9]], [[0.9], [0.9], [0.9]]);
+    for (const candidate of serial.candidate) {
+      candidate.attemptedProfileIds = ["fast", "expert"];
+      candidate.escalated = true;
+      candidate.serviceThroughput = { kind: "measured", tokensPerSecond: 10_000 };
+    }
+    const serialResult = evaluatePolicy(serial.candidate, serial.champion, spec());
+    expect(serialResult.candidateMetrics.p50TotalTokensPerSecond).toBeNull();
+    expect(serialResult.gates.find(({ id }) => id === "p50_total_tps"))
+      .toMatchObject({ pass: false, actual: null });
+
+    const cascade = pairedRows([[0.9], [0.9], [0.9]], [[0.9], [0.9], [0.9]]);
+    for (const candidate of cascade.candidate) {
+      candidate.policyKind = "cascade";
+      candidate.serviceThroughput = { kind: "measured", tokensPerSecond: 10_000 };
+    }
+    const cascadeResult = evaluatePolicy(cascade.candidate, cascade.champion, spec());
+    expect(cascadeResult.candidateMetrics.p50TotalTokensPerSecond).toBeNull();
+  });
+
+  it("preflights bounded direct slice labels before sorting or pairing maps", () => {
+    const rows = pairedRows([[0.9], [0.9], [0.9]], [[0.9], [0.9], [0.9]]);
+    const activeSpec = spec();
+    activeSpec.bootstrap.iterations = 1;
+    const exactBudget = {
+      maxCandidates: 1,
+      maxTraceRows: 3,
+      maxEvidenceRows: 3,
+      maxBootstrapDraws: 1,
+      maxIndependentGroups: 3,
+      maxAssessmentWork: 27,
+    };
+    activeSpec.criticalSlices = Array.from({ length: 65 }, (_unused, index) => `critical-${index}`);
+    expect(() => evaluatePolicy(rows.candidate, rows.champion, activeSpec, {
+      workBudget: exactBudget,
+    })).toThrow(/critical.*slice.*64|64.*critical.*slice/i);
+
+    const boundedSpec = spec();
+    boundedSpec.bootstrap.iterations = 1;
+    rows.candidate[0].slices = Array.from({ length: 65 }, (_unused, index) => `slice-${index}`);
+    expect(() => evaluatePolicy(rows.candidate, rows.champion, boundedSpec, {
+      workBudget: exactBudget,
+    })).toThrow(/row.*slice.*64|64.*row.*slice/i);
+  });
+
+  it("snapshots direct row collection data properties and rejects mutable collection shapes", () => {
+    const rows = pairedRows([[0.9], [0.9], [0.9]], [[0.9], [0.9], [0.9]]);
+    let getterCalls = 0;
+    const accessorRows = [...rows.candidate];
+    Object.defineProperty(accessorRows, "0", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        getterCalls += 1;
+        throw new Error("direct collection getter must not run");
+      },
+    });
+    expect(() => evaluatePolicy(accessorRows, rows.champion, spec())).toThrow(
+      /candidate.*collection.*accessor|accessor.*candidate.*collection/i,
+    );
+    expect(getterCalls).toBe(0);
+
+    let lengthReads = 0;
+    let elementReads = 0;
+    const changingLength = new Proxy([rows.candidate[0]], {
+      get(target, property, receiver) {
+        if (property === "length") {
+          lengthReads += 1;
+          return lengthReads === 1 ? 1 : 20_000;
+        }
+        if (typeof property === "string" && /^\d+$/.test(property)) {
+          elementReads += 1;
+          return rows.candidate[0];
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    expect(() => evaluatePolicy(changingLength, [rows.champion[0]], spec(), {
+      workBudget: {
+        maxCandidates: 1,
+        maxTraceRows: 1,
+        maxEvidenceRows: 1,
+        maxBootstrapDraws: 200,
+        maxIndependentGroups: 1,
+        maxAssessmentWork: 200,
+      },
+    })).toThrow(/candidate.*proxy|proxy.*candidate/i);
+    expect(elementReads).toBe(0);
+
+    const withExtra = [...rows.candidate] as ReplayedRow[] & { metadata?: string };
+    withExtra.metadata = "not-row-data";
+    expect(() => evaluatePolicy(withExtra, rows.champion, spec())).toThrow(/collection.*extra propert/i);
+    const withSymbol = [...rows.candidate];
+    Object.defineProperty(withSymbol, Symbol("forged"), { value: true });
+    expect(() => evaluatePolicy(withSymbol, rows.champion, spec())).toThrow(/collection.*symbol/i);
+    const withHole = [...rows.candidate];
+    delete withHole[1];
+    expect(() => evaluatePolicy(withHole, rows.champion, spec())).toThrow(/collection.*hole/i);
+
+    let rowGetterCalls = 0;
+    const accessorRow = { ...rows.candidate[0] };
+    Object.defineProperty(accessorRow, "groupId", {
+      enumerable: true,
+      get() {
+        rowGetterCalls += 1;
+        throw new Error("row getter must not run");
+      },
+    });
+    expect(() => evaluatePolicy([accessorRow], [rows.champion[0]], spec())).toThrow(
+      /candidate.*row.*groupId.*accessor|accessor.*candidate.*row.*groupId/i,
+    );
+    expect(rowGetterCalls).toBe(0);
+  });
+
+  it("snapshots nested direct-row capacity evidence without invoking getters", () => {
+    const rows = pairedRows([[0.9]], [[0.9]]);
+    let capacityGetterCalls = 0;
+    const capacityRow = { ...rows.candidate[0] };
+    capacityRow.serviceThroughput = {
+      kind: "measured",
+      get tokensPerSecond(): never {
+        capacityGetterCalls += 1;
+        throw new Error("capacity getter must not run");
+      },
+    };
+    expect(() => computePolicyMetrics([capacityRow], [])).toThrow(
+      /serviceThroughput.*tokensPerSecond.*accessor|accessor.*serviceThroughput/i,
+    );
+    expect(capacityGetterCalls).toBe(0);
+
+    const holeRow = { ...rows.candidate[0], attemptedProfileIds: new Array<string>(1) };
+    expect(() => computePolicyMetrics([holeRow], [])).toThrow(/attemptedProfileIds.*hole/i);
+
+    const mismatchedAttempt = {
+      ...rows.candidate[0],
+      attemptedProfileIds: ["other-profile"],
+    };
+    expect(computePolicyMetrics([mismatchedAttempt], []).p50TotalTokensPerSecond).toBeNull();
+  });
+
+  it("rejects object-backed direct-row scalar metrics without invoking proxy traps", () => {
+    const rows = pairedRows([[0.9]], [[0.9]]);
+    let trapCalls = 0;
+    const forgedMetric = new Proxy({}, {
+      get() {
+        trapCalls += 1;
+        throw new Error("direct-row metric proxy trap must not run");
+      },
+    });
+    (rows.candidate[0] as unknown as Record<string, unknown>).ttftMs = forgedMetric;
+
+    expect(() => evaluatePolicy(rows.candidate, rows.champion, spec())).toThrow(
+      /candidate.*row.*ttftMs.*number|ttftMs.*finite/i,
+    );
+    expect(trapCalls).toBe(0);
+  });
+
+  it("rejects whitespace aliases before counting direct-row groups or cases", () => {
+    const groupAliases = pairedRows([[0.9], [0.9], [0.9]], [[0.9], [0.9], [0.9]]);
+    for (let index = 0; index < groupAliases.candidate.length; index += 1) {
+      const groupId = `same-group${" ".repeat(index)}`;
+      groupAliases.candidate[index].groupId = groupId;
+      groupAliases.champion[index].groupId = groupId;
+    }
+    expect(() => evaluatePolicy(groupAliases.candidate, groupAliases.champion, spec())).toThrow(
+      /groupId.*trim|groupId.*whitespace|canonical.*groupId/i,
+    );
+
+    const caseAliases = pairedRows([[0.9], [0.9], [0.9]], [[0.9], [0.9], [0.9]]);
+    for (let index = 0; index < caseAliases.candidate.length; index += 1) {
+      const caseId = `same-case${" ".repeat(index)}`;
+      caseAliases.candidate[index].caseId = caseId;
+      caseAliases.champion[index].caseId = caseId;
+    }
+    expect(() => evaluatePolicy(caseAliases.candidate, caseAliases.champion, spec())).toThrow(
+      /caseId.*trim|caseId.*whitespace|canonical.*caseId/i,
+    );
+
+    expect(() => computePolicyMetrics([
+      row({ attemptedProfileIds: ["fast "] }),
+    ], [])).toThrow(/attemptedProfileIds.*trim|attemptedProfileIds.*whitespace/i);
+    expect(() => computePolicyMetrics([
+      row({ slices: ["payments "] }),
+    ], [])).toThrow(/slices.*trim|slices.*whitespace/i);
+    expect(() => computePolicyMetrics([
+      row({ status: "failure", taskScore: 0, failureCode: " timeout " }),
+    ], [])).toThrow(/failureCode.*trim|failureCode.*whitespace/i);
+    expect(() => computePolicyMetrics([row()], ["payments "])).toThrow(
+      /critical slice list.*trim|critical slice list.*whitespace/i,
+    );
+  });
+
+  it("rejects mixed direct rows that do not describe one exact policy", () => {
+    const rows = pairedRows([[0.9], [0.9], [0.9]], [[0.9], [0.9], [0.9]]);
+    rows.candidate[1].policyId = "different-policy";
+    expect(() => evaluatePolicy(rows.candidate, rows.champion, spec())).toThrow(
+      /candidate rows.*one policyId.*policyKind/i,
+    );
   });
 
   it("fails closed before inference for fewer than the configured independent groups", () => {
@@ -525,6 +788,71 @@ function resignNomination(nomination: NominationArtifact): NominationArtifact {
 }
 
 describe("TASC development nomination", () => {
+  it("normalizes pre-Task4 raw specs at every direct public assessment boundary", () => {
+    const activeSpec = nominationSpec();
+    const legacySpec = withoutTask4Controls(activeSpec);
+    const rows = pairedRows([[0.9], [0.9], [0.9]], [[0.9], [0.9], [0.9]]);
+    const direct = evaluatePolicy(rows.candidate, rows.champion, legacySpec);
+    expect(direct.pairedQuality).toMatchObject({ alpha: 0.05, inferenceAvailable: true });
+    expect(direct.gates.find(({ id }) => id === "minimum_independent_groups"))
+      .toMatchObject({ pass: true, threshold: 3 });
+
+    expect(nominatePolicy(legacySpec, measurements()))
+      .toEqual(nominatePolicy(activeSpec, measurements()));
+    const nomination = nominatePolicy(activeSpec, measurements()).nomination!;
+    expect(confirmNomination(
+      legacySpec,
+      measurements({ split: "holdout", groupPrefix: "holdout" }),
+      nomination,
+    ).status).toBe("DEMO_ONLY");
+  });
+
+  it("uses one getter-free spec snapshot for candidate budgeting and evaluation", () => {
+    const activeSpec = nominationSpec();
+    activeSpec.candidateSpace = {
+      confidenceThresholds: [0.5],
+      inputTokenThresholds: [1_000],
+      includeFastOnly: false,
+    };
+    let getterCalls = 0;
+    Object.defineProperty(activeSpec.profiles[0], "model", {
+      enumerable: true,
+      get() {
+        getterCalls += 1;
+        activeSpec.candidateSpace.confidenceThresholds.push(0.8);
+        return "expert";
+      },
+    });
+
+    expect(() => nominatePolicy(activeSpec, measurements(), {
+      workBudget: {
+        ...DEFAULT_ASSESSMENT_WORK_BUDGET,
+        maxCandidates: 1,
+      },
+    })).toThrow(/profile.*accessor|accessor.*profile|own data propert/i);
+    expect(getterCalls).toBe(0);
+    expect(activeSpec.candidateSpace.confidenceThresholds).toEqual([0.5]);
+  });
+
+  it("snapshots nomination attestation options without invoking accessors", () => {
+    let keyReads = 0;
+    const options: Record<string, unknown> = {};
+    Object.defineProperty(options, "attestationKey", {
+      enumerable: true,
+      get() {
+        keyReads += 1;
+        throw new Error("nomination attestation-key getter must not run");
+      },
+    });
+
+    expect(() => nominatePolicy(
+      nominationSpec(),
+      measurements(),
+      options,
+    )).toThrow(/nomination options.*attestationKey.*accessor|accessor.*attestationKey/i);
+    expect(keyReads).toBe(0);
+  });
+
   it("fails a caller work budget before candidate expansion or bootstrap allocation", () => {
     const activeSpec = nominationSpec();
     activeSpec.candidateSpace = {
@@ -571,6 +899,57 @@ describe("TASC development nomination", () => {
         || compareCodeUnits(left.policy.id, right.policy.id)
       ));
     expect(result.nomination?.policy.id).toBe(orderedFrontier[0].policy.id);
+  });
+
+  it("lets observed objectives dominate when disabled capacity is null on both cascades", () => {
+    const activeSpec = nominationSpec();
+    const dev = measurements({ fastOnlyMustFail: true });
+    for (const measurementCase of dev.cases) {
+      for (const observationSet of measurementCase.observations) {
+        for (const observation of observationSet.replicates) {
+          if (observation.status === "success") observation.taskScore = 0.95;
+          observation.costUsd = observationSet.profileId === "expert" ? 0.03 : 0.005;
+        }
+      }
+    }
+    const result = nominatePolicy(activeSpec, dev);
+    const passingCascades = result.evaluations.filter(({ policy, evaluation }) => (
+      policy.kind === "cascade" && evaluation.passed
+    ));
+    const dominatedCascadeIds = passingCascades
+      .filter(({ policy }) => policy.confidenceThreshold === 0.8)
+      .map(({ policy }) => policy.id);
+
+    expect(dominatedCascadeIds.length).toBeGreaterThan(0);
+    expect(result.frontier).not.toEqual(expect.arrayContaining(dominatedCascadeIds));
+  });
+
+  it("omits disabled capacity when a measured fast-only policy dominates a null-capacity cascade", () => {
+    const activeSpec = nominationSpec();
+    activeSpec.candidateSpace = {
+      confidenceThresholds: [0.8],
+      inputTokenThresholds: [1_000],
+      includeFastOnly: true,
+    };
+    const dev = measurements();
+    for (const measurementCase of dev.cases) {
+      for (const observationSet of measurementCase.observations) {
+        for (const observation of observationSet.replicates) {
+          if (observation.status === "success") observation.taskScore = 0.95;
+          observation.costUsd = observationSet.profileId === "expert" ? 0.03 : 0.005;
+        }
+      }
+    }
+
+    const result = nominatePolicy(activeSpec, dev);
+    const fastOnly = result.evaluations.find(({ policy }) => policy.kind === "fast-only")!;
+    const cascade = result.evaluations.find(({ policy }) => policy.kind === "cascade")!;
+    expect(fastOnly.evaluation.passed).toBe(true);
+    expect(cascade.evaluation.passed).toBe(true);
+    expect(fastOnly.evaluation.candidateMetrics.p50TotalTokensPerSecond).not.toBeNull();
+    expect(cascade.evaluation.candidateMetrics.p50TotalTokensPerSecond).toBeNull();
+    expect(result.frontier).toContain(fastOnly.policy.id);
+    expect(result.frontier).not.toContain(cascade.policy.id);
   });
 
   it("returns NO_CANDIDATE and all rejected evaluations when no candidate passes", () => {
@@ -620,6 +999,61 @@ describe("TASC exact holdout confirmation", () => {
       measurements({ split: "holdout", groupPrefix: "holdout" }),
       nomination,
     )).toThrow(/self-digest|edited/i);
+  });
+
+  it("rejects nomination accessor swaps before attestation or policy verification", () => {
+    const signed = nominated(false, ATTESTATION_KEY);
+    const alternate = generateCandidatePolicies(signed.activeSpec)
+      .find((policy) => policy.id !== signed.nomination.policy.id)!;
+    let policyReads = 0;
+    let digestReads = 0;
+    const forged = { ...signed.nomination };
+    Object.defineProperty(forged, "policy", {
+      enumerable: true,
+      get() {
+        policyReads += 1;
+        return policyReads <= 2 ? signed.nomination.policy : alternate;
+      },
+    });
+    Object.defineProperty(forged, "policyDigest", {
+      enumerable: true,
+      get() {
+        digestReads += 1;
+        return digestReads <= 2
+          ? signed.nomination.policyDigest
+          : fingerprintPolicy(alternate);
+      },
+    });
+
+    expect(() => confirmNomination(
+      signed.activeSpec,
+      measurements({ split: "holdout", groupPrefix: "holdout", synthetic: false }),
+      forged,
+      { attestationKey: ATTESTATION_KEY },
+    )).toThrow(/nomination.*policy.*accessor|accessor.*nomination.*policy/i);
+    expect(policyReads).toBe(0);
+    expect(digestReads).toBe(0);
+  });
+
+  it("snapshots confirmation attestation options without invoking accessors", () => {
+    const unsigned = nominated();
+    let keyReads = 0;
+    const options: Record<string, unknown> = {};
+    Object.defineProperty(options, "attestationKey", {
+      enumerable: true,
+      get() {
+        keyReads += 1;
+        throw new Error("confirmation attestation-key getter must not run");
+      },
+    });
+
+    expect(() => confirmNomination(
+      unsigned.activeSpec,
+      measurements({ split: "holdout", groupPrefix: "holdout" }),
+      unsigned.nomination,
+      options,
+    )).toThrow(/confirmation options.*attestationKey.*accessor|accessor.*attestationKey/i);
+    expect(keyReads).toBe(0);
   });
 
   it("rejects the wrong split, spec drift, and a re-signed unregistered policy", () => {
@@ -672,6 +1106,78 @@ describe("TASC exact holdout confirmation", () => {
     expect(result.policy.id).toBe(nomination.policy.id);
     expect(result).not.toHaveProperty("evaluations");
     expect(result.evaluation.gates.some((gate) => gate.id === "development_cost_improvement")).toBe(false);
+  });
+
+  it("round-trips a generated nomination at the 64-critical-slice contract limit", () => {
+    const activeSpec = nominationSpec();
+    const criticalSlices = Array.from({ length: 64 }, (_unused, index) => `critical-${index}`);
+    activeSpec.criticalSlices = criticalSlices;
+    activeSpec.constraints.minimumCriticalSliceGroups = 1;
+    const dev = measurements();
+    const holdout = measurements({ split: "holdout", groupPrefix: "holdout" });
+    for (const dataset of [dev, holdout]) {
+      for (const measurementCase of dataset.cases) {
+        measurementCase.critical = true;
+        measurementCase.slices = [...criticalSlices];
+      }
+    }
+
+    const nomination = nominatePolicy(activeSpec, dev).nomination!;
+    expect(nomination.gates).toHaveLength(138);
+    const confirmation = confirmNomination(activeSpec, holdout, nomination);
+    expect(confirmation.evaluation.gates).toHaveLength(137);
+    expect(confirmation.status).toBe("DEMO_ONLY");
+  });
+
+  it.each(["__proto__", "constructor", "prototype"])(
+    "round-trips the legal %s critical-slice record key",
+    (criticalSlice) => {
+      const activeSpec = nominationSpec();
+      activeSpec.criticalSlices = [criticalSlice];
+      activeSpec.constraints.minimumCriticalSliceGroups = 1;
+      const dev = measurements();
+      const holdout = measurements({ split: "holdout", groupPrefix: "holdout" });
+      for (const dataset of [dev, holdout]) {
+        for (const measurementCase of dataset.cases) {
+          measurementCase.critical = true;
+          measurementCase.slices = [criticalSlice];
+        }
+      }
+
+      const nomination = nominatePolicy(activeSpec, dev).nomination!;
+      expect(Object.hasOwn(nomination.candidateMetrics.criticalSliceTaskScore, criticalSlice)).toBe(true);
+      expect(confirmNomination(activeSpec, holdout, nomination).status).toBe("DEMO_ONLY");
+    },
+  );
+
+  it("charges nomination development groups to the caller budget before copying entries", () => {
+    const unsigned = nominated();
+    unsigned.nomination.developmentGroupIds = Array.from(
+      { length: 9 },
+      (_unused, index) => `artifact-group-${index}`,
+    );
+    const resigned = resignNomination(unsigned.nomination);
+    let groupReads = 0;
+    Object.defineProperty(resigned.developmentGroupIds, "8", {
+      enumerable: true,
+      get() {
+        groupReads += 1;
+        return "artifact-group-8";
+      },
+    });
+
+    expect(() => confirmNomination(
+      unsigned.activeSpec,
+      measurements({ split: "holdout", groupPrefix: "holdout" }),
+      resigned,
+      {
+        workBudget: {
+          ...DEFAULT_ASSESSMENT_WORK_BUDGET,
+          maxIndependentGroups: 8,
+        },
+      },
+    )).toThrow(/developmentGroupIds.*exceeds.*8|independent group.*budget/i);
+    expect(groupReads).toBe(0);
   });
 
   it("caps passing real legacy-v1 evidence at HOLD with an explicit migration reason", () => {

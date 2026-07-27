@@ -48,6 +48,20 @@ async function digest(path: string): Promise<string> {
 }
 
 describe("TASC CLI synthetic end-to-end example", () => {
+  it("keeps packaged safety docs aligned with the legacy-v1 HOLD boundary", async () => {
+    for (const path of [
+      resolve(REPO_ROOT, "README.md"),
+      resolve(REPO_ROOT, "docs/operating-guide.md"),
+      resolve(REPO_ROOT, "docs/design.md"),
+    ]) {
+      const source = await readFile(path, "utf8");
+      expect(source).not.toMatch(
+        /(?:produces?|returns?|status[^\n]*meaning)[^\n]{0,120}`READY_FOR_MANUAL_PRODUCTION`|`READY_FOR_MANUAL_PRODUCTION`[^\n]{0,160}(?:authenticated|real .*passed)/i,
+      );
+      expect(source).toMatch(/legacy v1[\s\S]{0,240}HOLD|HOLD[\s\S]{0,240}migrat[\s\S]{0,120}v2/i);
+    }
+  });
+
   it("nominates and confirms the exact cascade with deterministic, reviewer-ready artifacts", async () => {
     const root = await mkdtemp(resolve(tmpdir(), "tasc-cli-"));
     const devOne = resolve(root, "dev-one");

@@ -1,12 +1,17 @@
 import { compareCodeUnits, canonicalJson } from "./determinism.js";
 import { sha256 } from "./integrity.js";
-import { assertMeasurementMatrix } from "./schema.js";
+import {
+  assertMeasurementMatrix,
+  parseInferenceSpec,
+  parseMeasurementSet,
+} from "./schema.js";
 import type {
   FailedObservation,
   InferenceSpec,
   MeasurementCase,
   MeasurementSet,
   Observation,
+  ResolvedInferenceSpec,
   SuccessfulObservation,
 } from "./schema.js";
 
@@ -23,6 +28,8 @@ export interface InferencePolicy {
 
 export interface ReplayedRow {
   policyId: string;
+  /** Explicit on newly replayed rows; omitted legacy direct rows are treated conservatively. */
+  policyKind?: InferencePolicy["kind"];
   caseId: string;
   groupId: string;
   replicateIndex: number;
@@ -36,13 +43,18 @@ export interface ReplayedRow {
   endToEndLatencyMs: number;
   outputTokens: number;
   perceivedTokensPerSecond: number;
-  serviceThroughput: {
+  serviceThroughput?: {
     kind: "measured";
     tokensPerSecond: number;
   } | {
     kind: "unavailable";
     reason: string;
   };
+  /**
+   * @deprecated Kept for legacy TypeScript callers only. This value is never accepted as
+   * an exact-policy service-capacity observation.
+   */
+  totalTokensPerSecond?: number;
   costUsd: number;
   cacheHit?: boolean;
   failureCode?: string;
@@ -73,7 +85,8 @@ export function fingerprintPolicy(policy: InferencePolicy): string {
 }
 
 /** The expert-only control policy is deliberately kept outside the candidate space. */
-export function championPolicy(spec: InferenceSpec): InferencePolicy {
+/** @internal Use championPolicy at public boundaries. */
+export function championPolicyForResolvedSpec(spec: ResolvedInferenceSpec): InferencePolicy {
   return withStableId({
     version: "tasc-policy-v1",
     kind: "expert-only",
@@ -83,11 +96,16 @@ export function championPolicy(spec: InferenceSpec): InferencePolicy {
   });
 }
 
+export function championPolicy(spec: InferenceSpec): InferencePolicy {
+  return championPolicyForResolvedSpec(parseInferenceSpec(spec));
+}
+
 /**
  * Enumerate only preregistered candidate thresholds. Sorting and de-duplicating protects
  * deterministic selection even when a hand-authored spec repeats an equivalent threshold.
  */
-export function generateCandidatePolicies(spec: InferenceSpec): InferencePolicy[] {
+/** @internal Use generateCandidatePolicies at public boundaries. */
+export function generateCandidatePoliciesForResolvedSpec(spec: ResolvedInferenceSpec): InferencePolicy[] {
   const confidenceThresholds = [...new Set(spec.candidateSpace.confidenceThresholds)].sort((a, b) => a - b);
   const inputTokenThresholds = [...new Set(spec.candidateSpace.inputTokenThresholds)].sort((a, b) => a - b);
   const candidates: InferencePolicy[] = [];
@@ -119,6 +137,10 @@ export function generateCandidatePolicies(spec: InferenceSpec): InferencePolicy[
   return candidates.sort((left, right) => compareCodeUnits(left.id, right.id));
 }
 
+export function generateCandidatePolicies(spec: InferenceSpec): InferencePolicy[] {
+  return generateCandidatePoliciesForResolvedSpec(parseInferenceSpec(spec));
+}
+
 function elapsedMs(observation: Observation): number {
   return observation.status === "success" ? observation.endToEndLatencyMs : observation.elapsedMs;
 }
@@ -133,6 +155,7 @@ function replayedSuccess(
 ): ReplayedRow {
   return {
     policyId: policy.id,
+    policyKind: policy.kind,
     caseId: measurementCase.id,
     groupId: measurementCase.groupId,
     replicateIndex,
@@ -168,6 +191,7 @@ function replayedFailure(
 ): ReplayedRow {
   return {
     policyId: policy.id,
+    policyKind: policy.kind,
     caseId: measurementCase.id,
     groupId: measurementCase.groupId,
     replicateIndex,
@@ -211,7 +235,7 @@ function shouldEscalate(policy: InferencePolicy, measurementCase: MeasurementCas
   return measurementCase.slices.some((slice) => policy.criticalSlices.includes(slice));
 }
 
-function assertPolicyMatchesSpec(policy: InferencePolicy, spec: InferenceSpec): void {
+function assertPolicyMatchesSpec(policy: InferencePolicy, spec: ResolvedInferenceSpec): void {
   if (policy.version !== "tasc-policy-v1") throw new Error(`unsupported policy version "${policy.version}"`);
   if (policy.primaryProfileId !== spec.primaryProfileId || policy.expertProfileId !== spec.championProfileId) {
     throw new Error(`policy "${policy.id}" does not match the spec's primary and champion profiles`);
@@ -228,6 +252,19 @@ function assertPolicyMatchesSpec(policy: InferencePolicy, spec: InferenceSpec): 
 export function replayPolicy(
   policy: InferencePolicy,
   spec: InferenceSpec,
+  measurements: MeasurementSet,
+): ReplayedRow[] {
+  return replayPolicyForResolvedSpec(
+    policy,
+    parseInferenceSpec(spec),
+    parseMeasurementSet(measurements),
+  );
+}
+
+/** @internal Use replayPolicy at public boundaries. */
+export function replayPolicyForResolvedSpec(
+  policy: InferencePolicy,
+  spec: ResolvedInferenceSpec,
   measurements: MeasurementSet,
 ): ReplayedRow[] {
   assertPolicyMatchesSpec(policy, spec);

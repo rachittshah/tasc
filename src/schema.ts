@@ -1,3 +1,4 @@
+import { isProxy } from "node:util/types";
 import { z } from "zod";
 
 export type Split = "dev" | "holdout";
@@ -32,15 +33,29 @@ export interface InferenceSpec {
     maxCostPerThousandRequests: number;
     nonInferiorityMargin: number;
     minimumCostImprovement: number;
-    minimumIndependentGroups: number;
-    minimumCriticalSliceGroups: number;
+    /** Added in Task 4; omitted legacy v1 inputs resolve to 3. */
+    minimumIndependentGroups?: number;
+    /** Added in Task 4; omitted legacy v1 inputs resolve to 0, or 1 when critical slices exist. */
+    minimumCriticalSliceGroups?: number;
   };
   bootstrap: {
     seed: number;
     iterations: number;
-    alpha: number;
+    /** Added in Task 4; omitted legacy v1 inputs resolve to 0.05. */
+    alpha?: number;
   };
 }
+
+/** Fully migrated form used internally after a public-boundary normalization. */
+export type ResolvedInferenceSpec = Omit<InferenceSpec, "constraints" | "bootstrap"> & {
+  constraints: InferenceSpec["constraints"] & {
+    minimumIndependentGroups: number;
+    minimumCriticalSliceGroups: number;
+  };
+  bootstrap: InferenceSpec["bootstrap"] & {
+    alpha: number;
+  };
+};
 
 export interface SuccessfulObservation {
   status: "success";
@@ -115,7 +130,7 @@ const profileSchema = z.object({
   hardware: nonEmptyString,
 }).strict();
 
-export const inferenceSpecSchema: z.ZodType<InferenceSpec, z.ZodTypeDef, unknown> = z.object({
+const inferenceSpecStructureSchema: z.ZodType<ResolvedInferenceSpec, z.ZodTypeDef, unknown> = z.object({
   version: z.literal("tasc-inference-spec-v1"),
   id: nonEmptyString,
   profiles: z.array(profileSchema).min(2),
@@ -173,7 +188,7 @@ const observationSchema = z.discriminatedUnion("status", [
   failedObservationSchema,
 ]) as unknown as z.ZodType<Observation>;
 
-export const measurementSetSchema: z.ZodType<MeasurementSet> = z.object({
+const measurementSetStructureSchema: z.ZodType<MeasurementSet> = z.object({
   version: z.literal("tasc-measurements-v1"),
   dataset: z.object({
     id: nonEmptyString,
@@ -225,7 +240,9 @@ export function assertInferenceSpecSemantics(spec: InferenceSpec): void {
   if (new Set(spec.criticalSlices).size !== spec.criticalSlices.length) {
     throw new Error("duplicate critical slice");
   }
-  if (spec.criticalSlices.length === 0 && spec.constraints.minimumCriticalSliceGroups > 0) {
+  const minimumCriticalSliceGroups = spec.constraints.minimumCriticalSliceGroups
+    ?? (spec.criticalSlices.length === 0 ? 0 : 1);
+  if (spec.criticalSlices.length === 0 && minimumCriticalSliceGroups > 0) {
     throw new Error("critical-slice group minimum must be zero when no critical slices are declared");
   }
 }
@@ -277,16 +294,231 @@ export function assertMeasurementSetSemantics(measurements: MeasurementSet): voi
   }
 }
 
-export function parseInferenceSpec(input: unknown): InferenceSpec {
-  const spec = inferenceSpecSchema.parse(input);
-  const rawConstraints = typeof input === "object" && input !== null
-    ? (input as { constraints?: unknown }).constraints
-    : undefined;
+const MAX_SNAPSHOT_DEPTH = 64;
+const MAX_SNAPSHOT_NODES = 20_000_000;
+const MAX_SNAPSHOT_ARRAY_LENGTH = 100_000;
+const MAX_SNAPSHOT_OBJECT_KEYS = 128;
+
+interface SnapshotTraversalState {
+  ancestors: WeakSet<object>;
+  seen: WeakSet<object>;
+  nodes: number;
+  arrayLengthLimits: ReadonlyMap<string, number>;
+}
+
+/** @internal Descriptor-safe bounded snapshot shared by legacy public contract parsers. */
+export function snapshotPlainDataTree(
+  input: unknown,
+  label: string,
+  options: {
+    arrayLengthLimits?: ReadonlyMap<string, number>;
+  } = {},
+): unknown {
+  return snapshotPlainDataTreeAt(input, label, {
+    ancestors: new WeakSet<object>(),
+    seen: new WeakSet<object>(),
+    nodes: 0,
+    arrayLengthLimits: options.arrayLengthLimits ?? new Map<string, number>(),
+  }, 0);
+}
+
+function snapshotPlainDataTreeAt(
+  input: unknown,
+  label: string,
+  traversal: SnapshotTraversalState,
+  depth: number,
+): unknown {
+  if (depth > MAX_SNAPSHOT_DEPTH) {
+    throw new Error(`${label} snapshot nesting depth exceeds ${MAX_SNAPSHOT_DEPTH}`);
+  }
+  traversal.nodes += 1;
+  if (traversal.nodes > MAX_SNAPSHOT_NODES) {
+    throw new Error(`contract snapshot exceeds ${MAX_SNAPSHOT_NODES} values`);
+  }
+  if (typeof input !== "object" || input === null) return input;
+  if (isProxy(input)) throw new Error(`${label} proxy values are not allowed`);
+  if (traversal.ancestors.has(input)) throw new Error(`${label} contains a cyclic reference`);
+  if (traversal.seen.has(input)) throw new Error(`${label} contains a repeated shared object reference`);
+  traversal.seen.add(input);
+  traversal.ancestors.add(input);
+  try {
+    if (Array.isArray(input)) {
+      const lengthDescriptor = Object.getOwnPropertyDescriptor(input, "length");
+      const length = lengthDescriptor?.value;
+      if (!Number.isSafeInteger(length) || length < 0) {
+        throw new Error(`${label} length must be a safe non-negative integer data property`);
+      }
+      const contextualLengthLimit = traversal.arrayLengthLimits.get(label);
+      if (contextualLengthLimit !== undefined && length > contextualLengthLimit) {
+        throw new Error(`${label} length ${length} exceeds configured maximum ${contextualLengthLimit}`);
+      }
+      if (length > MAX_SNAPSHOT_ARRAY_LENGTH) {
+        throw new Error(`${label} must contain at most ${MAX_SNAPSHOT_ARRAY_LENGTH} entries`);
+      }
+      if ((label.endsWith(".criticalSlices") || label.endsWith(".slices")) && length > 64) {
+        throw new Error(`${label} must contain at most 64 slice labels`);
+      }
+      const allowedKeys = new Set<string>(["length"]);
+      const snapshot: unknown[] = [];
+      for (let index = 0; index < length; index += 1) {
+        const key = String(index);
+        allowedKeys.add(key);
+        const descriptor = Object.getOwnPropertyDescriptor(input, key);
+        if (descriptor === undefined) throw new Error(`${label} has a hole at index ${index}`);
+        if (
+          !descriptor.enumerable
+          || !Object.prototype.hasOwnProperty.call(descriptor, "value")
+        ) {
+          throw new Error(
+            `${label}[${index}] must be an enumerable own data property; accessors are not allowed`,
+          );
+        }
+        snapshot.push(snapshotPlainDataTreeAt(
+          descriptor.value,
+          `${label}[${index}]`,
+          traversal,
+          depth + 1,
+        ));
+      }
+      for (const key of Reflect.ownKeys(input)) {
+        if (typeof key !== "string" || !allowedKeys.has(key)) {
+          throw new Error(`${label} must contain only indexed own data properties`);
+        }
+      }
+      return snapshot;
+    }
+
+    const prototype = Object.getPrototypeOf(input);
+    if (prototype !== Object.prototype && prototype !== null) {
+      throw new Error(`${label} must be a plain object; inherited properties are not allowed`);
+    }
+    const keys = Reflect.ownKeys(input);
+    if (keys.length > MAX_SNAPSHOT_OBJECT_KEYS) {
+      throw new Error(`${label} must contain at most ${MAX_SNAPSHOT_OBJECT_KEYS} own properties`);
+    }
+    const snapshot: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+    for (const key of keys) {
+      if (typeof key !== "string") {
+        throw new Error(`${label} must contain only string-keyed own data properties`);
+      }
+      const descriptor = Object.getOwnPropertyDescriptor(input, key);
+      if (
+        descriptor === undefined
+        || !descriptor.enumerable
+        || !Object.prototype.hasOwnProperty.call(descriptor, "value")
+      ) {
+        throw new Error(`${label}.${key} must be an enumerable own data property; accessors are not allowed`);
+      }
+      snapshot[key] = snapshotPlainDataTreeAt(
+        descriptor.value,
+        `${label}.${key}`,
+        traversal,
+        depth + 1,
+      );
+    }
+    return snapshot;
+  } finally {
+    traversal.ancestors.delete(input);
+  }
+}
+
+export interface PreparedInferenceSpec {
+  bootstrapIterations: number;
+  confidenceThresholdCount: number;
+  inputTokenThresholdCount: number;
+  includeFastOnly: boolean;
+}
+
+interface InferenceSpecInputSnapshot extends PreparedInferenceSpec {
+  value: Record<string, unknown>;
+  minimumCriticalSliceGroupsWasOmitted: boolean;
+}
+
+function snapshotInferenceSpecInput(input: unknown): InferenceSpecInputSnapshot {
+  const rootValue = snapshotPlainDataTree(input, "inference spec");
+  if (typeof rootValue !== "object" || rootValue === null || Array.isArray(rootValue)) {
+    throw new Error("inference spec must be a plain object with enumerable own data properties");
+  }
+  const root = rootValue as Record<string, unknown>;
+  const candidateSpace = root.candidateSpace;
+  const constraints = root.constraints;
+  const bootstrap = root.bootstrap;
+  if (typeof candidateSpace !== "object" || candidateSpace === null || Array.isArray(candidateSpace)) {
+    throw new Error("inference spec candidate space must be a plain object");
+  }
+  if (typeof constraints !== "object" || constraints === null || Array.isArray(constraints)) {
+    throw new Error("inference spec constraints must be a plain object");
+  }
+  if (typeof bootstrap !== "object" || bootstrap === null || Array.isArray(bootstrap)) {
+    throw new Error("inference spec bootstrap must be a plain object");
+  }
+  const candidateSpaceRecord = candidateSpace as Record<string, unknown>;
+  const constraintsRecord = constraints as Record<string, unknown>;
+  const bootstrapRecord = bootstrap as Record<string, unknown>;
+  if (!Number.isSafeInteger(bootstrapRecord.iterations) || (bootstrapRecord.iterations as number) <= 0) {
+    throw new Error("inference spec bootstrap iterations must be a positive safe integer");
+  }
+  if (typeof candidateSpaceRecord.includeFastOnly !== "boolean") {
+    throw new Error("inference spec candidate includeFastOnly must be boolean");
+  }
+  if (
+    !Array.isArray(candidateSpaceRecord.confidenceThresholds)
+    || !Array.isArray(candidateSpaceRecord.inputTokenThresholds)
+  ) {
+    throw new Error("inference spec candidate thresholds must be arrays");
+  }
+  if (!Array.isArray(root.criticalSlices)) throw new Error("critical slices must be an array");
+  const normalizedCriticalSlices = new Set<string>();
+  for (const slice of root.criticalSlices) {
+    if (typeof slice !== "string" || slice.trim().length === 0) {
+      throw new Error("critical slices must contain non-empty string labels");
+    }
+    const normalized = slice.trim();
+    if (normalizedCriticalSlices.has(normalized)) throw new Error("critical slices has a duplicate slice label");
+    normalizedCriticalSlices.add(normalized);
+  }
   const minimumCriticalSliceGroupsWasOmitted = (
-    typeof rawConstraints === "object"
-    && rawConstraints !== null
-    && !Object.prototype.hasOwnProperty.call(rawConstraints, "minimumCriticalSliceGroups")
+    !Object.prototype.hasOwnProperty.call(constraintsRecord, "minimumCriticalSliceGroups")
+    || constraintsRecord.minimumCriticalSliceGroups === undefined
   );
+  return {
+    value: root,
+    minimumCriticalSliceGroupsWasOmitted,
+    bootstrapIterations: bootstrapRecord.iterations as number,
+    confidenceThresholdCount: new Set(candidateSpaceRecord.confidenceThresholds).size,
+    inputTokenThresholdCount: new Set(candidateSpaceRecord.inputTokenThresholds).size,
+    includeFastOnly: candidateSpaceRecord.includeFastOnly as boolean,
+  };
+}
+
+const preparedInferenceSpecs = new WeakMap<PreparedInferenceSpec, InferenceSpecInputSnapshot>();
+
+/** Create one immutable-by-ownership snapshot for both work budgeting and parsing. */
+export function prepareInferenceSpec(input: unknown): PreparedInferenceSpec {
+  const snapshot = snapshotInferenceSpecInput(input);
+  const prepared = Object.freeze({
+    bootstrapIterations: snapshot.bootstrapIterations,
+    confidenceThresholdCount: snapshot.confidenceThresholdCount,
+    inputTokenThresholdCount: snapshot.inputTokenThresholdCount,
+    includeFastOnly: snapshot.includeFastOnly,
+  });
+  preparedInferenceSpecs.set(prepared, snapshot);
+  return prepared;
+}
+
+/**
+ * Parse and migrate both untrusted JSON and legacy typed v1 objects. Call this once at
+ * every public spec boundary; the returned object has all Task 4 controls explicit.
+ */
+export function parseInferenceSpec(input: unknown): ResolvedInferenceSpec {
+  return parsePreparedInferenceSpec(prepareInferenceSpec(input));
+}
+
+export function parsePreparedInferenceSpec(prepared: PreparedInferenceSpec): ResolvedInferenceSpec {
+  const snapshot = preparedInferenceSpecs.get(prepared);
+  if (snapshot === undefined) throw new Error("inference spec preparation handle is invalid");
+  const spec = inferenceSpecStructureSchema.parse(snapshot.value);
+  const { minimumCriticalSliceGroupsWasOmitted } = snapshot;
   if (minimumCriticalSliceGroupsWasOmitted && spec.criticalSlices.length > 0) {
     spec.constraints.minimumCriticalSliceGroups = 1;
   }
@@ -294,14 +526,42 @@ export function parseInferenceSpec(input: unknown): InferenceSpec {
   return spec;
 }
 
+export const inferenceSpecSchema: z.ZodType<ResolvedInferenceSpec, z.ZodTypeDef, unknown> = z
+  .unknown()
+  .transform((input, context) => {
+    try {
+      return parseInferenceSpec(input);
+    } catch (error) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: error instanceof Error ? error.message : "invalid inference spec",
+      });
+      return z.NEVER;
+    }
+  }) as z.ZodType<ResolvedInferenceSpec, z.ZodTypeDef, unknown>;
+
 export function parseMeasurementSet(input: unknown, expectedSplit?: Split): MeasurementSet {
-  const measurements = measurementSetSchema.parse(input);
+  const measurements = measurementSetStructureSchema.parse(snapshotPlainDataTree(input, "measurement set"));
   assertMeasurementSetSemantics(measurements);
   if (expectedSplit && measurements.dataset.split !== expectedSplit) {
     throw new Error(`measurement split "${measurements.dataset.split}" does not match expected "${expectedSplit}"`);
   }
   return measurements;
 }
+
+export const measurementSetSchema: z.ZodType<MeasurementSet, z.ZodTypeDef, unknown> = z
+  .unknown()
+  .transform((input, context) => {
+    try {
+      return parseMeasurementSet(input);
+    } catch (error) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: error instanceof Error ? error.message : "invalid measurement set",
+      });
+      return z.NEVER;
+    }
+  }) as z.ZodType<MeasurementSet, z.ZodTypeDef, unknown>;
 
 /**
  * Ensure each case has a complete, paired empirical matrix for every profile in the spec.

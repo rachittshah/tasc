@@ -180,10 +180,12 @@ Statuses mean:
 | `NOMINATED` | A development candidate passed all gates and won deterministic selection. |
 | `NO_CANDIDATE` | No development candidate passed every gate; no nomination exists. |
 | `DEMO_ONLY` | Holdout gates passed, but development or holdout evidence is synthetic. |
-| `HOLD` | Holdout gates failed, or real evidence passed without verified nomination attestation. |
-| `READY_FOR_MANUAL_PRODUCTION` | Real development and holdout evidence passed and the nomination HMAC verified; a human rollout decision is still required. |
+| `HOLD` | Holdout gates failed, or legacy v1 processed real evidence. |
 
-No status causes a serving change.
+Legacy v1 confirmation always returns `HOLD` for real evidence, even when the
+nomination HMAC verifies. Plan to migrate to the v2 controller assessment when
+Task 5 lands; this release does not include that production-recommendation
+command. No status causes a serving change.
 
 ## Collecting local MLX measurements
 
@@ -273,8 +275,8 @@ Public hashes such as `selfDigest` are deterministic content and corruption
 checks. Anyone who edits an artifact can recompute a public hash, so hashes are
 not authenticity.
 
-For real-data readiness, load the same secret into the environment for both
-commands:
+For authenticated legacy v1 review, load the same secret into the environment
+for both commands:
 
 ```bash
 export TASC_ATTESTATION_KEY="<at least 32 UTF-8 bytes from your secret manager>"
@@ -283,8 +285,10 @@ export TASC_ATTESTATION_KEY="<at least 32 UTF-8 bytes from your secret manager>"
 There is intentionally no CLI key flag. Never place the key in shell history,
 source control, an artifact, or a log. The nomination stores only its
 `hmac-sha256` digest. Confirmation with the trusted key rejects coherently
-edited nominations; passing real evidence without verified attestation returns
-`HOLD`.
+edited nominations. Passing real evidence always returns `HOLD` in legacy v1;
+the verification does not make a production recommendation. The v2 controller
+assessment will provide that decision path when Task 5 lands; it is not a
+command in this release.
 
 The HMAC authenticates nomination continuity, not truth. It does not prove that
 the raw benchmark is honest, the evaluator is good, `synthetic` is labeled

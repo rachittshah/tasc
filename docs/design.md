@@ -2,7 +2,7 @@
 
 - Date: 2026-07-24
 - Status: Implemented proof of concept
-- Scope: Private standalone repository. The synthetic path needs no credentials, while real-data readiness uses an optional environment-only attestation key.
+- Scope: Private standalone repository. The synthetic path needs no credentials, while legacy v1 can authenticate real-data artifact continuity with an optional environment-only attestation key.
 
 ## Outcome
 
@@ -14,7 +14,7 @@ The proof of concept must answer one useful question:
 
 TASC does not claim to optimize CUDA kernels, GPU layouts, or model servers without hardware measurements. It replays measured observations, evaluates policies on a development split, nominates exactly one policy, and confirms only that frozen policy on a sealed holdout split.
 
-A gate-passing synthetic run produces `DEMO_ONLY`; any failed holdout gate produces `HOLD`. A gate-passing, non-synthetic run produces `READY_FOR_MANUAL_PRODUCTION` only when the development nomination's HMAC attestation verifies; otherwise it produces `HOLD`. Every status remains decision support, and TASC never edits production configuration.
+A gate-passing synthetic run produces `DEMO_ONLY`; any failed holdout gate produces `HOLD`. Real legacy v1 confirmation always produces `HOLD`, even when the development nomination's HMAC attestation verifies. Users should plan to migrate to the v2 controller assessment when Task 5 lands; this release does not include that production-recommendation command. Every status remains decision support, and TASC never edits production configuration.
 
 ## Why this project
 
@@ -78,7 +78,7 @@ spec.json + dev measurements
  exact-policy confirmation
           |
           v
- DEMO_ONLY | READY_FOR_MANUAL_PRODUCTION | HOLD
+ DEMO_ONLY | HOLD
 ```
 
 The implementation lives in `src/`:
@@ -172,6 +172,13 @@ Each policy reports:
 - escalation rate;
 - critical-slice task score.
 
+Legacy v1 cannot derive exact-policy service capacity for a serial cascade from
+either component profile's token rate. Accordingly,
+`PolicyMetrics.p50TotalTokensPerSecond` is nullable, and the deprecated
+`ReplayedRow.totalTokensPerSecond` input is optional source compatibility only;
+it is never treated as cascade capacity. Existing library consumers must handle
+the explicit unavailable case. TASC does not fabricate a numeric projection.
+
 Development and holdout apply the same preregistered hard gates:
 
 - paired quality bootstrap lower bound is not below the configured non-inferiority margin;
@@ -217,7 +224,7 @@ Holdout confirmation:
 
 There is no direct “pick the best holdout candidate” API.
 
-The public self-digest is a reproducibility and corruption check, not authentication: anyone can coherently edit and re-digest public data. Authenticity for a real-data nomination requires an out-of-band `TASC_ATTESTATION_KEY` of at least 32 UTF-8 bytes, supplied to both commands through the environment and never written to a CLI flag, artifact, or log. Passing real evidence without successful verification remains `HOLD`.
+The public self-digest is a reproducibility and corruption check, not authentication: anyone can coherently edit and re-digest public data. Authenticity for a real-data nomination requires an out-of-band `TASC_ATTESTATION_KEY` of at least 32 UTF-8 bytes, supplied to both commands through the environment and never written to a CLI flag, artifact, or log. Successful verification authenticates nomination continuity but does not change the legacy v1 safety boundary: real confirmation remains `HOLD`. Users should plan to migrate to the v2 controller assessment when Task 5 lands; this release does not include that production-recommendation command.
 
 Neither the public hashes nor the HMAC prove benchmark provenance, evaluator quality, honest synthetic labeling, or operational sealing of the holdout. These remain manual review and data-custody responsibilities.
 
@@ -291,7 +298,7 @@ Tests cover:
 - hard-gate and Pareto selection behavior;
 - holdout isolation and leakage rejection;
 - public self-digest inconsistency rejection and keyed attestation rejection;
-- `DEMO_ONLY` versus `READY_FOR_MANUAL_PRODUCTION`;
+- `DEMO_ONLY` versus the legacy v1 real-data `HOLD` boundary;
 - CLI artifact creation on the bundled synthetic example.
 
 Final verification includes targeted Vitest suites, TypeScript typecheck, the full test suite, both CLI commands, and `git diff --check`.

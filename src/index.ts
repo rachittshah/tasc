@@ -48,8 +48,46 @@ export type {
 } from "./evidence-join.js";
 export * from "./evaluate.js";
 export * from "./integrity.js";
-export * from "./policy.js";
+export {
+  championPolicy,
+  fingerprintPolicy,
+  generateCandidatePolicies,
+  replayPolicy,
+} from "./policy.js";
+export type {
+  InferencePolicy,
+  ReplayedRow,
+} from "./policy.js";
 export * from "./report.js";
-export * from "./schema.js";
-export * from "./statistics.js";
+export {
+  assertInferenceSpecSemantics,
+  assertMeasurementMatrix,
+  assertMeasurementSetSemantics,
+  inferenceSpecSchema,
+  measurementSetSchema,
+  parseInferenceSpec,
+  parseMeasurementSet,
+} from "./schema.js";
+export type {
+  FailedObservation,
+  InferenceSpec,
+  MeasurementCase,
+  MeasurementSet,
+  Observation,
+  ProfileObservationSet,
+  ResolvedInferenceSpec,
+  ServingProfile,
+  Split,
+  SuccessfulObservation,
+} from "./schema.js";
+export {
+  bootstrapMeanCI,
+  mean,
+  median,
+  mulberry32,
+  quantile,
+} from "./statistics.js";
+export type {
+  BootstrapCI,
+} from "./statistics.js";
 export * from "./work-budget.js";
