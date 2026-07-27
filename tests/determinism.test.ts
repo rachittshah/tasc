@@ -45,32 +45,29 @@ describe("portable deterministic primitives", () => {
 
   it("keeps canonical artifact bytes and decisions invariant across process locales", () => {
     const moduleUrl = new URL("../src/determinism.ts", import.meta.url).href;
-    const policyUrl = new URL("../src/policy.ts", import.meta.url).href;
-    const reportUrl = new URL("../src/report.ts", import.meta.url).href;
+    const evaluateUrl = new URL("../src/evaluate.ts", import.meta.url).href;
+    const schemaUrl = new URL("../src/schema.ts", import.meta.url).href;
+    const specPath = new URL("../examples/synthetic/spec.json", import.meta.url).pathname;
+    const developmentPath = new URL("../examples/synthetic/dev.json", import.meta.url).pathname;
     const script = `
       import { createHash } from "node:crypto";
+      import { readFileSync } from "node:fs";
       import { canonicalJson, compareCodeUnits } from ${JSON.stringify(moduleUrl)};
-      import { generateCandidatePolicies } from ${JSON.stringify(policyUrl)};
-      import { proposeNextExperiment } from ${JSON.stringify(reportUrl)};
+      import { nominatePolicy } from ${JSON.stringify(evaluateUrl)};
+      import { parseInferenceSpec, parseMeasurementSet } from ${JSON.stringify(schemaUrl)};
       const ids = ["z", "ä", "a10", "a2", "😀", "😃"];
       const ordered = [...ids].sort(compareCodeUnits);
-      const candidates = generateCandidatePolicies({
-        primaryProfileId: "fast", championProfileId: "expert", criticalSlices: [],
-        candidateSpace: { confidenceThresholds: [0.8, 0.2], inputTokenThresholds: [20, 10], includeFastOnly: true },
-      }).map((candidate) => candidate.id);
-      const rejected = (id) => ({
-        policy: { id, kind: "fast-only" },
-        evaluation: { gates: [{ id: "mean_task_score", pass: false, actual: 0, threshold: 1, comparison: ">=", reason: "fixture" }] },
-      });
-      const proposal = proposeNextExperiment({ status: "NO_CANDIDATE", evaluations: [rejected("ä"), rejected("z")], frontier: [] }, {
-        spec: {}, measurements: { cases: [] },
-      });
-      const artifact = canonicalJson({ ordered, candidates, tieBreak: proposal.trigger, nested: { "ä": 2, z: 1 } });
+      const spec = parseInferenceSpec(JSON.parse(readFileSync(${JSON.stringify(specPath)}, "utf8")));
+      const development = parseMeasurementSet(JSON.parse(readFileSync(${JSON.stringify(developmentPath)}, "utf8")), "dev");
+      const result = nominatePolicy(spec, development);
+      if (result.status !== "NOMINATED" || !result.nomination) throw new Error("expected synthetic nomination");
+      const artifact = canonicalJson(result.nomination);
       process.stdout.write(JSON.stringify({
         legacy: "z".localeCompare("ä"),
         ordered,
-        candidates,
-        tieBreak: proposal.trigger,
+        status: result.status,
+        decisionDigest: result.nomination.decisionDigest,
+        selfDigest: result.nomination.selfDigest,
         artifact,
         digest: createHash("sha256").update(artifact).digest("hex"),
       }));
@@ -84,7 +81,15 @@ describe("portable deterministic primitives", () => {
     ], {
       encoding: "utf8",
       env: { ...process.env, LANG: locale, LC_ALL: locale },
-    })) as { legacy: number; ordered: string[]; candidates: string[]; tieBreak: string; artifact: string; digest: string };
+    })) as {
+      legacy: number;
+      ordered: string[];
+      status: string;
+      decisionDigest: string;
+      selfDigest: string;
+      artifact: string;
+      digest: string;
+    };
 
     const c = run("C");
     const english = run("en_US.UTF-8");
@@ -96,20 +101,30 @@ describe("portable deterministic primitives", () => {
     expect([c, english, swedish].map(({ legacy: _legacy, ...result }) => result)).toEqual([
       expect.objectContaining({
         ordered: ["a10", "a2", "z", "ä", "😀", "😃"],
-        tieBreak: expect.stringMatching(/^z was the most promising rejected candidate/),
+        status: "NOMINATED",
+        decisionDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+        selfDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
       }),
       expect.objectContaining({
         ordered: ["a10", "a2", "z", "ä", "😀", "😃"],
-        tieBreak: expect.stringMatching(/^z was the most promising rejected candidate/),
+        status: "NOMINATED",
+        decisionDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+        selfDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
       }),
       expect.objectContaining({
         ordered: ["a10", "a2", "z", "ä", "😀", "😃"],
-        tieBreak: expect.stringMatching(/^z was the most promising rejected candidate/),
+        status: "NOMINATED",
+        decisionDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+        selfDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
       }),
     ]);
     expect(c.artifact).toBe(english.artifact);
     expect(c.artifact).toBe(swedish.artifact);
     expect(c.digest).toBe(english.digest);
     expect(c.digest).toBe(swedish.digest);
+    expect(c.decisionDigest).toBe(english.decisionDigest);
+    expect(c.decisionDigest).toBe(swedish.decisionDigest);
+    expect(c.selfDigest).toBe(english.selfDigest);
+    expect(c.selfDigest).toBe(swedish.selfDigest);
   });
 });

@@ -359,6 +359,26 @@ function resignNomination(nomination: NominationArtifact): NominationArtifact {
 }
 
 describe("TASC development nomination", () => {
+  it("fails a caller work budget before candidate expansion or bootstrap allocation", () => {
+    const activeSpec = nominationSpec();
+    activeSpec.candidateSpace = {
+      confidenceThresholds: Array.from({ length: 5_000 }, (_value, index) => index),
+      inputTokenThresholds: Array.from({ length: 5_000 }, (_value, index) => index),
+      includeFastOnly: false,
+    };
+
+    expect(() => nominatePolicy(activeSpec, measurements(), {
+      workBudget: {
+        maxCandidates: 0,
+        maxTraceRows: Number.MAX_SAFE_INTEGER,
+        maxEvidenceRows: Number.MAX_SAFE_INTEGER,
+        maxBootstrapDraws: Number.MAX_SAFE_INTEGER,
+        maxIndependentGroups: Number.MAX_SAFE_INTEGER,
+        maxAssessmentWork: Number.MAX_SAFE_INTEGER,
+      },
+    })).toThrow(/candidate count exceeds caller work budget/i);
+  });
+
   it("evaluates every generated policy and retains hard-gate rejections", () => {
     const result = nominatePolicy(nominationSpec(), measurements({ fastOnlyMustFail: true }));
 

@@ -4,6 +4,11 @@ import { canonicalJson, compareCodeUnits } from "./determinism.js";
 import { sha256 } from "./integrity.js";
 import { assertMeasurementMatrix, type InferenceSpec, type MeasurementSet } from "./schema.js";
 import {
+  assertWithinWorkBudget,
+  estimateAssessmentWork,
+  type WorkBudget,
+} from "./work-budget.js";
+import {
   championPolicy,
   fingerprintPolicy,
   generateCandidatePolicies,
@@ -60,7 +65,19 @@ export interface CandidateEvaluation {
 
 export interface AttestationOptions {
   attestationKey?: string;
+  /** Optional tighter caller limit; omitted callers receive a bounded safe default. */
+  workBudget?: WorkBudget;
 }
+
+/** Bounded defaults preserve the synthetic CLI/demo call shape without allowing unbounded work. */
+export const DEFAULT_ASSESSMENT_WORK_BUDGET: Readonly<WorkBudget> = Object.freeze({
+  maxCandidates: 10_000,
+  maxTraceRows: 100_000,
+  maxEvidenceRows: 100_000,
+  maxBootstrapDraws: 100_000,
+  maxIndependentGroups: 100_000,
+  maxAssessmentWork: 100_000_000,
+});
 
 export interface NominationAttestation {
   algorithm: "hmac-sha256";
@@ -110,6 +127,50 @@ export interface ConfirmationResult {
 interface WeightedValue {
   value: number;
   weight: number;
+}
+
+function checkedAdd(left: number, right: number, name: string): number {
+  if (!Number.isSafeInteger(left) || !Number.isSafeInteger(right) || left > Number.MAX_SAFE_INTEGER - right) {
+    throw new Error(`${name} exceeds safe integer range`);
+  }
+  return left + right;
+}
+
+function candidatePolicyCount(spec: InferenceSpec): number {
+  const confidenceCount = new Set(spec.candidateSpace.confidenceThresholds).size;
+  const inputTokenCount = new Set(spec.candidateSpace.inputTokenThresholds).size;
+  if (confidenceCount > 0 && inputTokenCount > Number.MAX_SAFE_INTEGER / confidenceCount) {
+    throw new Error("candidate count exceeds safe integer range");
+  }
+  return checkedAdd(
+    confidenceCount * inputTokenCount,
+    spec.candidateSpace.includeFastOnly ? 1 : 0,
+    "candidate count",
+  );
+}
+
+function observationRowCount(measurements: MeasurementSet): number {
+  let count = 0;
+  for (const measurementCase of measurements.cases) {
+    for (const observationSet of measurementCase.observations) {
+      count = checkedAdd(count, observationSet.replicates.length, "measurement row count");
+    }
+  }
+  return count;
+}
+
+/** Enforce work limits before candidate arrays or bootstrap result arrays can be allocated. */
+function assertAssessmentWorkBudget(spec: InferenceSpec, measurements: MeasurementSet, budget: WorkBudget): void {
+  const rows = observationRowCount(measurements);
+  const independentGroups = new Set(measurements.cases.map((measurementCase) => measurementCase.groupId)).size;
+  const estimate = estimateAssessmentWork({
+    candidateCount: candidatePolicyCount(spec),
+    traceRows: rows,
+    evidenceRows: rows,
+    bootstrapDraws: spec.bootstrap.iterations,
+    independentGroups,
+  });
+  assertWithinWorkBudget(estimate, budget);
 }
 
 function effectiveWeightedRows(rows: readonly ReplayedRow[]): Array<{ row: ReplayedRow; weight: number }> {
@@ -370,6 +431,7 @@ export function nominatePolicy(
   if (dev.dataset.split !== "dev") {
     throw new Error(`nomination requires development split "dev"; received "${dev.dataset.split}"`);
   }
+  assertAssessmentWorkBudget(spec, dev, options.workBudget ?? DEFAULT_ASSESSMENT_WORK_BUDGET);
   assertMeasurementMatrix(spec, dev);
 
   const champion = championPolicy(spec);
@@ -496,6 +558,7 @@ export function confirmNomination(
   }
   assertNominationSelfDigest(nomination);
   const attestationVerified = attestationKey !== undefined;
+  assertAssessmentWorkBudget(spec, holdout, options.workBudget ?? DEFAULT_ASSESSMENT_WORK_BUDGET);
 
   const specDigest = digest(spec);
   if (nomination.specDigest !== specDigest) {

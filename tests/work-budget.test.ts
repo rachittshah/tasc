@@ -92,4 +92,22 @@ describe("assessment work budgeting", () => {
       },
     )).toThrow(/assessment work/i);
   });
+
+  it("recomputes total work instead of trusting a forgeable estimate field", () => {
+    expect(() => assertWithinWorkBudget({
+      candidateCount: 100,
+      traceRows: 100,
+      evidenceRows: 100,
+      bootstrapDraws: 100,
+      independentGroups: 100,
+      assessmentWork: 0,
+    }, {
+      maxCandidates: 100,
+      maxTraceRows: 100,
+      maxEvidenceRows: 100,
+      maxBootstrapDraws: 100,
+      maxIndependentGroups: 100,
+      maxAssessmentWork: 1_000_000,
+    })).toThrow(/assessment work/i);
+  });
 });

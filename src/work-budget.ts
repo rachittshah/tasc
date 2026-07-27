@@ -68,10 +68,11 @@ export function assertWithinWorkBudget(estimate: AssessmentWorkEstimate, budget:
   assertNonNegativeSafeInteger(estimate.bootstrapDraws, "bootstrap draws");
   assertNonNegativeSafeInteger(estimate.independentGroups, "independent groups");
   assertNonNegativeSafeInteger(estimate.assessmentWork, "assessment work");
+  const recomputedWork = estimateAssessmentWork(estimate).assessmentWork;
   assertBudgetLimit(estimate.candidateCount, budget.maxCandidates, "candidate count");
   assertBudgetLimit(estimate.traceRows, budget.maxTraceRows, "trace rows");
   assertBudgetLimit(estimate.evidenceRows, budget.maxEvidenceRows, "evidence rows");
   assertBudgetLimit(estimate.bootstrapDraws, budget.maxBootstrapDraws, "bootstrap draws");
   assertBudgetLimit(estimate.independentGroups, budget.maxIndependentGroups, "independent groups");
-  assertBudgetLimit(estimate.assessmentWork, budget.maxAssessmentWork, "assessment work");
+  assertBudgetLimit(recomputedWork, budget.maxAssessmentWork, "assessment work");
 }
