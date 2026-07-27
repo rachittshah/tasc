@@ -34,6 +34,17 @@ export type {
   ExperimentProtocol,
   TraceEnvelope,
 } from "./evidence.js";
+export {
+  joinAssessmentEvidence,
+  resolveGroupSplit,
+} from "./evidence-join.js";
+export type {
+  AssessmentDataset,
+  AssessmentExecutionOutcome,
+  AssessmentExecutionRow,
+  AssessmentPair,
+  ResolvedGroupSplit,
+} from "./evidence-join.js";
 export * from "./evaluate.js";
 export * from "./integrity.js";
 export * from "./policy.js";

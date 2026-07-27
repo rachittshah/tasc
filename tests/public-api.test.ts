@@ -20,6 +20,8 @@ describe("standalone public API", () => {
       parseAssessmentContext: expect.any(Function),
       fingerprintExecutionProfile: expect.any(Function),
       fingerprintProtocol: expect.any(Function),
+      joinAssessmentEvidence: expect.any(Function),
+      resolveGroupSplit: expect.any(Function),
     });
   });
 

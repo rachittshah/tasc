@@ -102,6 +102,8 @@ export const validProtocolInput = () => {
       rubricVersion: "rubric-4",
       calibrationDigest: digest("a"),
       producerKind: "deterministic" as const,
+      producerId: "support-evaluator-service",
+      producerVersion: "4.2.0",
       requiredTrustedKeyIds: ["evaluator-key-1"],
     },
     candidatePolicySpace: {
@@ -274,6 +276,28 @@ export const validTraceInput = () => {
     terminalOutputId: keyedIdentity("1"),
     collectorVersion: "collector-2.0.0",
   };
+};
+
+export const validTraceInputForProfile = (
+  profileId: "champion" | "candidate",
+) => {
+  const trace = validTraceInput();
+  if (profileId === "champion") return trace;
+
+  const protocol = validProtocolInput();
+  const profile = protocol.profiles[1];
+  trace.traceId = "trace-case-1-r0-candidate";
+  trace.profileId = profile.id;
+  trace.executionProfileDigest = fingerprintExecutionProfile(profile);
+  trace.observedRoute.selectedProfileId = profile.id;
+  trace.observedRoute.decisionId = "route-decision-2";
+  trace.attempts[0].requestedModel = { ...profile.model };
+  trace.attempts[0].resolvedModel = {
+    ...profile.model,
+    source: "provider-reported",
+  };
+  trace.terminalOutputId = keyedIdentity("2");
+  return trace;
 };
 
 export interface EvaluatorKeyFixture {

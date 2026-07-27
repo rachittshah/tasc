@@ -167,6 +167,8 @@ const evaluatorDefinitionSchema = z.object({
   rubricVersion: rubricIdentitySchema,
   calibrationDigest: contractDigestSchema,
   producerKind: z.enum(["human", "deterministic", "external-model"]),
+  producerId: contractSlugSchema,
+  producerVersion: boundedTextSchema,
   requiredTrustedKeyIds: z.array(contractSlugSchema).min(1).max(32),
 }).strict();
 

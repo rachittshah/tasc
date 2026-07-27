@@ -35,6 +35,11 @@ describe("evidence v2 contracts", () => {
       holdoutBuckets: [8, 9],
     });
     expect(protocol.criticalSlices).toEqual(["payments", "account-recovery"]);
+    expect(protocol.evaluator).toMatchObject({
+      producerKind: "deterministic",
+      producerId: "support-evaluator-service",
+      producerVersion: "4.2.0",
+    });
     expect(trace).toMatchObject({
       profileId: "champion",
       caseId: "case-1",

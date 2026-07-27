@@ -91,6 +91,8 @@ export interface EvaluatorEvidenceVerification {
   readonly reason: string;
 }
 
+const authenticVerificationReceipts = new WeakSet<object>();
+
 function unique(values: readonly string[], label: string): void {
   const seen = new Set<string>();
   for (const value of values) {
@@ -192,7 +194,7 @@ function verificationResult(
   evidence: EvaluatorEvidence,
   context: AssessmentContext,
 ): EvaluatorEvidenceVerification {
-  return deepFreezeContract({
+  const result = deepFreezeContract({
     status,
     trusted: status === "trusted",
     evidence,
@@ -204,6 +206,22 @@ function verificationResult(
     keyId: evidence.keyId,
     reason,
   });
+  authenticVerificationReceipts.add(result);
+  return result;
+}
+
+/**
+ * Join admission is intentionally identity-based: a structurally compatible
+ * producer object is not a receipt emitted by this process's verifier.
+ */
+export function isAuthenticEvaluatorEvidenceVerification(
+  value: unknown,
+): value is EvaluatorEvidenceVerification {
+  return (
+    value !== null
+    && typeof value === "object"
+    && authenticVerificationReceipts.has(value)
+  );
 }
 
 /**
