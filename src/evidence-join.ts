@@ -217,14 +217,17 @@ export interface AssessmentDataset {
 }
 
 export interface AssessmentJoinWork {
+  /** Observed input and cardinality dimensions. */
   readonly traceRows: number;
   readonly evidenceRows: number;
   readonly independentGroups: number;
   readonly labelMemberships: number;
+  /** Conservative modeled upper bounds used for admission control. */
   readonly hashOperations: number;
   readonly diagnosticRows: number;
   readonly outputRows: number;
   readonly chargedUnits: number;
+  /** Observed visits made by the one-pass logical slice aggregation. */
   readonly sliceAggregationVisits: number;
 }
 
@@ -585,10 +588,13 @@ function normalizeTraces(
     budget,
   );
 
-  const profileDigests = new Map(
+  const profilesById = new Map(
     protocol.profiles.map((profile) => [
       profile.id,
-      fingerprintExecutionProfile(profile),
+      {
+        profile,
+        digest: fingerprintExecutionProfile(profile),
+      },
     ]),
   );
   const splitsByGroup = new Map<string, ResolvedGroupSplit>();
@@ -599,22 +605,54 @@ function normalizeTraces(
     if (trace.protocolDigest !== protocolDigest) {
       throw new Error(`trace "${trace.traceId}" protocol digest conflicts with protocol`);
     }
-    const expectedProfileDigest = profileDigests.get(trace.profileId);
-    if (expectedProfileDigest === undefined) {
+    const expectedProfile = profilesById.get(trace.profileId);
+    if (expectedProfile === undefined) {
       throw new Error(`trace "${trace.traceId}" references a profile absent from protocol`);
     }
-    if (trace.executionProfileDigest !== expectedProfileDigest) {
+    if (trace.executionProfileDigest !== expectedProfile.digest) {
       throw new Error(`trace "${trace.traceId}" execution profile digest drift`);
     }
+    for (const attempt of trace.attempts) {
+      if (
+        attempt.requestedModel.id !== expectedProfile.profile.model.id
+        || attempt.requestedModel.revision
+          !== expectedProfile.profile.model.revision
+      ) {
+        throw new Error(
+          `trace "${trace.traceId}" requested model conflicts with protocol profile`,
+        );
+      }
+      if (
+        attempt.resolvedModel !== null
+        && (
+          attempt.resolvedModel.id !== expectedProfile.profile.model.id
+          || attempt.resolvedModel.revision
+            !== expectedProfile.profile.model.revision
+        )
+      ) {
+        throw new Error(
+          `trace "${trace.traceId}" resolved model conflicts with protocol profile`,
+        );
+      }
+    }
+    const routeSignal = trace.routeSignal;
     if (
-      trace.routeSignal === null
-      || trace.routeSignal.definitionId !== protocol.routeSignal.definitionId
-      || trace.routeSignal.version !== protocol.routeSignal.version
-      || trace.routeSignal.calibrationDigest !== protocol.routeSignal.calibrationDigest
-      || trace.routeSignal.value < protocol.routeSignal.minimum
-      || trace.routeSignal.value > protocol.routeSignal.maximum
+      routeSignal === null
+      || routeSignal.definitionId !== protocol.routeSignal.definitionId
+      || routeSignal.version !== protocol.routeSignal.version
+      || routeSignal.calibrationDigest !== protocol.routeSignal.calibrationDigest
+      || routeSignal.value < protocol.routeSignal.minimum
+      || routeSignal.value > protocol.routeSignal.maximum
     ) {
       throw new Error(`trace "${trace.traceId}" route-signal drift`);
+    }
+    if (
+      Date.parse(routeSignal.provenance.observedAt)
+        > Date.parse(trace.attempts[0].observerTimings.startedAt)
+    ) {
+      throw new Error(
+        `trace "${trace.traceId}" route signal was observed after the first attempt started`,
+      );
     }
     if (trace.split !== "online") {
       let resolved = splitsByGroup.get(trace.groupId);
@@ -873,6 +911,17 @@ function verificationContextIdentity(
   });
 }
 
+function verificationContextCacheKey(
+  receipt: EvaluatorEvidenceVerification,
+): string {
+  return canonicalJson([
+    receipt.assessedAt,
+    receipt.assessmentContextDigest,
+    receipt.evaluatorRevocationSnapshotDigest,
+    receipt.operatorTrustPolicySnapshotDigest,
+  ]);
+}
+
 function authenticVerificationProvenance(
   receipt: EvaluatorEvidenceVerification,
 ): EvidenceVerificationProvenance {
@@ -929,11 +978,114 @@ function diagnosticForEvidence(
   };
 }
 
-function sortDiagnostics<T>(values: T[]): T[] {
+function verificationSortIdentity(
+  verification: EvidenceVerificationProvenance,
+): readonly (string | boolean | null)[] {
+  return [
+    verification.authentic,
+    verification.status,
+    verification.trusted,
+    verification.reason,
+    verification.keyId,
+    verification.assessedAt,
+    verification.assessmentContextDigest,
+    verification.operatorTrustPolicySnapshotDigest,
+    verification.evaluatorRevocationSnapshotDigest,
+  ];
+}
+
+function sortByCompactKey<T>(
+  values: T[],
+  compactKey: (value: T) => string,
+): T[] {
   return values
-    .map((value) => ({ value, sortKey: canonicalJson(value) }))
+    .map((value) => ({ value, sortKey: compactKey(value) }))
     .sort((left, right) => compareCodeUnits(left.sortKey, right.sortKey))
     .map(({ value }) => value);
+}
+
+function rejectedEvidenceSortKey(value: RejectedEvidenceRecord): string {
+  return canonicalJson([
+    value.joinKey,
+    value.evidenceDigest,
+    value.reason,
+    verificationSortIdentity(value.verification),
+  ]);
+}
+
+function evidenceDiagnosticSortKey(value: EvidenceDiagnostic): string {
+  return canonicalJson([
+    value.evidenceDigest,
+    value.traceId,
+    value.profileId,
+    value.reason,
+    verificationSortIdentity(value.verification),
+  ]);
+}
+
+function missingEvidenceSortKey(value: MissingEvidenceDiagnostic): string {
+  return canonicalJson([
+    value.executionKey,
+    value.traceId,
+    value.profileId,
+    value.reason,
+    value.evidenceDigest ?? null,
+  ]);
+}
+
+function abstainedEvidenceSortKey(value: AbstainedEvidenceDiagnostic): string {
+  return canonicalJson([
+    value.executionKey,
+    value.evidenceDigest,
+    value.reasonCode,
+  ]);
+}
+
+function duplicateEvidenceSortKey(value: DuplicateEvidenceDiagnostic): string {
+  return canonicalJson([
+    value.joinKey,
+    value.evidenceDigest,
+    value.occurrences,
+    verificationSortIdentity(value.row.verification),
+  ]);
+}
+
+function conflictingEvidenceSortKey(
+  value: ConflictingEvidenceDiagnostic,
+): string {
+  return canonicalJson([
+    value.joinKey,
+    value.evidenceDigests,
+    value.reason,
+    value.rows.map((row) => [
+      row.evidenceDigest,
+      verificationSortIdentity(row.verification),
+    ]),
+  ]);
+}
+
+function duplicateTraceSortKey(value: DuplicateTraceDiagnostic): string {
+  return canonicalJson([
+    value.traceDigest,
+    value.traceId,
+    value.occurrences,
+  ]);
+}
+
+function conflictingTraceSortKey(value: ConflictingTraceDiagnostic): string {
+  return canonicalJson([
+    value.authoritativeKey,
+    value.traceDigests,
+    value.reason,
+  ]);
+}
+
+function missingProfileSortKey(value: MissingProfileDiagnostic): string {
+  return canonicalJson([
+    value.caseId,
+    value.replicateId,
+    value.missingProfileIds,
+  ]);
 }
 
 function terminalStatus(trace: TraceEnvelope): "success" | "failure" | "aborted" {
@@ -1017,6 +1169,7 @@ export function joinAssessmentEvidence(
   const authenticRecords: EvidenceRecord[] = [];
   const rejectedEvidenceRecords: RejectedEvidenceRecord[] = [];
   const authenticContextIdentities: string[] = [];
+  const verificationContextIdentityCache = new Map<string, string>();
   const rejectEvidence = (
     evidence: EvaluatorEvidence | null,
     evidenceDigest: string | null,
@@ -1052,13 +1205,17 @@ export function joinAssessmentEvidence(
       continue;
     }
     const verification = authenticVerificationProvenance(input);
-    const contextIdentity = verificationContextIdentity(input);
+    const contextCacheKey = verificationContextCacheKey(input);
+    let contextIdentity = verificationContextIdentityCache.get(contextCacheKey);
+    if (contextIdentity === undefined) {
+      contextIdentity = verificationContextIdentity(input);
+      verificationContextIdentityCache.set(contextCacheKey, contextIdentity);
+    }
     authenticContextIdentities.push(contextIdentity);
     const evidence = input.evidence;
-    const evidenceDigest = fingerprintNormalizedEvaluatorEvidence(evidence);
+    const evidenceDigest = input.evidenceDigest;
     if (
-      input.evidenceDigest !== evidenceDigest
-      || input.keyId !== evidence.keyId
+      input.keyId !== evidence.keyId
       || input.trusted !== (input.status === "trusted")
     ) {
       rejectEvidence(
@@ -1187,7 +1344,10 @@ export function joinAssessmentEvidence(
     verification: EvidenceVerificationProvenance;
   }>();
   const rejectedEvidenceByExecution = new Map<string, RejectedEvidenceRecord>();
-  for (const rejected of sortDiagnostics(rejectedEvidenceRecords)) {
+  for (const rejected of sortByCompactKey(
+    rejectedEvidenceRecords,
+    rejectedEvidenceSortKey,
+  )) {
     const trace = tracesByIdentity.get(rejected.joinKey);
     if (
       trace !== undefined
@@ -1466,15 +1626,42 @@ export function joinAssessmentEvidence(
       groups: accumulator.groups.size,
     }));
   const diagnostics = {
-    missingEvidence: sortDiagnostics(missingEvidence),
-    invalidEvidence: sortDiagnostics(invalidEvidence),
-    abstainedEvidence: sortDiagnostics(abstainedEvidence),
-    orphanEvidence: sortDiagnostics(orphanEvidence),
-    duplicateEvidence: sortDiagnostics(duplicateEvidence),
-    conflictingEvidence: sortDiagnostics(conflictingEvidence),
-    duplicateTraces: sortDiagnostics(duplicateTraces),
-    conflictingTraces: sortDiagnostics(conflictingTraces),
-    missingProfileExecutions: sortDiagnostics(missingProfileExecutions),
+    missingEvidence: sortByCompactKey(
+      missingEvidence,
+      missingEvidenceSortKey,
+    ),
+    invalidEvidence: sortByCompactKey(
+      invalidEvidence,
+      evidenceDiagnosticSortKey,
+    ),
+    abstainedEvidence: sortByCompactKey(
+      abstainedEvidence,
+      abstainedEvidenceSortKey,
+    ),
+    orphanEvidence: sortByCompactKey(
+      orphanEvidence,
+      evidenceDiagnosticSortKey,
+    ),
+    duplicateEvidence: sortByCompactKey(
+      duplicateEvidence,
+      duplicateEvidenceSortKey,
+    ),
+    conflictingEvidence: sortByCompactKey(
+      conflictingEvidence,
+      conflictingEvidenceSortKey,
+    ),
+    duplicateTraces: sortByCompactKey(
+      duplicateTraces,
+      duplicateTraceSortKey,
+    ),
+    conflictingTraces: sortByCompactKey(
+      conflictingTraces,
+      conflictingTraceSortKey,
+    ),
+    missingProfileExecutions: sortByCompactKey(
+      missingProfileExecutions,
+      missingProfileSortKey,
+    ),
   };
   const blockingReasons: string[] = [];
   const blockWhenPresent = (

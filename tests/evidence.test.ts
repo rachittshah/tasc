@@ -76,6 +76,95 @@ describe("evidence v2 contracts", () => {
   });
 
   it.each([
+    ["legacy 0-100 score", 50, 0, 100],
+    ["score below zero", -0.001, 0, 1],
+    ["score above one", 1.001, 0, 1],
+    ["signed range", 0.5, -1, 1],
+    ["wide range", 0.5, 0, 100],
+    ["narrow range", 0.5, 0.2, 0.8],
+  ])(
+    "rejects a primary evaluator %s",
+    (_label, score, minimum, maximum) => {
+      const key = evaluatorKeyFixture();
+      const evidence = mutate(
+        validEvaluatorEvidenceInput(key.privateKey),
+        (value: any) => {
+          value.outcome.score = score;
+          value.outcome.range = { minimum, maximum };
+        },
+      );
+
+      expect(() => parseEvaluatorEvidence(evidence, TEST_WORK_BUDGET))
+        .toThrow(/evaluator.*(?:canonical.*0.*1|within.*range)/i);
+    },
+  );
+
+  it.each([0, 1])(
+    "accepts primary evaluator endpoint score %s with the exact 0-1 range",
+    (score) => {
+      const key = evaluatorKeyFixture();
+      const evidence = mutate(
+        validEvaluatorEvidenceInput(key.privateKey),
+        (value: any) => {
+          value.outcome.score = score;
+          value.outcome.range = { minimum: 0, maximum: 1 };
+        },
+      );
+
+      expect(parseEvaluatorEvidence(evidence, TEST_WORK_BUDGET).outcome)
+        .toMatchObject({
+          kind: "scored",
+          score,
+          range: { minimum: 0, maximum: 1 },
+        });
+    },
+  );
+
+  it("keeps optional subscores in their signed declared ranges", () => {
+    const key = evaluatorKeyFixture();
+    const evidence = mutate(
+      validEvaluatorEvidenceInput(key.privateKey),
+      (value: any) => {
+        value.outcome.subscores = [{
+          id: "signed-diagnostic",
+          score: -2,
+          range: { minimum: -5, maximum: -1 },
+        }];
+      },
+    );
+
+    expect(parseEvaluatorEvidence(evidence, TEST_WORK_BUDGET).outcome)
+      .toMatchObject({
+        kind: "scored",
+        subscores: [{
+          id: "signed-diagnostic",
+          score: -2,
+          range: { minimum: -5, maximum: -1 },
+        }],
+      });
+  });
+
+  it.each(["missing", "invalid", "abstained"] as const)(
+    "rejects score and range injection into a %s outcome",
+    (kind) => {
+      const key = evaluatorKeyFixture();
+      const injected = mutate(
+        validEvaluatorEvidenceInput(key.privateKey),
+        (value: any) => {
+          value.outcome = {
+            kind,
+            reasonCode: "not-scored",
+            score: 0.5,
+            range: { minimum: 0, maximum: 1 },
+          };
+        },
+      );
+
+      expect(() => parseEvaluatorEvidence(injected, TEST_WORK_BUDGET)).toThrow();
+    },
+  );
+
+  it.each([
     ["task score", (trace: any) => { trace.attempts[0].taskScore = 0.99; }],
     ["attempt evaluator", (trace: any) => { trace.attempts[0].evaluator = { id: "judge" }; }],
     ["authorization", (trace: any) => { trace.attempts[0].authorization = "Bearer secret"; }],

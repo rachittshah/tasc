@@ -1,4 +1,6 @@
+import { sign } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
+import { canonicalJsonBytes } from "../src/determinism.js";
 import {
   fingerprintEvaluatorRevocations,
   fingerprintEvaluatorTrustPolicy,
@@ -51,6 +53,38 @@ describe("external evaluator evidence trust", () => {
     }
   });
 
+  it("rejects cryptographically valid legacy 0-100 primary scores before trust", () => {
+    const key = evaluatorKeyFixture();
+    const snapshot = parseEvaluatorTrustSnapshot(key.trustSnapshot);
+    const context = parseAssessmentContext(validAssessmentContextInput(snapshot));
+    const unsigned = unsignedEvaluatorEvidence();
+    unsigned.outcome.score = 50;
+    unsigned.outcome.range = { minimum: 0, maximum: 100 };
+    const signed = {
+      ...unsigned,
+      signature: sign(
+        null,
+        canonicalJsonBytes({
+          domain: "tasc/evaluator-evidence-signature/v2",
+          evidence: unsigned,
+        }),
+        key.privateKey,
+      ).toString("base64url"),
+    };
+
+    let disposition = "rejected-at-contract";
+    let parsingError = "";
+    try {
+      const parsed = parseEvaluatorEvidence(signed, TEST_WORK_BUDGET);
+      disposition = verifyEvaluatorEvidence(parsed, snapshot, context).status;
+    } catch (error) {
+      parsingError = error instanceof Error ? error.message : String(error);
+    }
+
+    expect(disposition).toBe("rejected-at-contract");
+    expect(parsingError).toMatch(/evaluator.*canonical.*0.*1/i);
+  });
+
   it("signs every mutable identity, lineage, scored outcome, source, and production-time leaf", () => {
     const key = evaluatorKeyFixture();
     const snapshot = parseEvaluatorTrustSnapshot(key.trustSnapshot);
@@ -73,8 +107,6 @@ describe("external evaluator evidence trust", () => {
       (evidence) => { evidence.evaluator.producer.kind = "human"; },
       (evidence) => { evidence.evaluator.producer.version = "4.2.1"; },
       (evidence) => { evidence.outcome.score = 0.91; },
-      (evidence) => { evidence.outcome.range.minimum = -1; },
-      (evidence) => { evidence.outcome.range.maximum = 2; },
       (evidence) => { evidence.outcome.subscores[0].id = "factuality"; },
       (evidence) => { evidence.outcome.subscores[0].score = 0.94; },
       (evidence) => { evidence.outcome.subscores[0].range.minimum = -1; },

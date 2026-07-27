@@ -705,13 +705,27 @@ function assertTraceSemantics(trace: MutableTraceEnvelope): void {
   }
 }
 
-function assertEvaluatorEvidenceSemantics(evidence: MutableEvaluatorEvidence): void {
-  if (evidence.outcome.kind !== "scored") return;
-  assertScoreRange(evidence.outcome.score, evidence.outcome.range, "evaluator");
-  unique(evidence.outcome.subscores.map(({ id }) => id), "subscore id");
-  for (const subscore of evidence.outcome.subscores) {
+function assertEvaluatorOutcomeSemantics(
+  outcome: MutableEvaluatorEvidenceUnsigned["outcome"],
+): void {
+  if (outcome.kind !== "scored") return;
+  if (
+    outcome.range.minimum !== 0
+    || outcome.range.maximum !== 1
+  ) {
+    throw new Error(
+      "primary evaluator score range must use the canonical 0 to 1 interval",
+    );
+  }
+  assertScoreRange(outcome.score, outcome.range, "evaluator");
+  unique(outcome.subscores.map(({ id }) => id), "subscore id");
+  for (const subscore of outcome.subscores) {
     assertScoreRange(subscore.score, subscore.range, `subscore "${subscore.id}"`);
   }
+}
+
+function assertEvaluatorEvidenceSemantics(evidence: MutableEvaluatorEvidence): void {
+  assertEvaluatorOutcomeSemantics(evidence.outcome);
 }
 
 function requireWorkBudget(budget: WorkBudget | undefined): WorkBudget {
@@ -968,13 +982,7 @@ export function evaluatorEvidenceSigningBytes(evidence: unknown): Buffer {
     unsigned = withoutSignature;
   } else {
     unsigned = evaluatorEvidenceUnsignedSchema.parse(snapshot);
-    if (unsigned.outcome.kind === "scored") {
-      assertScoreRange(unsigned.outcome.score, unsigned.outcome.range, "evaluator");
-      unique(unsigned.outcome.subscores.map(({ id }) => id), "subscore id");
-      for (const subscore of unsigned.outcome.subscores) {
-        assertScoreRange(subscore.score, subscore.range, `subscore "${subscore.id}"`);
-      }
-    }
+    assertEvaluatorOutcomeSemantics(unsigned.outcome);
   }
   return canonicalJsonBytes({
     domain: "tasc/evaluator-evidence-signature/v2",

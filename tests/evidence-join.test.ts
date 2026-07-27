@@ -89,6 +89,24 @@ function failedTerminal(trace: TraceInput): TraceInput {
   });
 }
 
+function withFailedFirstAttempt(trace: TraceInput): TraceInput {
+  return mutate(trace, (copy) => {
+    const terminal = structuredClone(copy.attempts[0]);
+    terminal.attemptId = "attempt-2";
+    terminal.attemptNumber = 2;
+    copy.attempts[0].status = "failure" as "success";
+    copy.attempts[0].finishReason = null as unknown as string;
+    copy.attempts[0].failureCategory = "transport-timeout" as unknown as null;
+    copy.attempts[0].observerTimings.startedAt = "2026-07-20T23:59:58.000Z";
+    copy.attempts[0].observerTimings.headersAt = null as never;
+    copy.attempts[0].observerTimings.firstByteAt = null as never;
+    copy.attempts[0].observerTimings.firstMeaningfulTokenAt = null as never;
+    copy.attempts[0].observerTimings.completedAt = "2026-07-20T23:59:59.000Z";
+    copy.routeSignal!.provenance.observedAt = "2026-07-20T23:59:58.000Z";
+    copy.attempts.push(terminal);
+  });
+}
+
 function secondReplicatePair(
   change?: (trace: TraceInput) => void,
 ): [TraceInput, TraceInput] {
@@ -296,6 +314,127 @@ describe("deterministic assessment evidence join", () => {
     expect(joined.executions[0].trace).not.toBe(traces[1]);
   });
 
+  it.each([
+    [
+      "requested model id",
+      (trace: TraceInput) => { trace.attempts[0].requestedModel.id = "attacker-model"; },
+      /requested model.*profile|profile.*requested model/i,
+    ],
+    [
+      "requested model revision",
+      (trace: TraceInput) => { trace.attempts[0].requestedModel.revision = "attacker-revision"; },
+      /requested model.*profile|profile.*requested model/i,
+    ],
+    [
+      "resolved model id",
+      (trace: TraceInput) => { trace.attempts[0].resolvedModel!.id = "attacker-model"; },
+      /resolved model.*profile|profile.*resolved model/i,
+    ],
+    [
+      "resolved model revision",
+      (trace: TraceInput) => { trace.attempts[0].resolvedModel!.revision = "attacker-revision"; },
+      /resolved model.*profile|profile.*resolved model/i,
+    ],
+  ] as const)(
+    "rejects trusted successful execution with %s drift despite a retained profile digest",
+    (_label, change, expected) => {
+      const key = evaluatorKeyFixture();
+      const champion = validTraceInputForProfile("champion");
+      const candidate = validTraceInputForProfile("candidate");
+      change(champion);
+      const evidence = [
+        verificationFor(champion, key),
+        verificationFor(candidate, key),
+      ];
+
+      expect(() => joinAssessmentEvidence(
+        parseProtocol(),
+        [parseTrace(champion), parseTrace(candidate)],
+        evidence,
+        TEST_WORK_BUDGET,
+      )).toThrow(expected);
+    },
+  );
+
+  it.each([
+    [
+      "requested model",
+      (trace: TraceInput) => {
+        trace.attempts[0].requestedModel.revision = "attacker-revision";
+      },
+      /requested model.*profile|profile.*requested model/i,
+    ],
+    [
+      "resolved model",
+      (trace: TraceInput) => {
+        trace.attempts[0].resolvedModel!.id = "attacker-model";
+      },
+      /resolved model.*profile|profile.*resolved model/i,
+    ],
+  ] as const)(
+    "rejects trusted retry history with first-attempt %s drift",
+    (_label, change, expected) => {
+      const key = evaluatorKeyFixture();
+      const champion = withFailedFirstAttempt(
+        validTraceInputForProfile("champion"),
+      );
+      const candidate = validTraceInputForProfile("candidate");
+      candidate.routeSignal!.provenance.observedAt
+        = champion.routeSignal!.provenance.observedAt;
+      change(champion);
+      const evidence = [
+        verificationFor(champion, key),
+        verificationFor(candidate, key),
+      ];
+
+      expect(() => joinAssessmentEvidence(
+        parseProtocol(),
+        [parseTrace(champion), parseTrace(candidate)],
+        evidence,
+        TEST_WORK_BUDGET,
+      )).toThrow(expected);
+    },
+  );
+
+  it("rejects a post-dispatch route signal even with a complete trusted pair", () => {
+    const key = evaluatorKeyFixture();
+    const traces = [
+      validTraceInputForProfile("champion"),
+      validTraceInputForProfile("candidate"),
+    ];
+    for (const trace of traces) {
+      trace.routeSignal!.provenance.observedAt
+        = "2026-07-21T00:00:00.001Z";
+    }
+    const evidence = traces.map((trace) => verificationFor(trace, key));
+
+    expect(() => joinAssessmentEvidence(
+      parseProtocol(),
+      traces.map(parseTrace),
+      evidence,
+      TEST_WORK_BUDGET,
+    )).toThrow(/route.signal.*(?:first attempt|dispatch|started)/i);
+  });
+
+  it("accepts a route signal observed exactly when the first attempt starts", () => {
+    const key = evaluatorKeyFixture();
+    const traces = [
+      validTraceInputForProfile("champion"),
+      validTraceInputForProfile("candidate"),
+    ];
+    for (const trace of traces) {
+      trace.routeSignal!.provenance.observedAt
+        = trace.attempts[0].observerTimings.startedAt;
+    }
+
+    expect(joinAssessmentEvidence(
+      parseProtocol(),
+      traces.map(parseTrace),
+      traces.map((trace) => verificationFor(trace, key)),
+      TEST_WORK_BUDGET,
+    ).admissibility.valid).toBe(true);
+  });
+
   it("assigns zero only to a terminal failed execution and never fabricates evidence", () => {
     const key = evaluatorKeyFixture();
     const protocol = parseProtocol();
@@ -346,6 +485,7 @@ describe("deterministic assessment evidence join", () => {
     trace.attempts[0].observerTimings.firstByteAt = null as never;
     trace.attempts[0].observerTimings.firstMeaningfulTokenAt = null as never;
     trace.attempts[0].observerTimings.completedAt = "2026-07-20T23:59:59.000Z";
+    trace.routeSignal!.provenance.observedAt = trace.attempts[0].observerTimings.startedAt;
     trace.attempts.push(success);
 
     const joined = joinAssessmentEvidence(
