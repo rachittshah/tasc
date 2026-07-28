@@ -1,12 +1,14 @@
 {
   "name": "@rachittshah/tasc",
   "version": "0.1.0",
-  "description": "Eval-gated inference policy optimization with deterministic replay and holdout confirmation.",
+  "description": "Trace-aware control plane for bounded inference collection, signed evaluator evidence, and policy assessment.",
   "packageManager": "npm@11.6.1",
   "license": "MIT",
   "keywords": [
     "inference",
     "evaluation",
+    "trace",
+    "routing",
     "serving",
     "llm",
     "optimization"
@@ -44,6 +46,7 @@
     "check": "npm run typecheck && npm test && npm run build && npm pack --dry-run",
     "coverage": "vitest run --coverage --testTimeout=20000",
     "demo": "tsx scripts/demo.ts",
+    "demo:control-plane": "tsx scripts/control-plane-demo.ts",
     "package:smoke": "node scripts/package-smoke.mjs",
     "prepack": "npm run clean && npm run build",
     "typecheck": "tsc --noEmit",

@@ -1,0 +1,8 @@
+{
+  "version": "tasc-experiment-budget-v1",
+  "maxLogicalExecutions": 16,
+  "maxAttempts": 16,
+  "maxCostUsd": 1,
+  "maxWallClockMs": 300000,
+  "payloadPolicy": "keyed-identities-only"
+}

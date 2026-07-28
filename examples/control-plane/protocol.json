@@ -1,0 +1,196 @@
+{
+  "version": "tasc-experiment-protocol-v2",
+  "studyId": "synthetic-support-routing",
+  "protocolVersion": "fixture-1",
+  "owner": "synthetic-inference-platform",
+  "createdAt": "2026-07-20T00:00:00.000Z",
+  "expiresAt": "2026-09-01T00:00:00.000Z",
+  "dispatchAuthority": {
+    "keyId": "synthetic-dispatch-key-1",
+    "algorithm": "ed25519",
+    "publicKeySpki": "MCowBQYDK2VwAyEAGqxD0C2HqrJVSzqQApQscj2BZIiiE9Fio8BLc7h1niU"
+  },
+  "splitMembership": {
+    "algorithm": "tasc-seeded-sha256-group-bucket-v1",
+    "seed": "synthetic-offline-split-1",
+    "bucketCount": 10,
+    "developmentBuckets": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "holdoutBuckets": [
+      8,
+      9
+    ]
+  },
+  "onlineWindowMembership": {
+    "algorithm": "tasc-seeded-sha256-case-replicate-basis-points-v1",
+    "seed": "synthetic-shadow-sample-1",
+    "sampleBasisPoints": 10000
+  },
+  "profiles": [
+    {
+      "id": "champion-vllm-ray",
+      "runtime": {
+        "name": "vllm",
+        "build": "0.26.0"
+      },
+      "backend": {
+        "name": "cuda",
+        "build": "13.0"
+      },
+      "model": {
+        "id": "synthetic-champion-model",
+        "revision": "fixture-revision-1"
+      },
+      "tokenizer": {
+        "id": "synthetic-champion-tokenizer",
+        "revision": "fixture-revision-1"
+      },
+      "hardware": {
+        "architecture": "x86-64",
+        "accelerator": "h100-sxm",
+        "acceleratorCount": 1
+      },
+      "quantization": {
+        "format": "bf16",
+        "configurationDigest": "sha256:d8ceba20c3770882466f0fa29f4cc56a344c6775ad339f9afe46cf19a56f7194"
+      },
+      "chatTemplateDigest": "sha256:763f49281f85ad4a6525344ecb7d736a4913a2fb59c54736537e3e7ebb0a2d5e",
+      "orchestration": {
+        "kind": "ray-serve",
+        "configurationDigest": "sha256:696a174c8b8c68dcbf34f6cb332b58f540831e8f26dc44945629de1defb83cc6"
+      },
+      "deploymentConfigurationDigest": "sha256:a4d1a347d0b44477d1aa91d907d1ff217eb5c305360158c2cf5b63d5a3f7ec99"
+    },
+    {
+      "id": "candidate-tensorrt-skypilot",
+      "runtime": {
+        "name": "tensorrt-llm",
+        "build": "1.1.0rc6"
+      },
+      "backend": {
+        "name": "cuda",
+        "build": "13.0"
+      },
+      "model": {
+        "id": "synthetic-candidate-model",
+        "revision": "fixture-revision-1"
+      },
+      "tokenizer": {
+        "id": "synthetic-candidate-tokenizer",
+        "revision": "fixture-revision-1"
+      },
+      "hardware": {
+        "architecture": "x86-64",
+        "accelerator": "h100-sxm",
+        "acceleratorCount": 1
+      },
+      "quantization": {
+        "format": "fp8",
+        "configurationDigest": "sha256:2c2ef9be82a79793c95dcc4a0b815c28fc4c056fdec6f01cda63dcab598c6e62"
+      },
+      "chatTemplateDigest": "sha256:c097586b27c58788edea612edca5fc869ea3e12a3d83da73f41a80a0fe679a76",
+      "orchestration": {
+        "kind": "skypilot",
+        "configurationDigest": "sha256:64d163402bf031c1ba3f0770290fcc7261ac027cf1fb6dacacd86977d5aefe38"
+      },
+      "deploymentConfigurationDigest": "sha256:8f5c0c333b174f2fd3eb0ba487851a175baf08d46aa89ae98fdedcf1ce0e3cc6"
+    }
+  ],
+  "championProfileId": "champion-vllm-ray",
+  "candidateProfileIds": [
+    "candidate-tensorrt-skypilot"
+  ],
+  "routeSignal": {
+    "definitionId": "router-confidence",
+    "version": "fixture-1",
+    "minimum": 0,
+    "maximum": 1,
+    "direction": "higher-is-more-confident",
+    "calibrationDigest": "sha256:bf487e5c4b907fe3afb32673ea684e9314e04282b822ba6b8804197737803fb9"
+  },
+  "evaluator": {
+    "evaluatorId": "synthetic-correctness",
+    "rubricVersion": "fixture-rubric-1",
+    "calibrationDigest": "sha256:b47fb507527bd45e8125e04ab485e2b0b1e8471bc5b4d4974a2ad2f368b9fd20",
+    "producerKind": "deterministic",
+    "producerId": "synthetic-evaluator-service",
+    "producerVersion": "1.0.0",
+    "requiredTrustedKeyIds": [
+      "synthetic-evaluator-key-1"
+    ]
+  },
+  "candidatePolicySpace": {
+    "version": "tasc-declarative-policy-space-v1",
+    "maxCandidates": 2,
+    "predicates": [
+      {
+        "signalDefinitionId": "router-confidence",
+        "operator": "less-than",
+        "threshold": 0.7,
+        "routeToProfileId": "champion-vllm-ray"
+      }
+    ]
+  },
+  "gates": {
+    "minimumMeanScore": 0.9,
+    "nonInferiorityMargin": -0.05,
+    "maximumFailureRate": 0,
+    "maximumP95TtftMs": 1000,
+    "maximumP95EndToEndMs": 1200,
+    "maximumCostPerThousandRequestsUsd": 12,
+    "minimumEvidenceCoverage": 1,
+    "minimumIndependentGroups": 4,
+    "minimumCriticalSliceGroups": 2,
+    "serviceCapacity": {
+      "kind": "minimum-measured-window-throughput",
+      "metric": "aggregate-output-tokens-per-second",
+      "minimum": 500
+    }
+  },
+  "criticalSlices": [
+    "account-recovery"
+  ],
+  "bootstrap": {
+    "algorithm": "paired-group-percentile-v1",
+    "seed": "synthetic-bootstrap-1",
+    "iterations": 128,
+    "alpha": 0.05
+  },
+  "shadowCollection": {
+    "maximumLogicalExecutions": 16,
+    "maximumConcurrency": 2,
+    "attemptTimeoutMs": 30000,
+    "maximumAttempts": 1,
+    "payloadPolicy": "keyed-identities-only"
+  },
+  "costAllocation": {
+    "kind": "modeled",
+    "modelDigest": "sha256:4ca3006ead6151cd0de2aa27b330451d9b3a4153fab7861a11d6cd8328ce7430",
+    "currency": "USD"
+  },
+  "endpointRequirements": [
+    {
+      "runtimeName": "vllm",
+      "endpointAlias": "approved-champion",
+      "transport": "https"
+    },
+    {
+      "runtimeName": "tensorrt-llm",
+      "endpointAlias": "approved-candidate",
+      "transport": "https"
+    }
+  ],
+  "requiredCapabilities": [
+    "chat-completions",
+    "streaming",
+    "final-usage"
+  ]
+}

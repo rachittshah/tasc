@@ -1,0 +1,26 @@
+{
+  "version": "tasc-evaluator-trust-snapshot-v1",
+  "freshness": {
+    "maximumEvidenceAgeMs": 2592000000,
+    "maximumFutureSkewMs": 30000
+  },
+  "keys": [
+    {
+      "keyId": "synthetic-evaluator-key-1",
+      "purpose": "evaluator-evidence",
+      "algorithm": "ed25519",
+      "publicKeySpki": "MCowBQYDK2VwAyEAKX0XLXhzj4R9DxMyDq2vC7dHg6t12us-nvLij2emK6Y",
+      "evaluatorId": "synthetic-correctness",
+      "producerId": "synthetic-evaluator-service",
+      "authorizedRubricVersions": [
+        "fixture-rubric-1"
+      ],
+      "authorizedCalibrationDigests": [
+        "sha256:b47fb507527bd45e8125e04ab485e2b0b1e8471bc5b4d4974a2ad2f368b9fd20"
+      ],
+      "validFrom": "2026-07-01T00:00:00.000Z",
+      "validUntil": "2026-09-15T00:00:00.000Z"
+    }
+  ],
+  "revocations": []
+}
