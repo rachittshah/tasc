@@ -264,6 +264,64 @@ describe("bounded runtime HTTP lifecycle", () => {
     });
   }, TEST_TIMEOUT_MS);
 
+  it("normalizes bounded Content-Type parameters and rejects ambiguous syntax", async () => {
+    await withLoopbackServer((_request, response) => {
+      response.statusCode = 200;
+      response.setHeader(
+        "content-type",
+        "text/plain; version=0.0.4; charset=UTF-8",
+      );
+      response.end("metric 1\n");
+    }, async (server) => {
+      const result = await withBoundedHttpResponse(
+        await mintPin({ origin: server.origin }),
+        { accept: "text/plain; version=0.0.4" },
+        async (response) => {
+          const body = await readBody(response);
+          return {
+            body,
+            contentType: response.contentType,
+            parameters: response.contentTypeParameters,
+          };
+        },
+      );
+      expect(result.value).toEqual({
+        body: "metric 1\n",
+        contentType: "text/plain",
+        parameters: [
+          { name: "version", value: "0.0.4" },
+          { name: "charset", value: "UTF-8" },
+        ],
+      });
+      expect(Object.isFrozen(result.value.parameters)).toBe(true);
+      expect(Object.isFrozen(result.value.parameters?.[0])).toBe(true);
+    });
+
+    for (const contentType of [
+      "text/plain; version=0.0.4; version=1",
+      'application/json; charset="utf-8"',
+      "application/json; charset",
+    ]) {
+      await withLoopbackServer((_request, response) => {
+        response.statusCode = 200;
+        response.setHeader("content-type", contentType);
+        response.end("{}");
+      }, async (server) => {
+        const error = await captureWireError(
+          withBoundedHttpResponse(
+            await mintPin({ origin: server.origin }),
+            {},
+            readBody,
+          ),
+        );
+        expect(error).toMatchObject({
+          code: "INVALID_RESPONSE_HEADERS",
+          dispatchState: "sent_unknown",
+        });
+      });
+    }
+  }, TEST_TIMEOUT_MS);
+
   it("classifies an unknown pre-connect failure as a non-dispatched transport failure", async () => {
     const server = await startLoopbackServer((_request, response) => {
       response.end("closed server must not be contacted");

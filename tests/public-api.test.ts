@@ -21,6 +21,7 @@ import type {
   PersistedError,
   PersistedErrorCategory,
   RuntimeHttpLimits,
+  RuntimeContentTypeParameter,
   RuntimeWireDispatchState,
   RuntimeWireErrorCode,
   RuntimeCapabilityAuthorization,
@@ -63,10 +64,11 @@ type RuntimeTransportPublicTypes = [
   BoundedSseLimits,
   BoundedNdjsonStreamLimits,
   PrometheusParseResult,
+  RuntimeContentTypeParameter,
 ];
 
 const runtimeTransportPublicTypeCount:
-  RuntimeTransportPublicTypes["length"] = 9;
+  RuntimeTransportPublicTypes["length"] = 10;
 
 type RuntimeCallPublicTypes = [
   RuntimeCapabilityAuthorization,
@@ -160,7 +162,7 @@ describe("standalone public API", () => {
     });
     expect(taskEightPublicTypeCount).toBe(11);
     expect(controllerPublicTypeCount).toBe(2);
-    expect(runtimeTransportPublicTypeCount).toBe(9);
+    expect(runtimeTransportPublicTypeCount).toBe(10);
     expect(runtimeCallPublicTypeCount).toBe(5);
   });
 

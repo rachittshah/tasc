@@ -162,8 +162,14 @@ export interface RuntimeHttpRequest {
 export interface BoundedRuntimeHttpResponse {
   readonly statusCode: number;
   readonly contentType?: string;
+  readonly contentTypeParameters?: readonly RuntimeContentTypeParameter[];
   readonly body: AsyncIterable<Uint8Array>;
   readonly signal: AbortSignal;
+}
+
+export interface RuntimeContentTypeParameter {
+  readonly name: string;
+  readonly value: string;
 }
 
 export interface BoundedRuntimeHttpResult<T> {
@@ -859,12 +865,24 @@ function oneHeader(
 function parseContentType(
   headers: Readonly<Record<string, string | readonly string[] | undefined>>,
   timing: MutableTiming,
-): string | undefined {
+): {
+  readonly mediaType: string;
+  readonly parameters: readonly RuntimeContentTypeParameter[];
+} | undefined {
   const raw = oneHeader(headers, "content-type", timing);
   if (raw === undefined) {
     return undefined;
   }
-  const mediaType = raw.split(";", 1)[0]?.trim().toLowerCase();
+  if (raw.length > 512) {
+    throw wireError(
+      timing,
+      "INVALID_RESPONSE_HEADERS",
+      "Runtime response headers are invalid.",
+      "sent_unknown",
+    );
+  }
+  const parts = raw.split(";");
+  const mediaType = parts.shift()?.trim().toLowerCase();
   if (
     mediaType === undefined ||
     mediaType.length === 0 ||
@@ -878,7 +896,36 @@ function parseContentType(
       "sent_unknown",
     );
   }
-  return mediaType;
+  const parameters: RuntimeContentTypeParameter[] = [];
+  const names = new Set<string>();
+  const token = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+  for (const part of parts) {
+    const equals = part.indexOf("=");
+    const name = part.slice(0, equals).trim().toLowerCase();
+    const value = equals < 0 ? "" : part.slice(equals + 1).trim();
+    if (
+      equals < 1
+      || name.length > 127
+      || value.length < 1
+      || value.length > 127
+      || !token.test(name)
+      || !token.test(value)
+      || names.has(name)
+    ) {
+      throw wireError(
+        timing,
+        "INVALID_RESPONSE_HEADERS",
+        "Runtime response headers are invalid.",
+        "sent_unknown",
+      );
+    }
+    names.add(name);
+    parameters.push(Object.freeze({ name, value }));
+  }
+  return Object.freeze({
+    mediaType,
+    parameters: Object.freeze(parameters),
+  });
 }
 
 function assertIdentityEncoding(
@@ -1398,7 +1445,7 @@ export async function withBoundedHttpResponse<T>(
     countResponseHeaders(response.headers, limits, timing);
     assertIdentityEncoding(response.headers, timing);
     assertContentLength(response.headers, limits, timing);
-    const contentType = parseContentType(response.headers, timing);
+    const parsedContentType = parseContentType(response.headers, timing);
     resetBodyTimer();
 
     let bodyTaken = false;
@@ -1465,7 +1512,12 @@ export async function withBoundedHttpResponse<T>(
         consume(
           Object.freeze({
             statusCode: response.statusCode,
-            ...(contentType === undefined ? {} : { contentType }),
+            ...(parsedContentType === undefined
+              ? {}
+              : {
+                contentType: parsedContentType.mediaType,
+                contentTypeParameters: parsedContentType.parameters,
+              }),
             body: boundedBody,
             signal: operationAbort.signal,
           }),

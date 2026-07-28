@@ -421,6 +421,7 @@ export type {
   RuntimeHttpLimits,
   RuntimeHttpAccept,
   RuntimeHttpRequest,
+  RuntimeContentTypeParameter,
   RuntimeSecretHeaderFactory,
   RuntimeSecretHeaderName,
   RuntimeSecretHeaders,
