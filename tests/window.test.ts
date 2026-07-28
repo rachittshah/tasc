@@ -240,11 +240,18 @@ describe("tasc-window-manifest-v2", () => {
     // replicate. Its SHA-256 is:
     // SHA-256:
     // 9d65698377545936aabeb42efe95375f31feb19f005732ffb54458867baf8da1
+    const expectedBucket = Number(BigInt(
+      "0x9d65698377545936aabeb42efe95375f31feb19f005732ffb54458867baf8da1",
+    ) % 10_000n);
+    expect(expectedBucket).toBe(5_841);
     expect(deriveWindowMembershipBucket(
       rule,
       "case-1",
       "replicate-0",
-    )).toBe(5_841);
+    )).toBe(expectedBucket);
+
+    // Converting the full digest to an IEEE-754 number before reducing it loses
+    // precision and produces the wrong bucket; the implementation never does so.
     expect(Number(BigInt(
       "0x9d65698377545936aabeb42efe95375f31feb19f005732ffb54458867baf8da1",
     )) % 10_000).toBe(5_120);
