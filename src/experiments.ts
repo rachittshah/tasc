@@ -1052,7 +1052,10 @@ function candidatesWithFailedGate(
   for (const candidate of candidates) {
     if (
       candidate.gates.some(
-        ({ id, passed }) => !passed && predicate(id),
+        ({ id, passed, actual }) =>
+          !passed
+          && actual !== null
+          && predicate(id),
       )
     ) {
       return candidate;

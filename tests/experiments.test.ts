@@ -841,6 +841,39 @@ describe("deterministic next-experiment decision table", () => {
     });
   });
 
+  it("does not relabel capacity-suppressed inference as a quality regression", () => {
+    const decision = proposeExperiment(
+      developmentAssessment((body) => {
+        body.phase = "window";
+        body.status = "INSUFFICIENT_EVIDENCE";
+        body.windowManifestDigest = digest("capacity-window");
+        const candidate = body.candidates[0];
+        candidate.status = "INSUFFICIENT_EVIDENCE";
+        candidate.inference = null;
+        candidate.insufficiencyReasons = [
+          "required-service-capacity-unavailable",
+        ];
+        candidate.gates.push({
+          id: "paired-quality",
+          operator: ">=",
+          threshold: 0,
+          actual: null,
+          evidenceClass: "unavailable",
+          reason: "coverage failed before statistical inference",
+          passed: false,
+        });
+        candidate.rejectionReasons = [
+          "failed-gate:paired-quality",
+          "required-service-capacity-unavailable",
+        ];
+      }),
+      EMPTY_HISTORY,
+      DEFAULT_BUDGET,
+    );
+
+    expectProposed(decision, "unavailable-capacity");
+  });
+
   it("accepts capability mismatch only from an exact evidence-backed finding", () => {
     const assessment = developmentAssessment();
     const base = developmentAssessmentBody();
