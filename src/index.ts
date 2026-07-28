@@ -8,6 +8,40 @@ export type {
   AssessmentContextInput,
 } from "./assessment-context.js";
 export {
+  assessPolicyWindow,
+  confirmHoldout,
+  fingerprintAssessmentDecision,
+  isAuthenticAssessmentDecision,
+  isDevelopmentNomination,
+  nominateDevelopment,
+  parseAssessmentDecision,
+  parsePolicyBundle,
+  revalidateDevelopmentNomination,
+} from "./assessment.js";
+export type {
+  AssessmentCoverage,
+  AssessmentDecision,
+  AssessmentEstimator,
+  AssessmentGate,
+  AssessmentMetric,
+  AssessmentMetrics,
+  AssessmentPhase,
+  AssessmentStatus,
+  CandidateAssessment,
+  DevelopmentAssessmentDecision,
+  DevelopmentNonNomination,
+  DevelopmentNomination,
+  EvidenceClass,
+  FrozenAssessmentDecision,
+  FrozenDevelopmentAssessmentDecision,
+  FrozenDevelopmentNomination,
+  FrozenHoldoutAssessmentDecision,
+  FrozenWindowAssessmentDecision,
+  HoldoutAssessmentDecision,
+  PolicyReplayRow,
+  WindowAssessmentDecision,
+} from "./assessment.js";
+export {
   fingerprintEvaluatorRevocations,
   fingerprintEvaluatorTrustPolicy,
   parseEvaluatorTrustSnapshot,
@@ -19,6 +53,7 @@ export type {
   EvaluatorTrustStatus,
 } from "./evaluator-trust.js";
 export {
+  dispatchIntentSigningBytes,
   evaluatorEvidenceSigningBytes,
   fingerprintEvaluatorEvidence,
   fingerprintExecutionProfile,
@@ -35,15 +70,23 @@ export type {
   TraceEnvelope,
 } from "./evidence.js";
 export {
+  isAuthenticAssessmentDataset,
   joinAssessmentEvidence,
+  requireAssessmentDatasetSplit,
   resolveGroupSplit,
 } from "./evidence-join.js";
 export type {
   AssessmentDataset,
+  AssessmentDatasetForSplit,
   AssessmentExecutionOutcome,
   AssessmentExecutionRow,
   AssessmentJoinWork,
   AssessmentPair,
+  AssessmentSplit,
+  DevelopmentAssessmentDataset,
+  HoldoutAssessmentDataset,
+  OfflineAssessmentSplit,
+  OnlineAssessmentDataset,
   ResolvedGroupSplit,
 } from "./evidence-join.js";
 export {
@@ -68,13 +111,22 @@ export type {
 } from "./evaluate.js";
 export * from "./integrity.js";
 export {
+  assertPolicyBundleMatchesProtocol,
   championPolicy,
+  enumerateProtocolPolicyBundles,
   fingerprintPolicy,
+  fingerprintPolicyBundle,
   generateCandidatePolicies,
+  parsePolicyBundleValue,
+  protocolControlPolicyBundle,
   replayPolicy,
 } from "./policy.js";
 export type {
   InferencePolicy,
+  PolicyBundle,
+  PolicyBundleBody,
+  PolicyBundlePredicate,
+  ProtocolPolicySpace,
   ReplayedRow,
 } from "./policy.js";
 export * from "./report.js";
@@ -109,4 +161,23 @@ export {
 export type {
   BootstrapCI,
 } from "./statistics.js";
+export {
+  assertAcceptedEvaluatorEvidenceWithinWindowWatermark,
+  assertTraceBelongsToWindow,
+  assertWindowManifestMatchesProtocol,
+  createWindowManifestRevision,
+  deriveWindowMembershipBucket,
+  deriveWindowMembershipDigest,
+  fingerprintWindowManifest,
+  isWindowMembershipSelected,
+  parseWindowManifest,
+  traceEventTime,
+} from "./window.js";
+export type {
+  WindowCapacityEvidence,
+  WindowManifest,
+  WindowManifestBody,
+  WindowManifestRevisionChanges,
+  WindowMembershipRule,
+} from "./window.js";
 export * from "./work-budget.js";
