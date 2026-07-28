@@ -22,6 +22,16 @@ describe("standalone public API", () => {
       fingerprintProtocol: expect.any(Function),
       joinAssessmentEvidence: expect.any(Function),
       resolveGroupSplit: expect.any(Function),
+      writeArtifactPacket: expect.any(Function),
+      verifyArtifactPacket: expect.any(Function),
+      createController: expect.any(Function),
+      registerController: expect.any(Function),
+      replayController: expect.any(Function),
+      resumeController: expect.any(Function),
+      proposeExperiment: expect.any(Function),
+      parseExperimentBudget: expect.any(Function),
+      parseExperimentHistory: expect.any(Function),
+      parseExperimentProposalDecision: expect.any(Function),
     });
   });
 
@@ -40,5 +50,8 @@ describe("standalone public API", () => {
     expect(tasc).not.toHaveProperty("normalizeEvaluatorEvidence");
     expect(tasc).not.toHaveProperty("bootstrapGroupedWeightedMeanCI");
     expect(tasc).not.toHaveProperty("computePolicyMetrics");
+    expect(tasc).not.toHaveProperty("deploy");
+    expect(tasc).not.toHaveProperty("promoteDeployment");
+    expect(tasc).not.toHaveProperty("rollbackDeployment");
   });
 });
