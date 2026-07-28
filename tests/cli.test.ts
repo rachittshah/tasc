@@ -1,10 +1,14 @@
 import { createHash } from "node:crypto";
 import { mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, resolve } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import {
+  ARTIFACT_MANIFEST_FILENAME,
+  verifyArtifactPacket,
+} from "../src/artifacts.js";
 import { sha256, stableJson } from "../src/integrity.js";
 import {
   buildConfirmationReport,
@@ -77,10 +81,13 @@ describe("TASC CLI synthetic end-to-end example", () => {
     expect(firstNomination.stdout).toContain(devOne);
     expect(await readdir(devOne)).toEqual([
       "development-report.json",
+      ARTIFACT_MANIFEST_FILENAME,
       "next-experiment.json",
       "nomination.json",
       "report.md",
     ]);
+    await expect(verifyArtifactPacket(dirname(devOne), basename(devOne)))
+      .resolves.toMatchObject({ path: devOne });
 
     const secondNomination = runCli([
       "nominate", "--spec", SPEC, "--measurements", DEV, "--out", devTwo,
@@ -115,6 +122,8 @@ describe("TASC CLI synthetic end-to-end example", () => {
 
     const nextExperiment = await json(resolve(devOne, "next-experiment.json"));
     expect(nextExperiment).toMatchObject({
+      version: "tasc-next-experiment-v1",
+      legacy: true,
       trigger: expect.any(String),
       hypothesis: expect.any(String),
       technique: expect.any(String),
@@ -137,7 +146,15 @@ describe("TASC CLI synthetic end-to-end example", () => {
     expect(firstConfirmation.status, firstConfirmation.stderr).toBe(0);
     expect(firstConfirmation.stdout).toContain("DEMO_ONLY");
     expect(firstConfirmation.stdout).toContain(holdoutOne);
-    expect(await readdir(holdoutOne)).toEqual(["confirmation.json", "report.md"]);
+    expect(await readdir(holdoutOne)).toEqual([
+      "confirmation.json",
+      ARTIFACT_MANIFEST_FILENAME,
+      "report.md",
+    ]);
+    await expect(verifyArtifactPacket(
+      dirname(holdoutOne),
+      basename(holdoutOne),
+    )).resolves.toMatchObject({ path: holdoutOne });
 
     const secondConfirmation = runCli([
       "confirm",
@@ -278,6 +295,7 @@ describe("TASC CLI synthetic end-to-end example", () => {
     expect(run.stdout).toContain("NO_CANDIDATE");
     expect(await readdir(out)).toEqual([
       "development-report.json",
+      ARTIFACT_MANIFEST_FILENAME,
       "next-experiment.json",
       "report.md",
     ]);
@@ -288,6 +306,10 @@ describe("TASC CLI synthetic end-to-end example", () => {
 
     const development = await json(resolve(out, "development-report.json"));
     const nextExperiment = await json(resolve(out, "next-experiment.json"));
+    expect(nextExperiment).toMatchObject({
+      version: "tasc-next-experiment-v1",
+      legacy: true,
+    });
     expect(nextExperiment.trigger).toContain("cascade-47a5ff94080a050b");
     expect(nextExperiment.trigger).toContain("mean_task_score");
     expect(nextExperiment.trigger).toMatch(/does not meet required/);

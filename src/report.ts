@@ -1,5 +1,8 @@
-import { mkdir, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { basename, dirname, resolve } from "node:path";
+import {
+  writeArtifactPacket,
+  type ArtifactPayload,
+} from "./artifacts.js";
 import {
   type CandidateEvaluation,
   type ConfirmationResult,
@@ -13,6 +16,7 @@ import type { InferenceSpec, MeasurementSet } from "./schema.js";
 
 export interface NextExperiment {
   version: "tasc-next-experiment-v1";
+  legacy: true;
   trigger: string;
   hypothesis: string;
   technique: string;
@@ -280,6 +284,7 @@ export function proposeNextExperiment(
     }
     return {
       version: "tasc-next-experiment-v1",
+      legacy: true,
       trigger: `Selected candidate ${result.nomination.policy.id} passed every development gate; independent replication is still required.`,
       hypothesis: "Measure whether the nominated policy reproduces its development behavior on disjoint shadow traces before any manual production decision.",
       technique: "Collect disjoint shadow traces and run a preregistered replication.",
@@ -300,6 +305,7 @@ export function proposeNextExperiment(
   const proposal = experimentForGate(failedGate?.id, context);
   return {
     version: "tasc-next-experiment-v1",
+    legacy: true,
     trigger,
     ...proposal,
     unchangedGuardrails: guardrailSummary(result),
@@ -426,20 +432,39 @@ export function buildConfirmationReport(
   ].join("\n");
 }
 
-async function writeJson(path: string, value: unknown): Promise<void> {
-  await writeFile(path, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+function jsonArtifact(
+  name: string,
+  value: unknown,
+  schemaVersion: string,
+): ArtifactPayload {
+  return {
+    name,
+    bytes: `${JSON.stringify(value, null, 2)}\n`,
+    mediaType: "application/json",
+    schemaVersion,
+  };
 }
 
-async function createFreshOutputDirectory(outDirectory: string): Promise<void> {
-  await mkdir(dirname(outDirectory), { recursive: true });
-  try {
-    await mkdir(outDirectory);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
-      throw new Error(`output directory "${outDirectory}" already exists; use a fresh --out path`);
-    }
-    throw error;
-  }
+async function writeLegacyReportPacket(
+  outDirectory: string,
+  kind: "legacy-development-report" | "legacy-confirmation-report",
+  files: readonly ArtifactPayload[],
+): Promise<void> {
+  const absoluteOutput = resolve(outDirectory);
+  await writeArtifactPacket(
+    dirname(absoluteOutput),
+    basename(absoluteOutput),
+    {
+      descriptor: {
+        version: "tasc-artifact-packet-v1",
+        kind,
+        assessmentDecisionDigest: null,
+        assessmentContextDigest: null,
+        attestation: "unattested",
+      },
+      files,
+    },
+  );
 }
 
 export async function writeDevelopmentArtifacts(
@@ -448,13 +473,36 @@ export async function writeDevelopmentArtifacts(
   options: DevelopmentReportOptions,
 ): Promise<void> {
   assertDevelopmentContext(options);
-  await createFreshOutputDirectory(outDirectory);
-  await writeJson(join(outDirectory, "development-report.json"), result);
-  await writeJson(join(outDirectory, "next-experiment.json"), proposeNextExperiment(result, options));
-  await writeFile(join(outDirectory, "report.md"), buildDevelopmentReport(result, options), "utf8");
+  const files: ArtifactPayload[] = [
+    jsonArtifact(
+      "development-report.json",
+      result,
+      "tasc-legacy-development-report-v1",
+    ),
+    jsonArtifact(
+      "next-experiment.json",
+      proposeNextExperiment(result, options),
+      "tasc-next-experiment-v1",
+    ),
+    {
+      name: "report.md",
+      bytes: buildDevelopmentReport(result, options),
+      mediaType: "text/markdown",
+      schemaVersion: "tasc-legacy-development-markdown-v1",
+    },
+  ];
   if (result.nomination) {
-    await writeJson(join(outDirectory, "nomination.json"), result.nomination);
+    files.push(jsonArtifact(
+      "nomination.json",
+      result.nomination,
+      "tasc-nomination-v1",
+    ));
   }
+  await writeLegacyReportPacket(
+    outDirectory,
+    "legacy-development-report",
+    files,
+  );
 }
 
 export async function writeConfirmationArtifacts(
@@ -463,7 +511,21 @@ export async function writeConfirmationArtifacts(
   options: ReportEvidenceOptions,
 ): Promise<void> {
   assertEvidenceProvenance(options);
-  await createFreshOutputDirectory(outDirectory);
-  await writeJson(join(outDirectory, "confirmation.json"), result);
-  await writeFile(join(outDirectory, "report.md"), buildConfirmationReport(result, options), "utf8");
+  await writeLegacyReportPacket(
+    outDirectory,
+    "legacy-confirmation-report",
+    [
+      jsonArtifact(
+        "confirmation.json",
+        result,
+        "tasc-legacy-confirmation-v1",
+      ),
+      {
+        name: "report.md",
+        bytes: buildConfirmationReport(result, options),
+        mediaType: "text/markdown",
+        schemaVersion: "tasc-legacy-confirmation-markdown-v1",
+      },
+    ],
+  );
 }
