@@ -6,11 +6,14 @@ import {
   type ServerResponse,
 } from "node:http";
 import type { Socket } from "node:net";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createStudyPayloadIdentity } from "../src/references.js";
 import {
+  dispatchPreparedRuntimeInvocation,
   invokeRuntime,
+  prepareRuntimeInvocation,
   RuntimeInvocationInputError,
+  type PreparedRuntimeInvocation,
   type RuntimeGenerationRequest,
   type RuntimeInvocationInput,
   type RuntimeInvocationRoute,
@@ -156,7 +159,7 @@ function generation(
       : { prompt: "private prompt must not persist" }),
     maxTokens: 32,
     temperature: 0,
-    seed: 7,
+    ...(route === "responses" ? {} : { seed: 7 }),
   };
 }
 
@@ -236,6 +239,193 @@ function jsonResponse(
   response.end(JSON.stringify(value));
 }
 
+const RESPONSES_RESPONSE_ID = "resp_0123456789abcdef";
+const RESPONSES_STREAM_ITEM_ID = "0123456789abcdef";
+const RESPONSES_FINAL_ITEM_ID = "msg_fedcba9876543210";
+
+function openAiResponsesJson(text: string): Record<string, unknown> {
+  return {
+    id: RESPONSES_RESPONSE_ID,
+    created_at: 1_721_600_000,
+    model: MODEL.id,
+    object: "response",
+    status: "completed",
+    output: [{
+      id: RESPONSES_FINAL_ITEM_ID,
+      type: "message",
+      role: "assistant",
+      status: "completed",
+      content: [{
+        type: "output_text",
+        text,
+        annotations: [],
+        logprobs: null,
+      }],
+    }],
+    usage: {
+      input_tokens: 2,
+      input_tokens_details: {
+        cached_tokens: 0,
+        input_tokens_per_turn: [2],
+        cached_tokens_per_turn: [0],
+      },
+      output_tokens: 1,
+      output_tokens_details: {
+        reasoning_tokens: 0,
+        tool_output_tokens: 0,
+        output_tokens_per_turn: [1],
+        tool_output_tokens_per_turn: [0],
+      },
+      total_tokens: 3,
+    },
+  };
+}
+
+function vllmResponsesTextEvents(
+  deltas: readonly string[] = ["stream-", "response"],
+): Record<string, unknown>[] {
+  const text = deltas.join("");
+  const initialResponse = {
+    id: RESPONSES_RESPONSE_ID,
+    created_at: 1_721_600_000,
+    incomplete_details: null,
+    instructions: null,
+    metadata: null,
+    model: MODEL.id,
+    object: "response",
+    output: [],
+    parallel_tool_calls: true,
+    temperature: 0,
+    tool_choice: "auto",
+    tools: [],
+    top_p: 1,
+    background: false,
+    max_output_tokens: 32,
+    max_tool_calls: null,
+    previous_response_id: null,
+    prompt: null,
+    reasoning: null,
+    service_tier: "auto",
+    status: "in_progress",
+    text: null,
+    top_logprobs: 0,
+    truncation: "disabled",
+    usage: null,
+    user: null,
+  };
+  const donePart = {
+    type: "output_text",
+    text,
+    annotations: [],
+    logprobs: null,
+  };
+  const events: Record<string, unknown>[] = [{
+    type: "response.created",
+    sequence_number: 0,
+    response: initialResponse,
+  }, {
+    type: "response.in_progress",
+    sequence_number: 1,
+    response: initialResponse,
+  }, {
+    type: "response.output_item.added",
+    sequence_number: 2,
+    output_index: 0,
+    item: {
+      id: RESPONSES_STREAM_ITEM_ID,
+      type: "message",
+      role: "assistant",
+      content: [],
+      status: "in_progress",
+    },
+  }, {
+    type: "response.content_part.added",
+    sequence_number: 3,
+    output_index: 0,
+    item_id: RESPONSES_STREAM_ITEM_ID,
+    content_index: 0,
+    part: {
+      type: "output_text",
+      text: "",
+      annotations: [],
+      logprobs: [],
+    },
+  }];
+  for (const delta of deltas) {
+    events.push({
+      type: "response.output_text.delta",
+      sequence_number: events.length,
+      output_index: 0,
+      item_id: RESPONSES_STREAM_ITEM_ID,
+      content_index: 0,
+      delta,
+      logprobs: [],
+    });
+  }
+  events.push({
+    type: "response.output_text.done",
+    sequence_number: events.length,
+    output_index: 0,
+    item_id: RESPONSES_STREAM_ITEM_ID,
+    content_index: 0,
+    text,
+    logprobs: [],
+  }, {
+    type: "response.content_part.done",
+    sequence_number: events.length + 1,
+    output_index: 0,
+    item_id: RESPONSES_STREAM_ITEM_ID,
+    content_index: 0,
+    part: donePart,
+  }, {
+    type: "response.output_item.done",
+    sequence_number: events.length + 2,
+    output_index: 0,
+    item: {
+      id: RESPONSES_STREAM_ITEM_ID,
+      type: "message",
+      role: "assistant",
+      content: [donePart],
+      status: "completed",
+      summary: [],
+    },
+  }, {
+    type: "response.completed",
+    sequence_number: events.length + 3,
+    response: openAiResponsesJson(text),
+  });
+  return events;
+}
+
+function renumberResponsesEvents(
+  events: Record<string, unknown>[],
+): void {
+  events.forEach((event, index) => {
+    event.sequence_number = index;
+  });
+}
+
+function responsesEvent(
+  events: Record<string, unknown>[],
+  type: string,
+): Record<string, unknown> {
+  const event = events.find((candidate) => candidate.type === type);
+  if (event === undefined) throw new Error(`missing fixture event: ${type}`);
+  return event;
+}
+
+function sseResponse(
+  response: ServerResponse,
+  events: readonly Readonly<Record<string, unknown>>[],
+): void {
+  response.statusCode = 200;
+  response.setHeader("content-type", "text/event-stream; charset=utf-8");
+  response.end(events.map((event) =>
+    `event: ${String(event.type)}\n`
+    + `data: ${JSON.stringify(event)}\n\n`
+  ).join(""));
+}
+
 describe("runtime invocation foundation", () => {
   it("sends one canonical vLLM completion request and returns raw-free immutable JSON normalization", async () => {
     const server = await startServer((_request, response) => {
@@ -263,7 +453,24 @@ describe("runtime invocation foundation", () => {
       stream: false,
     });
 
-    const outcome = await deadline(invokeRuntime(invocation));
+    const prepared = prepareRuntimeInvocation(invocation);
+
+    expect(server.contacts()).toBe(0);
+    expect(prepared).toMatchObject({
+      schemaVersion: "tasc-prepared-runtime-invocation-v1",
+      endpointBindingDigest: invocation.instance.endpointDescriptorDigest,
+      profile: {
+        id: "vllm",
+        build: getRuntimeProfile("vllm").runtime.build,
+      },
+      route: "completions",
+      requestedModel: MODEL,
+    });
+    expect(Object.isFrozen(prepared)).toBe(true);
+    expect(Object.isFrozen(prepared.profile)).toBe(true);
+    const outcome = await deadline(
+      dispatchPreparedRuntimeInvocation(prepared),
+    );
 
     expect(server.contacts()).toBe(1);
     expect(server.requests()).toHaveLength(1);
@@ -272,6 +479,15 @@ describe("runtime invocation foundation", () => {
       path: "/v1/completions",
     });
     const sent = server.requests()[0]!.body;
+    expect(prepared.requestByteCount).toBe(sent.byteLength);
+    expect(prepared.requestIdentity).toEqual(
+      createStudyPayloadIdentity(
+        IDENTITY.studyId,
+        IDENTITY.keyId,
+        IDENTITY.key,
+        sent,
+      ),
+    );
     expect(JSON.parse(Buffer.from(sent).toString("utf8"))).toEqual({
       max_tokens: 32,
       model: MODEL.id,
@@ -323,6 +539,220 @@ describe("runtime invocation foundation", () => {
     expect(Object.isFrozen(outcome)).toBe(true);
     expect(Object.isFrozen(outcome.persistence)).toBe(true);
     expect(Object.isFrozen(outcome.output)).toBe(true);
+  });
+
+  it("keeps preparation payload-free and rejects forged, cloned, cross-instance, or replayed authority", async () => {
+    const server = await startServer((_request, response) => {
+      jsonResponse(response, {
+        model: MODEL.id,
+        choices: [{
+          index: 0,
+          text: "dispatched-once",
+          finish_reason: "stop",
+        }],
+        usage: {
+          prompt_tokens: 1,
+          completion_tokens: 1,
+          total_tokens: 2,
+        },
+      });
+    });
+    const otherServer = await startServer((_request, response) => {
+      jsonResponse(response, {});
+    });
+    const runtime = fixture({
+      server,
+      profileId: "vllm",
+      route: "completions",
+      stream: false,
+    });
+    const otherRuntime = fixture({
+      server: otherServer,
+      profileId: "vllm",
+      route: "completions",
+      stream: false,
+    });
+    let secretFactoryCalls = 0;
+
+    prepareRuntimeInvocation({
+      ...runtime.invocation,
+      secretHeaderFactory: () => {
+        secretFactoryCalls += 1;
+        return [];
+      },
+    });
+    const prepared = prepareRuntimeInvocation(runtime.invocation);
+
+    expect(secretFactoryCalls).toBe(0);
+    expect(server.contacts()).toBe(0);
+    expect(otherServer.contacts()).toBe(0);
+    expect(Object.keys(prepared).sort()).toEqual([
+      "endpointBindingDigest",
+      "profile",
+      "requestByteCount",
+      "requestIdentity",
+      "requestedModel",
+      "route",
+      "schemaVersion",
+    ]);
+    const serialized = JSON.stringify(prepared);
+    expect(serialized).not.toContain("private prompt");
+    expect(serialized).not.toContain(server.origin);
+    expect(serialized).not.toContain("\"body\"");
+    expect(serialized).not.toContain("\"headers\"");
+    expect(serialized).not.toContain("\"url\"");
+
+    const forged = Object.freeze({
+      ...prepared,
+    }) as PreparedRuntimeInvocation;
+    const jsonClone = JSON.parse(serialized) as PreparedRuntimeInvocation;
+    const memoryClone = structuredClone(prepared);
+    const crossInstanceClone = Object.freeze({
+      ...prepared,
+      endpointBindingDigest:
+        otherRuntime.instance.endpointDescriptorDigest,
+    }) as PreparedRuntimeInvocation;
+    const rejectUnauthentic = async (
+      candidate: PreparedRuntimeInvocation,
+    ): Promise<void> => {
+      await expect(
+        dispatchPreparedRuntimeInvocation(candidate),
+      ).rejects.toMatchObject({
+        code: "PREPARED_INVOCATION_REJECTED",
+        persistedError: { category: "authorization" },
+      });
+      expect(server.contacts()).toBe(0);
+      expect(otherServer.contacts()).toBe(0);
+    };
+
+    await rejectUnauthentic(forged);
+    await rejectUnauthentic(jsonClone);
+    await rejectUnauthentic(memoryClone);
+    await rejectUnauthentic(crossInstanceClone);
+
+    const outcome = await deadline(
+      dispatchPreparedRuntimeInvocation(prepared),
+    );
+    expect(outcome).toMatchObject({
+      status: "completed",
+      output: { text: "dispatched-once" },
+    });
+    expect(server.contacts()).toBe(1);
+    expect(otherServer.contacts()).toBe(0);
+
+    await expect(
+      dispatchPreparedRuntimeInvocation(prepared),
+    ).rejects.toMatchObject({
+      code: "PREPARED_INVOCATION_REJECTED",
+      persistedError: { category: "authorization" },
+    });
+    expect(server.contacts()).toBe(1);
+    expect(otherServer.contacts()).toBe(0);
+  });
+
+  it("expires a supported prepared vLLM invocation before any contact", async () => {
+    const server = await startServer((_request, response) => {
+      jsonResponse(response, {
+        model: MODEL.id,
+        choices: [{
+          index: 0,
+          text: "must-not-be-contacted",
+          finish_reason: "stop",
+        }],
+        usage: {
+          prompt_tokens: 1,
+          completion_tokens: 1,
+          total_tokens: 2,
+        },
+      });
+    });
+    const runtime = fixture({
+      server,
+      profileId: "vllm",
+      route: "completions",
+      stream: false,
+    });
+    const prepared = prepareRuntimeInvocation({
+      ...runtime.invocation,
+      totalDeadlineMs: 20,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    await expect(
+      dispatchPreparedRuntimeInvocation(prepared),
+    ).rejects.toMatchObject({
+      code: "PREPARED_INVOCATION_EXPIRED",
+      dispatchState: "not_sent",
+      persistedError: { category: "timeout" },
+    });
+    expect(server.contacts()).toBe(0);
+
+    await expect(
+      dispatchPreparedRuntimeInvocation(prepared),
+    ).rejects.toMatchObject({
+      code: "PREPARED_INVOCATION_REJECTED",
+      dispatchState: "not_sent",
+      persistedError: { category: "authorization" },
+    });
+    expect(server.contacts()).toBe(0);
+  });
+
+  it("rechecks the prepared deadline after pinning and before contact", async () => {
+    const server = await startServer((_request, response) => {
+      jsonResponse(response, {
+        model: MODEL.id,
+        choices: [{
+          index: 0,
+          text: "must-not-be-contacted",
+          finish_reason: "stop",
+        }],
+        usage: {
+          prompt_tokens: 1,
+          completion_tokens: 1,
+          total_tokens: 2,
+        },
+      });
+    });
+    const runtime = fixture({
+      server,
+      profileId: "vllm",
+      route: "completions",
+      stream: false,
+    });
+    let nowNs = 0n;
+    let advancedDuringPin = false;
+    const clock = vi.spyOn(process.hrtime, "bigint").mockImplementation(() => {
+      const current = nowNs;
+      if (
+        !advancedDuringPin
+        && new Error().stack?.includes("pinAuthorizedCollectorRequest")
+      ) {
+        advancedDuringPin = true;
+        queueMicrotask(() => {
+          nowNs = 5_000_000n;
+        });
+      }
+      return current;
+    });
+
+    try {
+      const prepared = prepareRuntimeInvocation({
+        ...runtime.invocation,
+        totalDeadlineMs: 5,
+      });
+      await expect(
+        dispatchPreparedRuntimeInvocation(prepared),
+      ).rejects.toMatchObject({
+        code: "PREPARED_INVOCATION_EXPIRED",
+        dispatchState: "not_sent",
+        persistedError: { category: "timeout" },
+      });
+    } finally {
+      clock.mockRestore();
+    }
+
+    expect(advancedDuringPin).toBe(true);
+    expect(server.contacts()).toBe(0);
   });
 
   it("parses vLLM SSE without changing identity across HTTP chunk boundaries", async () => {
@@ -413,6 +843,570 @@ describe("runtime invocation foundation", () => {
     });
   });
 
+  it("invokes exact Ollama native-generate JSON and NDJSON contracts", async () => {
+    const jsonServer = await startServer((_request, response) => {
+      jsonResponse(response, {
+        model: MODEL.id,
+        response: "json-generate",
+        done: true,
+        done_reason: "stop",
+        prompt_eval_count: 2,
+        eval_count: 2,
+        total_duration: 1_000,
+      });
+    });
+    const jsonFixture = fixture({
+      server: jsonServer,
+      profileId: "ollama",
+      route: "nativeGenerate",
+      stream: false,
+    });
+
+    const jsonOutcome = await deadline(invokeRuntime(
+      jsonFixture.invocation,
+    ));
+
+    expect(jsonOutcome).toMatchObject({
+      status: "completed",
+      output: { text: "json-generate" },
+      persistence: {
+        finishReason: "stop",
+        providerUsage: {
+          inputTokens: 2,
+          outputTokens: 2,
+          totalTokens: 4,
+        },
+      },
+    });
+    expect(JSON.parse(
+      Buffer.from(jsonServer.requests()[0]!.body).toString("utf8"),
+    )).toEqual({
+      model: MODEL.id,
+      options: {
+        num_predict: 32,
+        seed: 7,
+        temperature: 0,
+      },
+      prompt: "private prompt must not persist",
+      stream: false,
+    });
+
+    const streamServer = await startServer((_request, response) => {
+      response.statusCode = 200;
+      response.setHeader(
+        "content-type",
+        "application/x-ndjson; charset=UTF-8",
+      );
+      response.write(
+        "{\"model\":\"test-model\",\"response\":\"native-\","
+        + "\"done\":false}\n",
+      );
+      response.end(
+        "{\"model\":\"test-model\",\"response\":\"stream\","
+        + "\"done\":true,\"done_reason\":\"stop\","
+        + "\"prompt_eval_count\":2,\"eval_count\":2,"
+        + "\"total_duration\":1000,\"eval_duration\":500}\n",
+      );
+    });
+    const streamFixture = fixture({
+      server: streamServer,
+      profileId: "ollama",
+      route: "nativeGenerate",
+      stream: true,
+    });
+
+    const streamOutcome = await deadline(invokeRuntime(
+      streamFixture.invocation,
+    ));
+
+    expect(streamServer.requests()[0]?.accept)
+      .toBe("application/x-ndjson");
+    expect(streamOutcome).toMatchObject({
+      status: "completed",
+      output: { text: "native-stream" },
+      persistence: {
+        providerTiming: {
+          totalDurationNs: 1_000,
+          evaluationDurationNs: 500,
+        },
+      },
+    });
+  });
+
+  it("invokes TGI native-generate JSON without inventing missing token or model evidence", async () => {
+    const server = await startServer((_request, response) => {
+      jsonResponse(response, {
+        generated_text: "tgi-output",
+        details: {
+          finish_reason: "length",
+          generated_tokens: 2,
+        },
+      });
+    });
+    const { invocation } = fixture({
+      server,
+      profileId: "tgi",
+      route: "nativeGenerate",
+      stream: false,
+    });
+
+    const outcome = await deadline(invokeRuntime(invocation));
+
+    expect(server.requests()[0]).toMatchObject({
+      accept: "application/json",
+      path: "/generate",
+    });
+    expect(JSON.parse(
+      Buffer.from(server.requests()[0]!.body).toString("utf8"),
+    )).toEqual({
+      inputs: "private prompt must not persist",
+      parameters: {
+        details: true,
+        do_sample: false,
+        max_new_tokens: 32,
+        return_full_text: false,
+        seed: 7,
+      },
+    });
+    expect(outcome).toMatchObject({
+      status: "incomplete",
+      output: { text: "tgi-output" },
+      persistence: {
+        resolvedModel: null,
+        finishReason: "length",
+        finalUsage: "present",
+        providerUsage: {
+          inputTokens: null,
+          outputTokens: 2,
+          totalTokens: null,
+        },
+        terminalOutputIdentity: null,
+      },
+    });
+  });
+
+  it("normalizes exact OpenAI Responses JSON and typed SSE contracts", async () => {
+    let jsonContact = 0;
+    const jsonServer = await startServer((_request, response) => {
+      jsonContact += 1;
+      jsonResponse(
+        response,
+        openAiResponsesJson(
+          jsonContact === 1 ? "probe" : "json-response",
+        ),
+      );
+    });
+    const jsonFixture = fixture({
+      server: jsonServer,
+      profileId: "vllm",
+      route: "responses",
+      stream: false,
+    });
+    const jsonProbe = await deadline(probeRuntimeCapability({
+      policy: jsonFixture.policy,
+      endpointAlias: jsonFixture.invocation.endpointAlias,
+      instance: jsonFixture.instance,
+      capability: "responses",
+      observationEffect: "inference-canary",
+      totalDeadlineMs: 1_500,
+      authorizationTtlMs: 2_000,
+    }));
+    const jsonOutcome = await deadline(invokeRuntime({
+      ...jsonFixture.invocation,
+      totalDeadlineMs: 500,
+      capabilityAuthorizations: [jsonProbe.authorization!],
+    }));
+
+    expect(jsonServer.contacts()).toBe(2);
+    expect(JSON.parse(
+      Buffer.from(jsonServer.requests()[1]!.body).toString("utf8"),
+    )).toEqual({
+      input: "private prompt must not persist",
+      max_output_tokens: 32,
+      model: MODEL.id,
+      stream: false,
+      temperature: 0,
+    });
+    expect(jsonOutcome).toMatchObject({
+      status: "completed",
+      output: { text: "json-response" },
+      persistence: {
+        finishReason: "completed",
+        providerUsage: {
+          inputTokens: 2,
+          outputTokens: 1,
+          totalTokens: 3,
+        },
+      },
+    });
+
+    let streamContact = 0;
+    const streamServer = await startServer((_request, response) => {
+      streamContact += 1;
+      if (streamContact === 1) {
+        jsonResponse(response, openAiResponsesJson("probe"));
+        return;
+      }
+      sseResponse(response, vllmResponsesTextEvents());
+    });
+    const streamFixture = fixture({
+      server: streamServer,
+      profileId: "vllm",
+      route: "responses",
+      stream: true,
+    });
+    const streamProbe = await deadline(probeRuntimeCapability({
+      policy: streamFixture.policy,
+      endpointAlias: streamFixture.invocation.endpointAlias,
+      instance: streamFixture.instance,
+      capability: "responses",
+      observationEffect: "inference-canary",
+      totalDeadlineMs: 1_500,
+      authorizationTtlMs: 2_000,
+    }));
+    const streamOutcome = await deadline(invokeRuntime({
+      ...streamFixture.invocation,
+      totalDeadlineMs: 500,
+      capabilityAuthorizations: [streamProbe.authorization!],
+    }));
+
+    expect(streamServer.contacts()).toBe(2);
+    expect(streamServer.requests()[1]?.accept).toBe("text/event-stream");
+    expect(streamOutcome).toMatchObject({
+      status: "completed",
+      output: { text: "stream-response" },
+      persistence: {
+        finishReason: "completed",
+        finalUsage: "present",
+      },
+    });
+  });
+
+  it("rejects malformed vLLM Responses lifecycle evidence", async () => {
+    const cases: {
+      readonly name: string;
+      readonly events: Record<string, unknown>[];
+    }[] = [];
+    const addCase = (
+      name: string,
+      mutate: (events: Record<string, unknown>[]) => void,
+    ): void => {
+      const events = vllmResponsesTextEvents();
+      mutate(events);
+      cases.push({ name, events });
+    };
+
+    addCase("unknown event", (events) => {
+      responsesEvent(events, "response.output_text.delta").type =
+        "response.output_text.unknown";
+    });
+    addCase("out-of-order event", (events) => {
+      [events[2], events[3]] = [events[3]!, events[2]!];
+      renumberResponsesEvents(events);
+    });
+    addCase("sequence gap", (events) => {
+      responsesEvent(
+        events,
+        "response.output_text.delta",
+      ).sequence_number = 99;
+    });
+    addCase("response id mismatch", (events) => {
+      const terminal = responsesEvent(events, "response.completed");
+      const response = terminal.response as Record<string, unknown>;
+      response.id = "resp_1111111111111111";
+    });
+    addCase("item id mismatch", (events) => {
+      responsesEvent(events, "response.output_text.delta").item_id =
+        "2222222222222222";
+    });
+    addCase("output index mismatch", (events) => {
+      responsesEvent(events, "response.output_text.done").output_index = 1;
+    });
+    addCase("content index mismatch", (events) => {
+      responsesEvent(events, "response.content_part.done").content_index = 1;
+    });
+    addCase("duplicate event", (events) => {
+      const doneIndex = events.findIndex(
+        (event) => event.type === "response.output_text.done",
+      );
+      events.splice(
+        doneIndex + 1,
+        0,
+        structuredClone(events[doneIndex]!),
+      );
+      renumberResponsesEvents(events);
+    });
+    addCase("terminal text mismatch", (events) => {
+      const terminal = responsesEvent(events, "response.completed");
+      const response = terminal.response as {
+        output: {
+          content: { text: string }[];
+        }[];
+      };
+      response.output[0]!.content[0]!.text = "different";
+    });
+    addCase("terminal model mismatch", (events) => {
+      const terminal = responsesEvent(events, "response.completed");
+      const response = terminal.response as Record<string, unknown>;
+      response.model = "different-model";
+    });
+    addCase("terminal usage mismatch", (events) => {
+      const terminal = responsesEvent(events, "response.completed");
+      const response = terminal.response as {
+        usage: Record<string, unknown>;
+      };
+      response.usage.total_tokens = 999;
+    });
+
+    let contact = 0;
+    const server = await startServer((_request, response) => {
+      contact += 1;
+      if (contact === 1) {
+        jsonResponse(response, openAiResponsesJson("probe"));
+        return;
+      }
+      sseResponse(response, cases[contact - 2]!.events);
+    });
+    const runtime = fixture({
+      server,
+      profileId: "vllm",
+      route: "responses",
+      stream: true,
+    });
+    const probe = await deadline(probeRuntimeCapability({
+      policy: runtime.policy,
+      endpointAlias: runtime.invocation.endpointAlias,
+      instance: runtime.instance,
+      capability: "responses",
+      observationEffect: "inference-canary",
+      totalDeadlineMs: 1_500,
+      authorizationTtlMs: 2_000,
+    }));
+
+    for (const testCase of cases) {
+      const outcome = await deadline(invokeRuntime({
+        ...runtime.invocation,
+        totalDeadlineMs: 500,
+        capabilityAuthorizations: [probe.authorization!],
+      }));
+      expect(
+        outcome,
+        testCase.name,
+      ).toMatchObject({
+        status: "failed",
+        output: null,
+        persistence: {
+          resolvedModel: null,
+          terminalOutputIdentity: null,
+          finishReason: null,
+          finalUsage: "missing",
+          error: { category: "invalid-response" },
+        },
+      });
+    }
+    expect(server.contacts()).toBe(cases.length + 1);
+  });
+
+  it("executes one honest loopback inference path for every pinned runtime profile", async () => {
+    const matrix = [
+      { profileId: "vllm", route: "completions", conditional: false },
+      { profileId: "sglang", route: "completions", conditional: false },
+      {
+        profileId: "tensorrt-llm",
+        route: "completions",
+        conditional: false,
+      },
+      { profileId: "llama.cpp", route: "completions", conditional: false },
+      { profileId: "ollama", route: "nativeGenerate", conditional: false },
+      { profileId: "tgi", route: "nativeGenerate", conditional: false },
+      { profileId: "lm-studio", route: "chatCompletions", conditional: true },
+      { profileId: "mlx-lm", route: "completions", conditional: true },
+    ] as const;
+
+    for (const entry of matrix) {
+      const outputText = `matrix-${entry.profileId}`;
+      const server = await startServer((_request, response) => {
+        if (entry.profileId === "ollama") {
+          jsonResponse(response, {
+            model: MODEL.id,
+            response: outputText,
+            done: true,
+            done_reason: "stop",
+            prompt_eval_count: 1,
+            eval_count: 1,
+          });
+          return;
+        }
+        if (entry.profileId === "tgi") {
+          jsonResponse(response, {
+            generated_text: outputText,
+            details: {
+              finish_reason: "length",
+              generated_tokens: 1,
+            },
+          });
+          return;
+        }
+        jsonResponse(response, {
+          model: MODEL.id,
+          choices: [{
+            index: 0,
+            ...(entry.route === "chatCompletions"
+              ? {
+                message: {
+                  role: "assistant",
+                  content: outputText,
+                },
+              }
+              : { text: outputText }),
+            finish_reason: "stop",
+          }],
+          usage: {
+            prompt_tokens: 1,
+            completion_tokens: 1,
+            total_tokens: 2,
+          },
+        });
+      });
+      const runtime = fixture({
+        server,
+        profileId: entry.profileId,
+        route: entry.route,
+        stream: false,
+      });
+      let authorization: RuntimeCapabilityAuthorization | undefined;
+      if (entry.conditional) {
+        const probe = await deadline(probeRuntimeCapability({
+          policy: runtime.policy,
+          endpointAlias: runtime.invocation.endpointAlias,
+          instance: runtime.instance,
+          capability: entry.route,
+          observationEffect: "inference-canary",
+          totalDeadlineMs: 1_500,
+          authorizationTtlMs: 2_000,
+        }));
+        authorization = probe.authorization ?? undefined;
+        expect(authorization).toBeDefined();
+      }
+
+      const outcome = await deadline(invokeRuntime({
+        ...runtime.invocation,
+        ...(entry.conditional ? { totalDeadlineMs: 500 } : {}),
+        ...(authorization === undefined
+          ? {}
+          : { capabilityAuthorizations: [authorization] }),
+      }));
+
+      expect(server.contacts()).toBe(entry.conditional ? 2 : 1);
+      expect(outcome.output?.text).toBe(outputText);
+      expect(outcome.status).toBe(entry.profileId === "tgi"
+        ? "incomplete"
+        : "completed");
+      const persisted = JSON.stringify(outcome.persistence);
+      expect(persisted).not.toContain(outputText);
+      expect(persisted).not.toContain("private prompt");
+    }
+  });
+
+  it("fails closed on missing Responses terminal, usage, or model evidence", async () => {
+    const validCanary = {
+      model: MODEL.id,
+      status: "completed",
+      output: [{
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "probe" }],
+      }],
+      usage: {
+        input_tokens: 1,
+        output_tokens: 1,
+        total_tokens: 2,
+      },
+    };
+    const cases = [
+      {
+        response: {
+          ...validCanary,
+          status: "in_progress",
+          output: [{
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "terminal-secret" }],
+          }],
+        },
+        status: "failed",
+        output: null,
+      },
+      {
+        response: {
+          ...validCanary,
+          output: [{
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "usage-secret" }],
+          }],
+          usage: null,
+        },
+        status: "incomplete",
+        output: "usage-secret",
+      },
+      {
+        response: {
+          status: "completed",
+          output: [{
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "model-secret" }],
+          }],
+          usage: {
+            input_tokens: 1,
+            output_tokens: 1,
+            total_tokens: 2,
+          },
+        },
+        status: "incomplete",
+        output: "model-secret",
+      },
+    ] as const;
+
+    for (const testCase of cases) {
+      let contact = 0;
+      const server = await startServer((_request, response) => {
+        contact += 1;
+        jsonResponse(response, contact === 1
+          ? validCanary
+          : testCase.response);
+      });
+      const runtime = fixture({
+        server,
+        profileId: "vllm",
+        route: "responses",
+        stream: false,
+      });
+      const probe = await deadline(probeRuntimeCapability({
+        policy: runtime.policy,
+        endpointAlias: runtime.invocation.endpointAlias,
+        instance: runtime.instance,
+        capability: "responses",
+        observationEffect: "inference-canary",
+        totalDeadlineMs: 1_500,
+        authorizationTtlMs: 2_000,
+      }));
+
+      const outcome = await deadline(invokeRuntime({
+        ...runtime.invocation,
+        totalDeadlineMs: 500,
+        capabilityAuthorizations: [probe.authorization!],
+      }));
+
+      expect(server.contacts()).toBe(2);
+      expect(outcome.status).toBe(testCase.status);
+      expect(outcome.output?.text ?? null).toBe(testCase.output);
+      expect(outcome.persistence.terminalOutputIdentity).toBeNull();
+      expect(JSON.stringify(outcome.persistence)).not.toContain("-secret");
+    }
+  });
+
   it("requires exact opaque probe authority for conditional routes without confused-deputy I/O", async () => {
     let responseIndex = 0;
     const server = await startServer((_request, response) => {
@@ -457,10 +1451,15 @@ describe("runtime invocation foundation", () => {
     const authorization = probe.authorization!;
     expect(server.contacts()).toBe(1);
 
-    const outcome = await deadline(invokeRuntime({
+    const prepared = prepareRuntimeInvocation({
       ...authorizedInvocation,
       capabilityAuthorizations: [authorization],
-    }));
+    });
+
+    expect(server.contacts()).toBe(1);
+    const outcome = await deadline(
+      dispatchPreparedRuntimeInvocation(prepared),
+    );
 
     expect(outcome).toMatchObject({
       status: "completed",
@@ -571,9 +1570,26 @@ describe("runtime invocation foundation", () => {
     });
     expect(server.contacts()).toBe(1);
 
+    const prepared = prepareRuntimeInvocation({
+      ...invocation,
+      totalDeadlineMs: 100,
+    });
+    expect(server.contacts()).toBe(1);
+
     await new Promise((resolve) => setTimeout(resolve, 275));
-    await expect(invokeRuntime(invocation)).rejects.toMatchObject({
-      code: "CAPABILITY_AUTHORIZATION_REJECTED",
+    await expect(
+      dispatchPreparedRuntimeInvocation(prepared),
+    ).rejects.toMatchObject({
+      code: "PREPARED_INVOCATION_EXPIRED",
+      dispatchState: "not_sent",
+      persistedError: { category: "timeout" },
+    });
+    expect(server.contacts()).toBe(1);
+
+    await expect(
+      dispatchPreparedRuntimeInvocation(prepared),
+    ).rejects.toMatchObject({
+      code: "PREPARED_INVOCATION_REJECTED",
       persistedError: { category: "authorization" },
     });
     expect(server.contacts()).toBe(1);
@@ -606,6 +1622,18 @@ describe("runtime invocation foundation", () => {
       generation: generation("nativeChat", false),
     })).rejects.toMatchObject({ code: "UNSUPPORTED_ROUTE" });
 
+    const tgi = fixture({
+      server,
+      profileId: "tgi",
+      route: "nativeGenerate",
+      stream: false,
+    });
+    await expect(invokeRuntime({
+      ...tgi.invocation,
+      route: "responses",
+      generation: generation("responses", false),
+    })).rejects.toMatchObject({ code: "UNSUPPORTED_ROUTE" });
+
     const unknown = {
       ...valid.invocation,
       generation: {
@@ -623,10 +1651,14 @@ describe("runtime invocation foundation", () => {
 
     const controller = new AbortController();
     controller.abort();
-    const cancelled = await invokeRuntime({
+    const cancelledPrepared = prepareRuntimeInvocation({
       ...valid.invocation,
       signal: controller.signal,
     });
+    expect(server.contacts()).toBe(0);
+    const cancelled = await dispatchPreparedRuntimeInvocation(
+      cancelledPrepared,
+    );
     expect(cancelled).toMatchObject({
       status: "failed",
       output: null,
@@ -636,6 +1668,13 @@ describe("runtime invocation foundation", () => {
         terminalOutputIdentity: null,
         error: { category: "cancelled" },
       },
+    });
+    expect(server.contacts()).toBe(0);
+    await expect(
+      dispatchPreparedRuntimeInvocation(cancelledPrepared),
+    ).rejects.toMatchObject({
+      code: "PREPARED_INVOCATION_REJECTED",
+      persistedError: { category: "authorization" },
     });
     expect(server.contacts()).toBe(0);
   });
@@ -1116,6 +2155,37 @@ describe("runtime invocation foundation", () => {
         error: { category: "invalid-response" },
       },
     });
+
+    const wrongParameterServer = await startServer((_request, response) => {
+      jsonResponse(response, {
+        model: MODEL.id,
+        choices: [{
+          index: 0,
+          text: "must-not-accept-parameter",
+          finish_reason: "stop",
+        }],
+        usage: {
+          prompt_tokens: 1,
+          completion_tokens: 1,
+          total_tokens: 2,
+        },
+      }, "application/json; version=2");
+    });
+    const wrongParameter = fixture({
+      server: wrongParameterServer,
+      profileId: "vllm",
+      route: "completions",
+      stream: false,
+    });
+    await expect(deadline(invokeRuntime(wrongParameter.invocation)))
+      .resolves.toMatchObject({
+        status: "failed",
+        output: null,
+        persistence: {
+          terminalOutputIdentity: null,
+          error: { category: "invalid-response" },
+        },
+      });
 
     const truncatedServer = await startServer((_request, response) => {
       response.statusCode = 200;

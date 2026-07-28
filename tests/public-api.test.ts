@@ -23,6 +23,7 @@ import type {
   PinnedCollectorRequest,
   PersistedError,
   PersistedErrorCategory,
+  PreparedRuntimeInvocation,
   RuntimeHttpLimits,
   RuntimeContentTypeParameter,
   RuntimeWireDispatchState,
@@ -85,6 +86,7 @@ const runtimeTransportPublicTypeCount:
   RuntimeTransportPublicTypes["length"] = 10;
 
 type RuntimeCallPublicTypes = [
+  PreparedRuntimeInvocation,
   RuntimeCapabilityAuthorization,
   RuntimeCapabilityProbeInput,
   RuntimeCapabilityProbeResult,
@@ -94,7 +96,7 @@ type RuntimeCallPublicTypes = [
   RuntimeInvocationOutcome,
 ];
 
-const runtimeCallPublicTypeCount: RuntimeCallPublicTypes["length"] = 7;
+const runtimeCallPublicTypeCount: RuntimeCallPublicTypes["length"] = 8;
 
 describe("standalone public API", () => {
   it("exports the complete policy-lab surface from one package entry point", () => {
@@ -176,14 +178,18 @@ describe("standalone public API", () => {
       RuntimeProbeInputError: expect.any(Function),
       probeRuntimeCapability: expect.any(Function),
       RUNTIME_INVOCATION_VERSION: "tasc-runtime-invocation-v1",
+      PREPARED_RUNTIME_INVOCATION_VERSION:
+        "tasc-prepared-runtime-invocation-v1",
       RuntimeInvocationInputError: expect.any(Function),
+      prepareRuntimeInvocation: expect.any(Function),
+      dispatchPreparedRuntimeInvocation: expect.any(Function),
       invokeRuntime: expect.any(Function),
     });
     expect(taskEightPublicTypeCount).toBe(11);
     expect(controllerPublicTypeCount).toBe(2);
     expect(artifactResumePublicTypeCount).toBe(3);
     expect(runtimeTransportPublicTypeCount).toBe(10);
-    expect(runtimeCallPublicTypeCount).toBe(7);
+    expect(runtimeCallPublicTypeCount).toBe(8);
   });
 
   it("keeps deterministic identities independent of object insertion order", () => {

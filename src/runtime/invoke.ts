@@ -63,11 +63,15 @@ export type { RuntimeCapabilityAuthorization } from "./probe.js";
 
 export const RUNTIME_INVOCATION_VERSION =
   "tasc-runtime-invocation-v1" as const;
+export const PREPARED_RUNTIME_INVOCATION_VERSION =
+  "tasc-prepared-runtime-invocation-v1" as const;
 
 export type RuntimeInvocationRoute =
   | "chatCompletions"
   | "completions"
-  | "nativeChat";
+  | "responses"
+  | "nativeChat"
+  | "nativeGenerate";
 
 export interface RuntimeRequestedModel {
   readonly id: string;
@@ -108,10 +112,29 @@ export interface RuntimeInvocationInput {
   readonly httpLimits?: Partial<RuntimeHttpLimits>;
 }
 
+/**
+ * Durable, payload-free dispatch-intent material.
+ *
+ * Visible fields are metadata only. Dispatch authority remains in a
+ * module-private WeakMap and cannot survive cloning or serialization.
+ */
+export interface PreparedRuntimeInvocation {
+  readonly schemaVersion: typeof PREPARED_RUNTIME_INVOCATION_VERSION;
+  readonly endpointBindingDigest: string;
+  readonly profile: {
+    readonly id: RuntimeProfileId;
+    readonly build: string;
+  };
+  readonly route: RuntimeInvocationRoute;
+  readonly requestedModel: RuntimeRequestedModel;
+  readonly requestIdentity: KeyedPayloadIdentity;
+  readonly requestByteCount: number;
+}
+
 export interface RuntimeProviderUsage {
-  readonly inputTokens: number;
-  readonly outputTokens: number;
-  readonly totalTokens: number;
+  readonly inputTokens: number | null;
+  readonly outputTokens: number | null;
+  readonly totalTokens: number | null;
 }
 
 export interface RuntimeProviderTiming {
@@ -184,7 +207,9 @@ export type RuntimeInvocationInputErrorCode =
   | "ENDPOINT_BINDING_MISMATCH"
   | "UNSUPPORTED_ROUTE"
   | "CONDITIONAL_CAPABILITY_REQUIRES_AUTHORIZATION"
-  | "CAPABILITY_AUTHORIZATION_REJECTED";
+  | "CAPABILITY_AUTHORIZATION_REJECTED"
+  | "PREPARED_INVOCATION_EXPIRED"
+  | "PREPARED_INVOCATION_REJECTED";
 
 const INPUT_ERROR_MESSAGES: Readonly<
   Record<RuntimeInvocationInputErrorCode, string>
@@ -197,11 +222,16 @@ const INPUT_ERROR_MESSAGES: Readonly<
     "Runtime invocation requires an authentic live capability authorization.",
   CAPABILITY_AUTHORIZATION_REJECTED:
     "Runtime invocation capability authorization was rejected.",
+  PREPARED_INVOCATION_EXPIRED:
+    "Prepared runtime invocation deadline expired before dispatch.",
+  PREPARED_INVOCATION_REJECTED:
+    "Prepared runtime invocation authority was rejected.",
 });
 
-/** A constant-safe failure raised before any request is pinned or dispatched. */
+/** A constant-safe boundary failure that never represents a sent request. */
 export class RuntimeInvocationInputError extends Error {
   readonly code: RuntimeInvocationInputErrorCode;
+  readonly dispatchState = "not_sent" as const;
   readonly persistedError: PersistedError;
 
   constructor(code: RuntimeInvocationInputErrorCode) {
@@ -210,8 +240,11 @@ export class RuntimeInvocationInputError extends Error {
     this.code = code;
     this.persistedError = sanitizeErrorForPersistence({
       category:
-        code === "CONDITIONAL_CAPABILITY_REQUIRES_AUTHORIZATION"
+        code === "PREPARED_INVOCATION_EXPIRED"
+          ? "timeout"
+          : code === "CONDITIONAL_CAPABILITY_REQUIRES_AUTHORIZATION"
           || code === "CAPABILITY_AUTHORIZATION_REJECTED"
+          || code === "PREPARED_INVOCATION_REJECTED"
           ? "authorization"
           : "internal",
     });
@@ -242,6 +275,17 @@ interface NormalizedInvocation {
   readonly signal?: AbortSignal;
   readonly httpLimits: RuntimeHttpLimits;
 }
+
+interface PreparedInvocationAuthority {
+  readonly invocation: NormalizedInvocation;
+  readonly expiresAtNs: bigint;
+  consumed: boolean;
+}
+
+const preparedInvocationAuthorities = new WeakMap<
+  PreparedRuntimeInvocation,
+  PreparedInvocationAuthority
+>();
 
 interface NormalizedProviderResult {
   readonly text: string;
@@ -277,12 +321,15 @@ const OPAQUE_ID_PATTERN =
 const SAFE_FINISH_REASONS = new Set([
   "abort",
   "cancelled",
+  "completed",
   "content_filter",
+  "eos_token",
   "error",
   "function_call",
   "length",
   "load",
   "stop",
+  "stop_sequence",
   "tool_calls",
   "unload",
 ]);
@@ -683,11 +730,16 @@ function requireRouteInputShape(
   ) {
     inputFail();
   }
+  if (
+    routeKey === "responses"
+    && (generation.seed !== undefined || generation.stop !== undefined)
+  ) {
+    inputFail();
+  }
 }
 
 function buildRequestBody(
-  profileId: RuntimeProfileId,
-  routeKey: RuntimeInvocationRoute,
+  route: RuntimeInferenceRoute,
   generation: RuntimeGenerationRequest,
 ): unknown {
   const sampling = {
@@ -697,53 +749,109 @@ function buildRequestBody(
     ...(generation.topP === undefined ? {} : { top_p: generation.topP }),
     ...(generation.seed === undefined ? {} : { seed: generation.seed }),
   };
-  if (routeKey === "nativeChat" && profileId === "ollama") {
-    return {
-      model: generation.model.id,
-      messages: generation.messages,
-      stream: generation.stream,
-      options: {
-        num_predict: generation.maxTokens,
+  switch (route.wireProtocol) {
+    case "ollama-native-chat":
+      return {
+        model: generation.model.id,
+        messages: generation.messages,
+        stream: generation.stream,
+        options: {
+          num_predict: generation.maxTokens,
+          ...sampling,
+          ...(generation.stop === undefined ? {} : { stop: generation.stop }),
+        },
+      };
+    case "ollama-native-generate":
+      return {
+        model: generation.model.id,
+        prompt: generation.prompt,
+        stream: generation.stream,
+        options: {
+          num_predict: generation.maxTokens,
+          ...sampling,
+          ...(generation.stop === undefined ? {} : { stop: generation.stop }),
+        },
+      };
+    case "tgi-native-generate": {
+      const doSample = generation.temperature !== undefined
+        && generation.temperature > 0;
+      return {
+        inputs: generation.prompt,
+        parameters: {
+          details: true,
+          do_sample: doSample,
+          max_new_tokens: generation.maxTokens,
+          return_full_text: false,
+          ...(doSample ? { temperature: generation.temperature } : {}),
+          ...(generation.topP === undefined ? {} : { top_p: generation.topP }),
+          ...(generation.seed === undefined ? {} : { seed: generation.seed }),
+          ...(generation.stop === undefined ? {} : { stop: generation.stop }),
+        },
+      };
+    }
+    case "openai-responses":
+      return {
+        model: generation.model.id,
+        input: generation.prompt,
+        stream: generation.stream,
+        max_output_tokens: generation.maxTokens,
+        ...(generation.temperature === undefined
+          ? {}
+          : { temperature: generation.temperature }),
+        ...(generation.topP === undefined ? {} : { top_p: generation.topP }),
+      };
+    case "openai-chat-completions":
+      return {
+        model: generation.model.id,
+        messages: generation.messages,
+        stream: generation.stream,
+        n: 1,
+        max_tokens: generation.maxTokens,
         ...sampling,
         ...(generation.stop === undefined ? {} : { stop: generation.stop }),
-      },
-    };
+        ...(generation.stream
+          ? { stream_options: { include_usage: true } }
+          : {}),
+      };
+    case "openai-completions":
+      return {
+        model: generation.model.id,
+        prompt: generation.prompt,
+        stream: generation.stream,
+        n: 1,
+        max_tokens: generation.maxTokens,
+        ...sampling,
+        ...(generation.stop === undefined ? {} : { stop: generation.stop }),
+        ...(generation.stream
+          ? { stream_options: { include_usage: true } }
+          : {}),
+      };
+    case "lm-studio-native-chat":
+      inputFail("UNSUPPORTED_ROUTE");
   }
-  if (routeKey === "chatCompletions") {
-    return {
-      model: generation.model.id,
-      messages: generation.messages,
-      stream: generation.stream,
-      n: 1,
-      max_tokens: generation.maxTokens,
-      ...sampling,
-      ...(generation.stop === undefined ? {} : { stop: generation.stop }),
-      ...(generation.stream
-        ? { stream_options: { include_usage: true } }
-        : {}),
-    };
-  }
-  return {
-    model: generation.model.id,
-    prompt: generation.prompt,
-    stream: generation.stream,
-    n: 1,
-    max_tokens: generation.maxTokens,
-    ...sampling,
-    ...(generation.stop === undefined ? {} : { stop: generation.stop }),
-    ...(generation.stream
-      ? { stream_options: { include_usage: true } }
-      : {}),
-  };
 }
 
 function routeFraming(
   route: RuntimeInferenceRoute,
   stream: boolean,
 ): "json" | "sse" | "ndjson" {
-  const framing = stream
-    ? route.wireProtocol.startsWith("ollama-") ? "ndjson" : "sse"
-    : "json";
+  let framing: "json" | "sse" | "ndjson";
+  if (!stream) {
+    framing = "json";
+  } else if (
+    route.wireProtocol === "ollama-native-chat"
+    || route.wireProtocol === "ollama-native-generate"
+  ) {
+    framing = "ndjson";
+  } else if (
+    route.wireProtocol === "openai-chat-completions"
+    || route.wireProtocol === "openai-completions"
+    || route.wireProtocol === "openai-responses"
+  ) {
+    framing = "sse";
+  } else {
+    inputFail("UNSUPPORTED_ROUTE");
+  }
   if (!route.responseFraming.includes(framing)) inputFail("UNSUPPORTED_ROUTE");
   return framing;
 }
@@ -774,7 +882,9 @@ function normalizeInvocation(input: RuntimeInvocationInput): NormalizedInvocatio
   if (
     snapshot.route !== "chatCompletions"
     && snapshot.route !== "completions"
+    && snapshot.route !== "responses"
     && snapshot.route !== "nativeChat"
+    && snapshot.route !== "nativeGenerate"
   ) {
     inputFail("UNSUPPORTED_ROUTE");
   }
@@ -813,6 +923,9 @@ function normalizeInvocation(input: RuntimeInvocationInput): NormalizedInvocatio
   }
   const route = profile.endpoints.inference[routeKey];
   if (route === undefined) inputFail("UNSUPPORTED_ROUTE");
+  if (route.wireProtocol === "lm-studio-native-chat") {
+    inputFail("UNSUPPORTED_ROUTE");
+  }
   const staticCapability = profile.capabilities[route.capability];
   if (
     staticCapability.state === "unsupported"
@@ -857,7 +970,7 @@ function normalizeInvocation(input: RuntimeInvocationInput): NormalizedInvocatio
     route.path,
   );
   const requestBytes = canonicalJsonBytes(
-    buildRequestBody(profile.id, routeKey, generation),
+    buildRequestBody(route, generation),
   );
   if (requestBytes.byteLength > MAX_REQUEST_BYTES) inputFail();
   parseBoundedJson(requestBytes, REQUEST_JSON_LIMITS);
@@ -976,6 +1089,25 @@ function parseOpenAiUsage(value: unknown): RuntimeProviderUsage | null {
   }
   const inputTokens = tokenCount(usage.prompt_tokens);
   const outputTokens = tokenCount(usage.completion_tokens);
+  const totalTokens = tokenCount(usage.total_tokens);
+  if (totalTokens !== inputTokens + outputTokens) {
+    throw new InvalidRuntimeResponse();
+  }
+  return Object.freeze({ inputTokens, outputTokens, totalTokens });
+}
+
+function parseResponsesUsage(value: unknown): RuntimeProviderUsage | null {
+  if (value === undefined || value === null) return null;
+  const usage = record(value);
+  if (usage === null) throw new InvalidRuntimeResponse();
+  if (
+    Object.hasOwn(usage, "prompt_tokens")
+    || Object.hasOwn(usage, "completion_tokens")
+  ) {
+    throw new InvalidRuntimeResponse();
+  }
+  const inputTokens = tokenCount(usage.input_tokens);
+  const outputTokens = tokenCount(usage.output_tokens);
   const totalTokens = tokenCount(usage.total_tokens);
   if (totalTokens !== inputTokens + outputTokens) {
     throw new InvalidRuntimeResponse();
@@ -1109,7 +1241,37 @@ function normalizeOpenAiJson(
   });
 }
 
-function normalizeOllamaJson(
+function responsesOutputText(value: unknown): string {
+  if (!Array.isArray(value) || value.length !== 1) {
+    throw new InvalidRuntimeResponse();
+  }
+  const message = record(value[0]);
+  if (
+    message === null
+    || message.type !== "message"
+    || message.role !== "assistant"
+    || !Array.isArray(message.content)
+    || message.content.length < 1
+  ) {
+    throw new InvalidRuntimeResponse();
+  }
+  let text = "";
+  for (const value of message.content) {
+    const content = record(value);
+    if (
+      content === null
+      || content.type !== "output_text"
+      || typeof content.text !== "string"
+    ) {
+      throw new InvalidRuntimeResponse();
+    }
+    text += content.text;
+    if (text.length > MAX_TEXT_LENGTH) throw new InvalidRuntimeResponse();
+  }
+  return text;
+}
+
+function normalizeResponsesJson(
   value: unknown,
   requestedModel: string,
 ): NormalizedProviderResult {
@@ -1128,22 +1290,126 @@ function normalizeOllamaJson(
       streamTiming: null,
     });
   }
-  const message = record(json.message);
+  if (json.status !== "completed") throw new InvalidRuntimeResponse();
+  const usage = parseResponsesUsage(json.usage);
+  return Object.freeze({
+    text: responsesOutputText(json.output),
+    resolvedModelId: validateResolvedModel(json.model, requestedModel),
+    finishReason: "completed",
+    usage,
+    providerTiming: Object.freeze({}),
+    logprobsObserved: false,
+    terminal: "complete",
+    finalUsage: usage === null ? "missing" : "present",
+    streamTiming: null,
+  });
+}
+
+function normalizeOllamaJson(
+  value: unknown,
+  route: RuntimeInvocationRoute,
+  requestedModel: string,
+): NormalizedProviderResult {
+  const json = record(value);
+  if (json === null) throw new InvalidRuntimeResponse();
+  if (Object.hasOwn(json, "error")) {
+    return Object.freeze({
+      text: "",
+      resolvedModelId: null,
+      finishReason: null,
+      usage: null,
+      providerTiming: Object.freeze({}),
+      logprobsObserved: false,
+      terminal: "provider-error",
+      finalUsage: "missing",
+      streamTiming: null,
+    });
+  }
+  let text: unknown;
+  if (route === "nativeGenerate") {
+    text = json.response;
+  } else if (route === "nativeChat") {
+    text = record(json.message)?.content;
+  } else {
+    throw new InvalidRuntimeResponse();
+  }
   if (
     json.done !== true
-    || typeof message?.content !== "string"
-    || message.content.length > MAX_TEXT_LENGTH
+    || typeof text !== "string"
+    || text.length > MAX_TEXT_LENGTH
   ) {
     throw new InvalidRuntimeResponse();
   }
   const finishReason = safeFinishReason(json.done_reason);
   const usage = parseOllamaUsage(json);
   return Object.freeze({
-    text: message.content,
+    text,
     resolvedModelId: validateResolvedModel(json.model, requestedModel),
     finishReason,
     usage,
     providerTiming: parseOllamaTiming(json),
+    logprobsObserved: false,
+    terminal: "complete",
+    finalUsage: usage === null ? "missing" : "present",
+    streamTiming: null,
+  });
+}
+
+function parseTgiUsage(
+  details: Readonly<Record<string, unknown>>,
+): RuntimeProviderUsage | null {
+  if (!Object.hasOwn(details, "generated_tokens")) return null;
+  const outputTokens = tokenCount(details.generated_tokens);
+  const inputTokens = Object.hasOwn(details, "input_tokens")
+    ? tokenCount(details.input_tokens)
+    : null;
+  const totalTokens = Object.hasOwn(details, "total_tokens")
+    ? tokenCount(details.total_tokens)
+    : null;
+  if (
+    inputTokens !== null
+    && totalTokens !== null
+    && totalTokens !== inputTokens + outputTokens
+  ) {
+    throw new InvalidRuntimeResponse();
+  }
+  return Object.freeze({ inputTokens, outputTokens, totalTokens });
+}
+
+function normalizeTgiJson(
+  value: unknown,
+  requestedModel: string,
+): NormalizedProviderResult {
+  const json = record(value);
+  if (json === null) throw new InvalidRuntimeResponse();
+  if (Object.hasOwn(json, "error")) {
+    return Object.freeze({
+      text: "",
+      resolvedModelId: null,
+      finishReason: null,
+      usage: null,
+      providerTiming: Object.freeze({}),
+      logprobsObserved: false,
+      terminal: "provider-error",
+      finalUsage: "missing",
+      streamTiming: null,
+    });
+  }
+  const details = record(json.details);
+  if (
+    typeof json.generated_text !== "string"
+    || json.generated_text.length > MAX_TEXT_LENGTH
+    || details === null
+  ) {
+    throw new InvalidRuntimeResponse();
+  }
+  const usage = parseTgiUsage(details);
+  return Object.freeze({
+    text: json.generated_text,
+    resolvedModelId: validateResolvedModel(json.model, requestedModel),
+    finishReason: safeFinishReason(details.finish_reason),
+    usage,
+    providerTiming: Object.freeze({}),
     logprobsObserved: false,
     terminal: "complete",
     finalUsage: usage === null ? "missing" : "present",
@@ -1234,8 +1500,350 @@ function normalizeOpenAiSse(
   });
 }
 
+function responsesStreamIdentifier(
+  value: unknown,
+): string {
+  if (
+    typeof value !== "string"
+    || !ID_PATTERN.test(value)
+  ) {
+    throw new InvalidRuntimeResponse();
+  }
+  return value;
+}
+
+function requireResponsesStreamIndex(
+  json: Readonly<Record<string, unknown>>,
+  key: "output_index" | "content_index",
+): void {
+  if (json[key] !== 0) throw new InvalidRuntimeResponse();
+}
+
+function requireResponsesStreamTextPart(
+  value: unknown,
+  expectedText: string,
+): void {
+  const part = record(value);
+  if (
+    part === null
+    || part.type !== "output_text"
+    || part.text !== expectedText
+    || !Array.isArray(part.annotations)
+    || part.annotations.length !== 0
+    || (
+      Object.hasOwn(part, "logprobs")
+      && part.logprobs !== null
+      && !Array.isArray(part.logprobs)
+    )
+  ) {
+    throw new InvalidRuntimeResponse();
+  }
+}
+
+function requireResponsesStreamMessage(
+  value: unknown,
+  expectedStatus: "in_progress" | "completed",
+  expectedText: string | null,
+  expectedItemId?: string,
+): string {
+  const message = record(value);
+  if (
+    message === null
+    || message.type !== "message"
+    || message.role !== "assistant"
+    || message.status !== expectedStatus
+    || !Array.isArray(message.content)
+  ) {
+    throw new InvalidRuntimeResponse();
+  }
+  const itemId = responsesStreamIdentifier(message.id);
+  if (expectedItemId !== undefined && itemId !== expectedItemId) {
+    throw new InvalidRuntimeResponse();
+  }
+  if (expectedText === null) {
+    if (message.content.length !== 0) throw new InvalidRuntimeResponse();
+  } else {
+    if (message.content.length !== 1) throw new InvalidRuntimeResponse();
+    requireResponsesStreamTextPart(message.content[0], expectedText);
+  }
+  return itemId;
+}
+
+function requireInitialResponsesStreamResponse(
+  value: unknown,
+  requestedModel: string,
+  expectedResponseId?: string,
+): string {
+  const response = record(value);
+  if (
+    response === null
+    || response.object !== "response"
+    || response.status !== "in_progress"
+    || !Number.isSafeInteger(response.created_at)
+    || (response.created_at as number) < 0
+    || !Array.isArray(response.output)
+    || response.output.length !== 0
+    || response.usage !== null
+    || validateResolvedModel(response.model, requestedModel) === null
+  ) {
+    throw new InvalidRuntimeResponse();
+  }
+  const responseId = responsesStreamIdentifier(response.id);
+  if (
+    expectedResponseId !== undefined
+    && responseId !== expectedResponseId
+  ) {
+    throw new InvalidRuntimeResponse();
+  }
+  return responseId;
+}
+
+function requireCompletedResponsesStreamResponse(
+  value: unknown,
+  requestedModel: string,
+  responseId: string,
+  expectedText: string,
+): {
+  readonly resolvedModelId: string;
+  readonly usage: RuntimeProviderUsage;
+} {
+  const response = record(value);
+  if (
+    response === null
+    || response.id !== responseId
+    || response.object !== "response"
+    || response.status !== "completed"
+    || !Array.isArray(response.output)
+    || response.output.length !== 1
+  ) {
+    throw new InvalidRuntimeResponse();
+  }
+  requireResponsesStreamMessage(
+    response.output[0],
+    "completed",
+    expectedText,
+  );
+  const resolvedModelId = validateResolvedModel(
+    response.model,
+    requestedModel,
+  );
+  const usage = parseResponsesUsage(response.usage);
+  if (resolvedModelId === null || usage === null) {
+    throw new InvalidRuntimeResponse();
+  }
+  return Object.freeze({ resolvedModelId, usage });
+}
+
+type ResponsesTextStreamPhase =
+  | "created"
+  | "in-progress"
+  | "output-item-added"
+  | "content-part-added"
+  | "text-delta"
+  | "content-part-done"
+  | "output-item-done"
+  | "response-completed"
+  | "terminal";
+
+function normalizeResponsesSse(
+  parsed: JsonSseParseResult,
+  requestedModel: string,
+): NormalizedProviderResult {
+  let phase: ResponsesTextStreamPhase = "created";
+  let sequenceNumber = 0;
+  let responseId: string | null = null;
+  let itemId: string | null = null;
+  let text = "";
+  let resolvedModelId: string | null = null;
+  let usage: RuntimeProviderUsage | null = null;
+  for (const event of parsed.events) {
+    if (event.kind === "done" || event.json === null) {
+      throw new InvalidRuntimeResponse();
+    }
+    const json = record(event.json);
+    if (
+      json === null
+      || typeof json.type !== "string"
+      || json.type !== event.type
+      || event.event !== json.type
+    ) {
+      throw new InvalidRuntimeResponse();
+    }
+    if (event.providerError) {
+      if (
+        event.type !== "error"
+        && event.type !== "response.failed"
+      ) {
+        throw new InvalidRuntimeResponse();
+      }
+      return Object.freeze({
+        text,
+        resolvedModelId,
+        finishReason: null,
+        usage: null,
+        providerTiming: Object.freeze({}),
+        logprobsObserved: false,
+        terminal: "provider-error",
+        finalUsage: "missing",
+        streamTiming: parsed.summary.timing,
+      });
+    }
+    if (json.sequence_number !== sequenceNumber) {
+      throw new InvalidRuntimeResponse();
+    }
+    sequenceNumber += 1;
+    if (Object.hasOwn(json, "usage")) {
+      throw new InvalidRuntimeResponse();
+    }
+
+    switch (event.type) {
+      case "response.created":
+        if (phase !== "created") throw new InvalidRuntimeResponse();
+        responseId = requireInitialResponsesStreamResponse(
+          json.response,
+          requestedModel,
+        );
+        phase = "in-progress";
+        break;
+      case "response.in_progress":
+        if (phase !== "in-progress" || responseId === null) {
+          throw new InvalidRuntimeResponse();
+        }
+        requireInitialResponsesStreamResponse(
+          json.response,
+          requestedModel,
+          responseId,
+        );
+        phase = "output-item-added";
+        break;
+      case "response.output_item.added":
+        if (phase !== "output-item-added") {
+          throw new InvalidRuntimeResponse();
+        }
+        requireResponsesStreamIndex(json, "output_index");
+        itemId = requireResponsesStreamMessage(
+          json.item,
+          "in_progress",
+          null,
+        );
+        phase = "content-part-added";
+        break;
+      case "response.content_part.added":
+        if (phase !== "content-part-added" || itemId === null) {
+          throw new InvalidRuntimeResponse();
+        }
+        requireResponsesStreamIndex(json, "output_index");
+        requireResponsesStreamIndex(json, "content_index");
+        if (json.item_id !== itemId) throw new InvalidRuntimeResponse();
+        requireResponsesStreamTextPart(json.part, "");
+        phase = "text-delta";
+        break;
+      case "response.output_text.delta":
+        if (phase !== "text-delta" || itemId === null) {
+          throw new InvalidRuntimeResponse();
+        }
+        requireResponsesStreamIndex(json, "output_index");
+        requireResponsesStreamIndex(json, "content_index");
+        if (
+          json.item_id !== itemId
+          || typeof json.delta !== "string"
+          || json.delta.length < 1
+          || !Array.isArray(json.logprobs)
+        ) {
+          throw new InvalidRuntimeResponse();
+        }
+        text += json.delta;
+        if (text.length > MAX_TEXT_LENGTH) {
+          throw new InvalidRuntimeResponse();
+        }
+        break;
+      case "response.output_text.done":
+        if (
+          phase !== "text-delta"
+          || itemId === null
+          || text.length < 1
+        ) {
+          throw new InvalidRuntimeResponse();
+        }
+        requireResponsesStreamIndex(json, "output_index");
+        requireResponsesStreamIndex(json, "content_index");
+        if (
+          json.item_id !== itemId
+          || json.text !== text
+          || !Array.isArray(json.logprobs)
+        ) {
+          throw new InvalidRuntimeResponse();
+        }
+        phase = "content-part-done";
+        break;
+      case "response.content_part.done":
+        if (phase !== "content-part-done" || itemId === null) {
+          throw new InvalidRuntimeResponse();
+        }
+        requireResponsesStreamIndex(json, "output_index");
+        requireResponsesStreamIndex(json, "content_index");
+        if (json.item_id !== itemId) throw new InvalidRuntimeResponse();
+        requireResponsesStreamTextPart(json.part, text);
+        phase = "output-item-done";
+        break;
+      case "response.output_item.done":
+        if (phase !== "output-item-done" || itemId === null) {
+          throw new InvalidRuntimeResponse();
+        }
+        requireResponsesStreamIndex(json, "output_index");
+        requireResponsesStreamMessage(
+          json.item,
+          "completed",
+          text,
+          itemId,
+        );
+        phase = "response-completed";
+        break;
+      case "response.completed": {
+        if (phase !== "response-completed" || responseId === null) {
+          throw new InvalidRuntimeResponse();
+        }
+        const terminal = requireCompletedResponsesStreamResponse(
+          json.response,
+          requestedModel,
+          responseId,
+          text,
+        );
+        resolvedModelId = terminal.resolvedModelId;
+        usage = terminal.usage;
+        phase = "terminal";
+        break;
+      }
+      default:
+        throw new InvalidRuntimeResponse();
+    }
+  }
+  const completed = phase === "terminal"
+    && resolvedModelId !== null
+    && usage !== null;
+  return Object.freeze({
+    text,
+    resolvedModelId,
+    finishReason: completed ? "completed" : null,
+    usage,
+    providerTiming: Object.freeze({}),
+    logprobsObserved: false,
+    terminal: parsed.summary.terminal === "provider-error"
+      ? "provider-error"
+      : parsed.summary.terminal === "response.completed"
+        ? completed ? "complete" : "invalid"
+        : "truncated",
+    finalUsage:
+      completed && parsed.summary.finalUsage === "present"
+        ? "present"
+        : "missing",
+    streamTiming: parsed.summary.timing,
+  });
+}
+
 function normalizeOllamaNdjson(
   parsed: NdjsonStreamParseResult,
+  route: RuntimeInvocationRoute,
   requestedModel: string,
 ): NormalizedProviderResult {
   let text = "";
@@ -1255,7 +1863,18 @@ function normalizeOllamaNdjson(
     }
     const reportedModel = validateResolvedModel(json.model, requestedModel);
     if (reportedModel !== null) resolvedModelId = reportedModel;
-    if (Object.hasOwn(json, "message")) {
+    if (route === "nativeGenerate") {
+      if (
+        Object.hasOwn(json, "response")
+        && typeof json.response !== "string"
+      ) {
+        throw new InvalidRuntimeResponse();
+      }
+      if (typeof json.response === "string") {
+        text += json.response;
+        if (text.length > MAX_TEXT_LENGTH) throw new InvalidRuntimeResponse();
+      }
+    } else if (route === "nativeChat" && Object.hasOwn(json, "message")) {
       const message = record(json.message);
       if (message === null) throw new InvalidRuntimeResponse();
       if (Object.hasOwn(message, "content")) {
@@ -1265,6 +1884,8 @@ function normalizeOllamaNdjson(
         text += message.content;
         if (text.length > MAX_TEXT_LENGTH) throw new InvalidRuntimeResponse();
       }
+    } else if (route !== "nativeChat") {
+      throw new InvalidRuntimeResponse();
     }
     if (item.done) {
       finishReason = safeFinishReason(json.done_reason);
@@ -1346,11 +1967,21 @@ async function drain(source: ByteChunkSource): Promise<void> {
 
 function contentTypeMatches(
   framing: NormalizedInvocation["framing"],
-  contentType: string | undefined,
+  response: BoundedRuntimeHttpResponse,
 ): boolean {
-  if (framing === "json") return contentType === "application/json";
-  if (framing === "sse") return contentType === "text/event-stream";
-  return contentType === "application/x-ndjson";
+  const typeMatches = framing === "json"
+    ? response.contentType === "application/json"
+    : framing === "sse"
+      ? response.contentType === "text/event-stream"
+      : response.contentType === "application/x-ndjson";
+  if (!typeMatches) return false;
+  const parameters = response.contentTypeParameters ?? [];
+  return parameters.length === 0
+    || (
+      parameters.length === 1
+      && parameters[0]?.name === "charset"
+      && parameters[0].value.toLowerCase() === "utf-8"
+    );
 }
 
 async function decodeResponse(
@@ -1360,32 +1991,66 @@ async function decodeResponse(
   const capture = captureBody(response.body);
   let normalized: NormalizedProviderResult;
   try {
-    if (!contentTypeMatches(invocation.framing, response.contentType)) {
+    if (!contentTypeMatches(invocation.framing, response)) {
       await drain(capture.source);
       throw new InvalidRuntimeResponse();
     }
     if (invocation.framing === "json") {
       await drain(capture.source);
       const json = parseBoundedJson(capture.bytes(), RESPONSE_JSON_LIMITS);
-      normalized = invocation.route.wireProtocol.startsWith("ollama-")
-        ? normalizeOllamaJson(json, invocation.generation.model.id)
-        : normalizeOpenAiJson(
-          json,
-          invocation.routeKey,
-          invocation.generation.model.id,
-        );
+      switch (invocation.route.wireProtocol) {
+        case "openai-chat-completions":
+        case "openai-completions":
+          normalized = normalizeOpenAiJson(
+            json,
+            invocation.routeKey,
+            invocation.generation.model.id,
+          );
+          break;
+        case "ollama-native-chat":
+        case "ollama-native-generate":
+          normalized = normalizeOllamaJson(
+            json,
+            invocation.routeKey,
+            invocation.generation.model.id,
+          );
+          break;
+        case "tgi-native-generate":
+          normalized = normalizeTgiJson(
+            json,
+            invocation.generation.model.id,
+          );
+          break;
+        case "openai-responses":
+          normalized = normalizeResponsesJson(
+            json,
+            invocation.generation.model.id,
+          );
+          break;
+        case "lm-studio-native-chat":
+          throw new InvalidRuntimeResponse();
+      }
     } else if (invocation.framing === "sse") {
       const parsed = await parseBoundedJsonSse(capture.source, {
         limits: DEFAULT_SSE_LIMITS,
         identity: invocation.identity,
         jsonLimits: STREAM_EVENT_JSON_LIMITS,
-        protocol: "openai-chat-completions",
+        protocol: invocation.route.wireProtocol === "openai-responses"
+          ? "openai-responses"
+          : "openai-chat-completions",
       });
-      normalized = normalizeOpenAiSse(
-        parsed,
-        invocation.routeKey,
-        invocation.generation.model.id,
-      );
+      if (invocation.route.wireProtocol === "openai-responses") {
+        normalized = normalizeResponsesSse(
+          parsed,
+          invocation.generation.model.id,
+        );
+      } else {
+        normalized = normalizeOpenAiSse(
+          parsed,
+          invocation.routeKey,
+          invocation.generation.model.id,
+        );
+      }
     } else {
       const parsed = await parseBoundedNdjsonStream(capture.source, {
         limits: DEFAULT_NDJSON_STREAM_LIMITS,
@@ -1394,6 +2059,7 @@ async function decodeResponse(
       });
       normalized = normalizeOllamaNdjson(
         parsed,
+        invocation.routeKey,
         invocation.generation.model.id,
       );
     }
@@ -1537,27 +2203,126 @@ function buildOutcome(input: {
   });
 }
 
-/**
- * Perform exactly one profile-declared inference request.
- *
- * Invalid DTOs, endpoint bindings, unsupported routes, and unauthorised
- * conditional capabilities throw before pinning. Once authorization succeeds,
- * pin/transport/provider failures become immutable Task-13-friendly outcomes.
- */
-export async function invokeRuntime(
-  input: RuntimeInvocationInput,
-): Promise<RuntimeInvocationOutcome> {
-  const invocation = normalizeInvocation(input);
-  if (
-    invocation.capabilityAuthorization !== undefined
-    && !verifyRuntimeCapabilityAuthorization(
+function capabilityLeaseIsAuthentic(
+  invocation: NormalizedInvocation,
+  minimumRemainingMs = invocation.totalDeadlineMs,
+): boolean {
+  return invocation.capabilityAuthorization === undefined
+    || verifyRuntimeCapabilityAuthorization(
       invocation.capabilityAuthorization,
       {
         instance: invocation.instance,
         capability: invocation.route.capability,
         route: invocation.routeKey,
-        minimumRemainingMs: invocation.totalDeadlineMs,
+        minimumRemainingMs,
       },
+    );
+}
+
+function remainingPreparedDeadlineMs(
+  authority: PreparedInvocationAuthority,
+): number {
+  const remainingNs = authority.expiresAtNs - process.hrtime.bigint();
+  if (remainingNs <= 0n) return 0;
+  return Number(remainingNs / 1_000_000n);
+}
+
+function httpLimitsWithinPreparedDeadline(
+  limits: RuntimeHttpLimits,
+  remainingDeadlineMs: number,
+): RuntimeHttpLimits {
+  const deadlineMs = Math.min(limits.deadlineMs, remainingDeadlineMs);
+  return Object.freeze({
+    ...limits,
+    deadlineMs,
+    connectTimeoutMs: Math.min(limits.connectTimeoutMs, deadlineMs),
+    headersTimeoutMs: Math.min(limits.headersTimeoutMs, deadlineMs),
+    bodyTimeoutMs: Math.min(limits.bodyTimeoutMs, deadlineMs),
+  });
+}
+
+function endpointBindingIsAuthentic(
+  invocation: NormalizedInvocation,
+): boolean {
+  try {
+    const digest = fingerprintCollectorEndpointBinding(
+      invocation.policy,
+      invocation.endpointAlias,
+      invocation.endpointDescriptor,
+    );
+    return digest === invocation.endpointBindingDigest
+      && digest === invocation.instance.endpointDescriptorDigest;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Validate and freeze one exact request without authorizing or performing I/O.
+ *
+ * No DNS resolution, network contact, secret lookup, or capability consumption
+ * occurs here. The returned object is payload-free and only the exact object
+ * minted by this function can be dispatched.
+ */
+export function prepareRuntimeInvocation(
+  input: RuntimeInvocationInput,
+): PreparedRuntimeInvocation {
+  const startedAtNs = process.hrtime.bigint();
+  const invocation = normalizeInvocation(input);
+  if (!capabilityLeaseIsAuthentic(invocation)) {
+    inputFail("CAPABILITY_AUTHORIZATION_REJECTED");
+  }
+  const prepared = deepFreeze<PreparedRuntimeInvocation>({
+    schemaVersion: PREPARED_RUNTIME_INVOCATION_VERSION,
+    endpointBindingDigest: invocation.endpointBindingDigest,
+    profile: {
+      id: invocation.profileId,
+      build: invocation.profileBuild,
+    },
+    route: invocation.routeKey,
+    requestedModel: invocation.generation.model,
+    requestIdentity: invocation.requestIdentity,
+    requestByteCount: invocation.requestBytes.byteLength,
+  });
+  preparedInvocationAuthorities.set(prepared, {
+    invocation,
+    expiresAtNs:
+      startedAtNs + BigInt(invocation.totalDeadlineMs) * 1_000_000n,
+    consumed: false,
+  });
+  return prepared;
+}
+
+/**
+ * Consume exactly one authentic prepared invocation and perform its one
+ * profile-declared request.
+ */
+export async function dispatchPreparedRuntimeInvocation(
+  prepared: PreparedRuntimeInvocation,
+): Promise<RuntimeInvocationOutcome> {
+  const authority =
+    prepared !== null
+      && typeof prepared === "object"
+      && !isProxy(prepared)
+      ? preparedInvocationAuthorities.get(prepared)
+      : undefined;
+  if (authority === undefined || authority.consumed) {
+    inputFail("PREPARED_INVOCATION_REJECTED");
+  }
+  authority.consumed = true;
+  const invocation = authority.invocation;
+  const remainingBeforeAuthorization =
+    remainingPreparedDeadlineMs(authority);
+  if (remainingBeforeAuthorization < 1) {
+    inputFail("PREPARED_INVOCATION_EXPIRED");
+  }
+  if (!endpointBindingIsAuthentic(invocation)) {
+    inputFail("ENDPOINT_BINDING_MISMATCH");
+  }
+  if (
+    !capabilityLeaseIsAuthentic(
+      invocation,
+      remainingBeforeAuthorization,
     )
   ) {
     inputFail("CAPABILITY_AUTHORIZATION_REJECTED");
@@ -1582,11 +2347,17 @@ export async function invokeRuntime(
     inputFail();
   }
 
-  const pinStartedAtNs = process.hrtime.bigint();
+  const pinBudgetMs = remainingPreparedDeadlineMs(authority);
+  if (pinBudgetMs < 1) {
+    inputFail("PREPARED_INVOCATION_EXPIRED");
+  }
+  if (!capabilityLeaseIsAuthentic(invocation, pinBudgetMs)) {
+    inputFail("CAPABILITY_AUTHORIZATION_REJECTED");
+  }
   let pin: Awaited<ReturnType<typeof pinAuthorizedCollectorRequest>>;
   try {
     pin = await pinAuthorizedCollectorRequest(authorization, {
-      totalDeadlineMs: invocation.totalDeadlineMs,
+      totalDeadlineMs: pinBudgetMs,
       ...(invocation.signal === undefined
         ? {}
         : { signal: invocation.signal }),
@@ -1594,10 +2365,8 @@ export async function invokeRuntime(
   } catch {
     const callerCancelled = invocation.signal !== undefined
       && abortSignalIsAborted(invocation.signal);
-    const elapsedMs =
-      Number(process.hrtime.bigint() - pinStartedAtNs) / 1_000_000;
     const deadlineExceeded = !callerCancelled
-      && elapsedMs + 1 >= invocation.totalDeadlineMs;
+      && remainingPreparedDeadlineMs(authority) < 1;
     return buildOutcome({
       invocation,
       status: "failed",
@@ -1614,19 +2383,21 @@ export async function invokeRuntime(
     });
   }
 
-  if (
-    invocation.capabilityAuthorization !== undefined
-    && !verifyRuntimeCapabilityAuthorization(
-      invocation.capabilityAuthorization,
-      {
-        instance: invocation.instance,
-        capability: invocation.route.capability,
-        route: invocation.routeKey,
-        minimumRemainingMs: invocation.totalDeadlineMs,
-      },
-    )
-  ) {
-    inputFail("CAPABILITY_AUTHORIZATION_REJECTED");
+  const bindingAuthentic = endpointBindingIsAuthentic(invocation);
+  const transportBudgetMs = remainingPreparedDeadlineMs(authority);
+  if (transportBudgetMs < 1) {
+    inputFail("PREPARED_INVOCATION_EXPIRED");
+  }
+  const leaseAuthentic = capabilityLeaseIsAuthentic(
+    invocation,
+    transportBudgetMs,
+  );
+  if (!bindingAuthentic || !leaseAuthentic) {
+    inputFail(
+      bindingAuthentic
+        ? "CAPABILITY_AUTHORIZATION_REJECTED"
+        : "ENDPOINT_BINDING_MISMATCH",
+    );
   }
 
   try {
@@ -1639,7 +2410,10 @@ export async function invokeRuntime(
             ? "text/event-stream"
             : "application/x-ndjson",
         body: invocation.requestBytes,
-        limits: invocation.httpLimits,
+        limits: httpLimitsWithinPreparedDeadline(
+          invocation.httpLimits,
+          transportBudgetMs,
+        ),
         ...(invocation.signal === undefined
           ? {}
           : { signal: invocation.signal }),
@@ -1652,6 +2426,22 @@ export async function invokeRuntime(
       (response) => decodeResponse(response, invocation),
     );
     const decoded = result.value;
+    if (remainingPreparedDeadlineMs(authority) < 1) {
+      return buildOutcome({
+        invocation,
+        status: "failed",
+        responseIdentity: decoded.responseIdentity,
+        eventStreamIdentity: decoded.eventStreamIdentity,
+        dispatchState: "completed",
+        abortLifecycle: "deadline-exceeded",
+        wireTiming: result.timing,
+        error: persistedError(
+          "timeout",
+          invocation.profileId,
+          result.statusCode,
+        ),
+      });
+    }
     const normalized = decoded.normalized;
     const complete = normalized.terminal === "complete"
       && normalized.finishReason !== null
@@ -1700,4 +2490,13 @@ export async function invokeRuntime(
       error: persistedError("transport", invocation.profileId),
     });
   }
+}
+
+/**
+ * Compatibility helper: prepare a durable intent and immediately dispatch it.
+ */
+export async function invokeRuntime(
+  input: RuntimeInvocationInput,
+): Promise<RuntimeInvocationOutcome> {
+  return dispatchPreparedRuntimeInvocation(prepareRuntimeInvocation(input));
 }

@@ -529,11 +529,15 @@ export type {
   RuntimeProbeObservationEffect,
 } from "./runtime/probe.js";
 export {
+  PREPARED_RUNTIME_INVOCATION_VERSION,
   RUNTIME_INVOCATION_VERSION,
   RuntimeInvocationInputError,
+  dispatchPreparedRuntimeInvocation,
   invokeRuntime,
+  prepareRuntimeInvocation,
 } from "./runtime/invoke.js";
 export type {
+  PreparedRuntimeInvocation,
   RuntimeAbortLifecycle,
   RuntimeChatMessage,
   RuntimeGenerationRequest,
