@@ -41,13 +41,13 @@ Requirements:
 
 - Apple Silicon with Metal support;
 - macOS 14 or newer;
-- Python 3.12; and
+- Python 3.13; and
 - [`uv`](https://docs.astral.sh/uv/) or another environment manager.
 
 Create an isolated environment:
 
 ```bash
-uv venv --python 3.12 .venv-mlx
+uv venv --python 3.13 .venv-mlx
 uv pip install --python .venv-mlx/bin/python \
   --require-hashes \
   -r benchmarks/mlx/build-requirements.lock
@@ -72,14 +72,14 @@ Regenerate both locks deliberately:
 ```bash
 MACOSX_DEPLOYMENT_TARGET=14.0 uv pip compile \
   benchmarks/mlx/build-requirements.txt \
-  --python-version 3.12 \
+  --python-version 3.13 \
   --python-platform aarch64-apple-darwin \
   --generate-hashes \
   --output-file benchmarks/mlx/build-requirements.lock
 
 MACOSX_DEPLOYMENT_TARGET=14.0 uv pip compile \
   benchmarks/mlx/requirements.txt \
-  --python-version 3.12 \
+  --python-version 3.13 \
   --python-platform aarch64-apple-darwin \
   --generate-hashes \
   --output-file benchmarks/mlx/requirements.lock

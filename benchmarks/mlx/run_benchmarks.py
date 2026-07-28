@@ -10,7 +10,6 @@ import math
 import os
 import platform
 import re
-import select
 import selectors
 import shlex
 import signal
@@ -267,67 +266,6 @@ def terminate_process_group(
         process.wait()
 
 
-def wait_for_macos_leader_exit_without_reaping(
-    process: subprocess.Popen[bytes],
-    deadline: float,
-    output: bytearray,
-) -> None:
-    if not hasattr(select, "kqueue") or not hasattr(select, "kevent"):
-        terminate_process_group(process)
-        raise RuntimeError(
-            "bounded macOS process cleanup requires kqueue process events"
-        )
-
-    # Some python.org 3.12 macOS builds expose kqueue/kevent but omit the
-    # process-filter constants documented by CPython. These values are stable
-    # Darwin ABI constants from <sys/event.h>; prefer the runtime exports when
-    # present and use the XNU values only on macOS.
-    def kqueue_constant(name: str, darwin_value: int) -> int:
-        exported = getattr(select, name, None)
-        if isinstance(exported, int):
-            return exported
-        if sys.platform == "darwin":
-            return darwin_value
-        terminate_process_group(process)
-        raise RuntimeError(
-            f"bounded macOS process cleanup requires select.{name}"
-        )
-
-    filter_proc = kqueue_constant("KQ_FILTER_PROC", -5)
-    event_add = kqueue_constant("KQ_EV_ADD", 0x0001)
-    event_enable = kqueue_constant("KQ_EV_ENABLE", 0x0004)
-    event_oneshot = kqueue_constant("KQ_EV_ONESHOT", 0x0010)
-    note_exit = kqueue_constant("KQ_NOTE_EXIT", 0x80000000)
-
-    queue = select.kqueue()
-    try:
-        exit_event = select.kevent(
-            process.pid,
-            filter=filter_proc,
-            flags=event_add | event_enable | event_oneshot,
-            fflags=note_exit,
-        )
-        # Register while the leader is deliberately unreaped. NOTE_EXIT remains
-        # observable for a zombie, so the PID continues to reserve its PGID.
-        queue.control([exit_event], 0, 0)
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                terminate_process_group(process)
-                raise BoundedCommandFailure(
-                    "command timed out before its leader exited",
-                    output.decode("utf-8", errors="replace"),
-                )
-            try:
-                events = queue.control(None, 1, remaining)
-            except InterruptedError:
-                continue
-            if events:
-                return
-    finally:
-        queue.close()
-
-
 def reap_leader_after_group_shutdown(
     process: subprocess.Popen[bytes],
     deadline: float,
@@ -350,21 +288,10 @@ def reap_leader_after_group_shutdown(
                 output.decode("utf-8", errors="replace"),
             ) from error
 
-    if sys.platform == "darwin" and (
-        not hasattr(os, "waitid") or not hasattr(os, "WNOWAIT")
+    if (
+        not callable(getattr(os, "waitid", None))
+        or not isinstance(getattr(os, "WNOWAIT", None), int)
     ):
-        # Python 3.12 does not expose waitid() on macOS. kqueue NOTE_EXIT
-        # provides the same non-reaping observation needed to keep the
-        # leader PID/PGID reserved until every descendant has been killed.
-        wait_for_macos_leader_exit_without_reaping(
-            process,
-            deadline,
-            output,
-        )
-        terminate_process_group(process, leader_exit_observed=True)
-        return process.wait()
-
-    if not hasattr(os, "waitid") or not hasattr(os, "WNOWAIT"):
         terminate_process_group(process)
         raise RuntimeError(
             "bounded POSIX process cleanup requires waitid with WNOWAIT"

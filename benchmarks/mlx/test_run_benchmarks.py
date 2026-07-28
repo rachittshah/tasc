@@ -248,103 +248,6 @@ class ReproducibleEnvironmentTest(unittest.TestCase):
 
 
 class BoundedProcessTest(unittest.TestCase):
-    def test_macos_python_312_observes_exit_with_kqueue_without_reaping(
-        self,
-    ) -> None:
-        class FakeKqueue:
-            def __init__(self) -> None:
-                self.calls: list[tuple[object, int, float | int]] = []
-                self.closed = False
-
-            def control(
-                self,
-                changes: object,
-                max_events: int,
-                timeout: object,
-            ) -> list[object]:
-                self.calls.append((changes, max_events, timeout))
-                return [] if max_events == 0 else [object()]
-
-            def close(self) -> None:
-                self.closed = True
-
-        queue = FakeKqueue()
-        sentinel_event = object()
-        fake_process = mock.Mock(pid=1234)
-        kevent = mock.Mock(return_value=sentinel_event)
-        kqueue_api = {
-            "kqueue": mock.Mock(return_value=queue),
-            "kevent": kevent,
-            "KQ_FILTER_PROC": 1,
-            "KQ_EV_ADD": 2,
-            "KQ_EV_ENABLE": 4,
-            "KQ_EV_ONESHOT": 8,
-            "KQ_NOTE_EXIT": 16,
-        }
-
-        with mock.patch.multiple(
-            run_benchmarks.select,
-            create=True,
-            **kqueue_api,
-        ):
-            run_benchmarks.wait_for_macos_leader_exit_without_reaping(
-                fake_process,
-                time.monotonic() + 1,
-                bytearray(),
-            )
-
-        kevent.assert_called_once_with(
-            1234,
-            filter=1,
-            flags=2 | 4 | 8,
-            fflags=16,
-        )
-        self.assertEqual(queue.calls[0], ([sentinel_event], 0, 0))
-        self.assertIsNone(queue.calls[1][0])
-        self.assertEqual(queue.calls[1][1], 1)
-        self.assertTrue(queue.closed)
-        fake_process.poll.assert_not_called()
-        fake_process.wait.assert_not_called()
-
-    def test_macos_python_312_uses_darwin_kqueue_constant_fallbacks(
-        self,
-    ) -> None:
-        class FakeKqueue:
-            def control(
-                self,
-                changes: object,
-                max_events: int,
-                timeout: object,
-            ) -> list[object]:
-                return [] if max_events == 0 else [object()]
-
-            def close(self) -> None:
-                pass
-
-        queue = FakeKqueue()
-        kevent = mock.Mock(return_value=object())
-        select_without_constants = argparse.Namespace(
-            kqueue=mock.Mock(return_value=queue),
-            kevent=kevent,
-        )
-
-        with (
-            mock.patch.object(run_benchmarks, "select", select_without_constants),
-            mock.patch.object(run_benchmarks.sys, "platform", "darwin"),
-        ):
-            run_benchmarks.wait_for_macos_leader_exit_without_reaping(
-                mock.Mock(pid=1234),
-                time.monotonic() + 1,
-                bytearray(),
-            )
-
-        kevent.assert_called_once_with(
-            1234,
-            filter=-5,
-            flags=0x0001 | 0x0004 | 0x0010,
-            fflags=0x80000000,
-        )
-
     def test_darwin_accepts_zombie_only_group_eperm_after_exit_event(
         self,
     ) -> None:
@@ -376,6 +279,25 @@ class BoundedProcessTest(unittest.TestCase):
             self.assertRaises(PermissionError),
         ):
             run_benchmarks.terminate_process_group(mock.Mock(pid=1234))
+
+    def test_fails_closed_without_nonreaping_waitid(self) -> None:
+        process = mock.Mock(pid=1234)
+        with (
+            mock.patch.object(run_benchmarks.os, "waitid", None),
+            mock.patch.object(run_benchmarks.os, "WNOWAIT", None),
+            mock.patch.object(
+                run_benchmarks,
+                "terminate_process_group",
+            ) as terminate,
+            self.assertRaisesRegex(RuntimeError, "waitid with WNOWAIT"),
+        ):
+            run_benchmarks.reap_leader_after_group_shutdown(
+                process,
+                time.monotonic() + 1,
+                bytearray(),
+            )
+
+        terminate.assert_called_once_with(process)
 
     def test_excludes_unrelated_environment_and_captures_success(self) -> None:
         environment = run_benchmarks.reduced_environment(

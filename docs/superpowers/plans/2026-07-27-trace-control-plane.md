@@ -1031,7 +1031,7 @@ Create separate named checks for:
 - macOS Node 22 and 24;
 - typecheck/build/package smoke;
 - Vitest coverage with justified thresholds;
-- Python 3.12 parser/safety tests without MLX hardware;
+- Python 3.13 parser/safety tests without MLX hardware;
 - dependency audit;
 - CodeQL;
 - release dry run.

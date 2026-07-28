@@ -85,6 +85,10 @@ jobs:
       - name: Install exact dependencies
         run: npm ci --ignore-scripts
       - name: Run the complete test suite
+        env:
+          # TASC artifact custody deliberately rejects symlinked roots. macOS
+          # exposes /var as a symlink, so exercise the canonical temp root.
+          TMPDIR: ${{ runner.os == 'macOS' && '/private/tmp' || '/tmp' }}
         run: npm test
 
   package-smoke:
@@ -197,7 +201,7 @@ jobs:
         run: npm audit --package-lock-only --audit-level=high
 
   mlx-parser-security:
-    name: MLX parser safety (${{ matrix.os }}, Python 3.12)
+    name: MLX parser safety (${{ matrix.os }}, Python 3.13)
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     strategy:
@@ -211,10 +215,10 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Set up Python 3.12
+      - name: Set up Python 3.13
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
-          python-version: "3.12"
+          python-version: "3.13"
       - name: Compile the benchmark boundary
         run: python -m py_compile benchmarks/mlx/run_benchmarks.py
       - name: Run parser and process-containment tests without MLX
