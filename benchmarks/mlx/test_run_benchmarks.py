@@ -471,7 +471,10 @@ else:
             ):
                 result = run_benchmarks.run(args)
 
-            self.assertEqual(result, output / "throughput.json")
+            self.assertEqual(
+                result,
+                output.resolve() / "throughput.json",
+            )
             self.assertEqual(
                 sorted(path.name for path in output.iterdir()),
                 ["quality.json", "raw", "throughput.json"],
