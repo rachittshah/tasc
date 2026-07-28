@@ -284,7 +284,7 @@ function legacyFailure(
     return Object.freeze({
       exitCode: 4,
       code: "OUTPUT_FAILURE",
-      message: "Output directory already exists; fresh output required.",
+      message: "Artifact publication failed; a fresh output directory is required.",
     });
   }
 

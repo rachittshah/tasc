@@ -180,7 +180,9 @@ describe("TASC CLI synthetic end-to-end example", () => {
       "--out", holdoutOne,
     ]);
     expect(reusedConfirmation.status).not.toBe(0);
-    expect(reusedConfirmation.stderr).toMatch(/output directory.*already exists.*fresh/i);
+    expect(reusedConfirmation.stderr).toMatch(
+      /artifact publication failed.*fresh output directory/i,
+    );
     expect(await digest(resolve(holdoutOne, "confirmation.json"))).toBe(confirmationBefore);
 
     const confirmation = await json(resolve(holdoutOne, "confirmation.json"));
@@ -285,7 +287,9 @@ describe("TASC CLI synthetic end-to-end example", () => {
       "nominate", "--spec", impossibleSpecPath, "--measurements", DEV, "--out", reusedOut,
     ]);
     expect(staleAttempt.status).not.toBe(0);
-    expect(staleAttempt.stderr).toMatch(/output directory.*already exists.*fresh/i);
+    expect(staleAttempt.stderr).toMatch(
+      /artifact publication failed.*fresh output directory/i,
+    );
     expect(staleAttempt.stdout).not.toContain("NO_CANDIDATE");
     expect(await digest(resolve(reusedOut, "nomination.json"))).toBe(originalNominationDigest);
 
@@ -492,7 +496,7 @@ describe("TASC CLI synthetic end-to-end example", () => {
     ]);
     expect(duplicate.status).not.toBe(0);
     expect(duplicate.stderr).toMatch(/invalid spec JSON.*duplicate-key/i);
-    expect(() => readdir(output)).rejects.toThrow();
+    await expect(readdir(output)).rejects.toThrow();
 
     const secret = "Bearer planted-cli-secret-must-not-echo";
     const malformedPath = resolve(root, "malformed-secret.json");
@@ -513,7 +517,7 @@ describe("TASC CLI synthetic end-to-end example", () => {
     expect(malformed.status).not.toBe(0);
     expect(malformed.stderr).toMatch(/invalid measurement JSON.*invalid-utf8/i);
     expect(malformed.stderr).not.toContain(secret);
-    expect(() => readdir(output)).rejects.toThrow();
+    await expect(readdir(output)).rejects.toThrow();
 
     const oversizedPath = resolve(root, "oversized.json");
     await writeFile(
@@ -528,7 +532,7 @@ describe("TASC CLI synthetic end-to-end example", () => {
     ]);
     expect(oversized.status).not.toBe(0);
     expect(oversized.stderr).toMatch(/invalid measurement JSON.*byte-limit/i);
-    expect(() => readdir(output)).rejects.toThrow();
+    await expect(readdir(output)).rejects.toThrow();
   }, 30_000);
 
   it("never reflects legacy source values or output paths", async () => {
@@ -575,7 +579,7 @@ describe("TASC CLI synthetic end-to-end example", () => {
     ]);
     expect(repeated.status).toBe(4);
     expect(repeated.stderr).toContain(
-      "Output directory already exists; fresh output required.",
+      "Artifact publication failed; a fresh output directory is required.",
     );
     expect(repeated.stderr).not.toContain(pathSecret);
   }, 30_000);

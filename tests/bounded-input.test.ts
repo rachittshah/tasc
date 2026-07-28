@@ -631,6 +631,20 @@ describe("async bounded readers", () => {
     })).rejects.toMatchObject({ code: "chunk-limit" });
   });
 
+  it("scales chunk work for a large byte budget without rejecting common small chunks", async () => {
+    function* chunks(): Generator<Uint8Array> {
+      for (let index = 0; index <= MAX_BOUNDED_INPUT_CHUNKS; index += 1) {
+        yield Uint8Array.of(0x20);
+      }
+      yield bytes("null");
+    }
+
+    await expect(readBoundedJson(chunks(), {
+      ...jsonLimits,
+      maxBytes: 128 * 1024 * 1024,
+    })).resolves.toBeNull();
+  });
+
   it("keeps UTF-8 fatal when an invalid sequence is split across chunks", async () => {
     const chunks = [
       Uint8Array.from([0x22, 0xc3]),

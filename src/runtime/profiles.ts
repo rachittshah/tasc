@@ -414,7 +414,7 @@ const profiles = [
       },
       modelDiscovery: {
         state: "supported",
-        note: "The native v1 model-list route is documented.",
+        note: "The OpenAI-compatible /v1/models route is documented.",
       },
       liveness: {
         state: "unknown",

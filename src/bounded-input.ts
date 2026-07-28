@@ -56,6 +56,18 @@ export type BoundedInputErrorCode =
  * bound iterator overhead when a source yields one byte per chunk.
  */
 export const MAX_BOUNDED_INPUT_CHUNKS = 16_384;
+const MAX_SCALED_BOUNDED_INPUT_CHUNKS = 131_072;
+const MIN_EXPECTED_STREAM_CHUNK_BYTES = 1_024;
+
+function maximumBoundedInputChunks(maxBytes: number): number {
+  return Math.min(
+    MAX_SCALED_BOUNDED_INPUT_CHUNKS,
+    Math.max(
+      MAX_BOUNDED_INPUT_CHUNKS,
+      Math.ceil(maxBytes / MIN_EXPECTED_STREAM_CHUNK_BYTES),
+    ),
+  );
+}
 
 const ERROR_MESSAGES: Readonly<Record<BoundedInputErrorCode, string>> = Object.freeze({
   "byte-limit": "input exceeds the configured byte limit",
@@ -867,6 +879,7 @@ async function collectBoundedBytes(
   let collected = new Uint8Array(0);
   let totalBytes = 0;
   let chunksAccepted = 0;
+  const maximumChunks = maximumBoundedInputChunks(limits.maxBytes);
   let collectorFailure: BoundedInputError | undefined;
 
   const rejectCollectorInput = (code: BoundedInputErrorCode): never => {
@@ -897,7 +910,7 @@ async function collectBoundedBytes(
   };
 
   const acceptChunk = (candidate: unknown): void => {
-    if (chunksAccepted >= MAX_BOUNDED_INPUT_CHUNKS) {
+    if (chunksAccepted >= maximumChunks) {
       return rejectCollectorInput("chunk-limit");
     }
     const inspected = inspectByteView(candidate);
