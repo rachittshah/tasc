@@ -23,6 +23,11 @@ import type {
   RuntimeHttpLimits,
   RuntimeWireDispatchState,
   RuntimeWireErrorCode,
+  RuntimeCapabilityAuthorization,
+  RuntimeCapabilityProbeInput,
+  RuntimeCapabilityProbeResult,
+  RuntimeInvocationInput,
+  RuntimeInvocationOutcome,
 } from "../src/index.js";
 
 type TaskEightPublicTypes = [
@@ -62,6 +67,16 @@ type RuntimeTransportPublicTypes = [
 
 const runtimeTransportPublicTypeCount:
   RuntimeTransportPublicTypes["length"] = 9;
+
+type RuntimeCallPublicTypes = [
+  RuntimeCapabilityAuthorization,
+  RuntimeCapabilityProbeInput,
+  RuntimeCapabilityProbeResult,
+  RuntimeInvocationInput,
+  RuntimeInvocationOutcome,
+];
+
+const runtimeCallPublicTypeCount: RuntimeCallPublicTypes["length"] = 5;
 
 describe("standalone public API", () => {
   it("exports the complete policy-lab surface from one package entry point", () => {
@@ -134,10 +149,19 @@ describe("standalone public API", () => {
       parseBoundedJsonSse: expect.any(Function),
       parseBoundedNdjsonStream: expect.any(Function),
       parsePrometheusText: expect.any(Function),
+      RUNTIME_PROBE_VERSION: "tasc-runtime-probe-v1",
+      RUNTIME_CAPABILITY_AUTHORIZATION_VERSION:
+        "tasc-runtime-capability-authorization-v1",
+      RuntimeProbeInputError: expect.any(Function),
+      probeRuntimeCapability: expect.any(Function),
+      RUNTIME_INVOCATION_VERSION: "tasc-runtime-invocation-v1",
+      RuntimeInvocationInputError: expect.any(Function),
+      invokeRuntime: expect.any(Function),
     });
     expect(taskEightPublicTypeCount).toBe(11);
     expect(controllerPublicTypeCount).toBe(2);
     expect(runtimeTransportPublicTypeCount).toBe(9);
+    expect(runtimeCallPublicTypeCount).toBe(5);
   });
 
   it("keeps deterministic identities independent of object insertion order", () => {
@@ -167,5 +191,8 @@ describe("standalone public API", () => {
     expect(tasc).not.toHaveProperty("promoteDeployment");
     expect(tasc).not.toHaveProperty("rollbackDeployment");
     expect(tasc).not.toHaveProperty("consumePinnedCollectorRequest");
+    expect(tasc).not.toHaveProperty(
+      "verifyRuntimeCapabilityAuthorization",
+    );
   });
 });

@@ -364,6 +364,7 @@ export type {
   RuntimeCapability,
   RuntimeCapabilityEvidence,
   RuntimeCapabilityEvidenceMap,
+  RuntimeCapabilityIdentityVerification,
   RuntimeCapabilityExpectations,
   RuntimeCapabilityProbeEvidence,
   RuntimeDocumentationSource,
@@ -371,6 +372,7 @@ export type {
   RuntimeInferenceRoute,
   RuntimeInferenceWireProtocol,
   RuntimeInstanceIdentity,
+  RuntimeIdentityVerificationBasis,
   RuntimeLocality,
   RuntimeMetricsRoute,
   RuntimeModelRoute,
@@ -501,3 +503,39 @@ export type {
   PrometheusSample,
   PrometheusTextOptions,
 } from "./runtime/metrics.js";
+export {
+  RUNTIME_CAPABILITY_AUTHORIZATION_VERSION,
+  RUNTIME_PROBE_VERSION,
+  RuntimeProbeInputError,
+  probeRuntimeCapability,
+} from "./runtime/probe.js";
+export type {
+  RuntimeCapabilityAuthorization,
+  RuntimeCapabilityAuthorizationExpectation,
+  RuntimeCapabilityProbeInput,
+  RuntimeCapabilityProbeResult,
+  RuntimeProbeCapability,
+  RuntimeProbeInputErrorCode,
+  RuntimeProbeObservation,
+  RuntimeProbeObservationEffect,
+} from "./runtime/probe.js";
+export {
+  RUNTIME_INVOCATION_VERSION,
+  RuntimeInvocationInputError,
+  invokeRuntime,
+} from "./runtime/invoke.js";
+export type {
+  RuntimeAbortLifecycle,
+  RuntimeChatMessage,
+  RuntimeGenerationRequest,
+  RuntimeInvocationInput,
+  RuntimeInvocationInputErrorCode,
+  RuntimeInvocationOutcome,
+  RuntimeInvocationOutput,
+  RuntimeInvocationPersistence,
+  RuntimeInvocationRoute,
+  RuntimeInvocationStatus,
+  RuntimeProviderTiming,
+  RuntimeProviderUsage,
+  RuntimeRequestedModel,
+} from "./runtime/invoke.js";

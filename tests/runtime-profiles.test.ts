@@ -16,6 +16,29 @@ import {
 } from "../src/index.js";
 
 const DIGEST = `sha256:${"a".repeat(64)}`;
+const UNVERIFIED_IDENTITY = Object.freeze({
+  endpointBinding: "operator-policy" as const,
+  runtimeBuild: {
+    basis: "operator-policy" as const,
+    observed: null,
+  },
+  backend: {
+    basis: "unverified" as const,
+    observed: null,
+  },
+  modelId: {
+    basis: "unverified" as const,
+    observed: null,
+  },
+  modelRevision: {
+    basis: "unverified" as const,
+    observed: null,
+  },
+  configurationDigest: {
+    basis: "unverified" as const,
+    observed: null,
+  },
+});
 
 describe("build-pinned runtime registry", () => {
   it("models the documented endpoint shapes for each runtime snapshot", () => {
@@ -257,6 +280,7 @@ describe("build-pinned runtime registry", () => {
       capability: "cancellation",
       state: "supported",
       probedAt: "2026-07-28T12:00:00.000Z",
+      identityVerification: UNVERIFIED_IDENTITY,
       ...instance,
     };
 
@@ -302,6 +326,7 @@ describe("build-pinned runtime registry", () => {
       capability: "cancellation",
       state: "supported",
       probedAt: "2026-07-28T12:00:00.000Z",
+      identityVerification: UNVERIFIED_IDENTITY,
       ...instance,
     };
 
@@ -370,6 +395,7 @@ describe("build-pinned runtime registry", () => {
       capability: "liveness",
       state: "supported",
       probedAt: "2026-07-28T12:00:00.000Z",
+      identityVerification: UNVERIFIED_IDENTITY,
       ...instance,
     };
     const probed = resolveRuntimeCapabilities(instance, [probe]);
@@ -400,6 +426,7 @@ describe("build-pinned runtime registry", () => {
       capability: "cancellation",
       state: "supported",
       probedAt: "2026-07-28T12:00:00.000Z",
+      identityVerification: UNVERIFIED_IDENTITY,
       endpointDescriptorDigest: `sha256:${"b".repeat(64)}`,
       runtime: { profileId: "vllm", build: "0.26.0" },
       backend: { name: "cuda", build: "13.0" },

@@ -89,6 +89,13 @@ export interface RuntimeCapabilityProbeEvidence {
   readonly capability: RuntimeCapability;
   readonly state: CapabilityState;
   readonly probedAt: string;
+  /**
+   * The instance fields below are the configured scope of the observation,
+   * not an assertion that every identity dimension was provider-reported.
+   * This record makes the evidence basis explicit and keeps unobserved values
+   * null instead of laundering caller configuration into live proof.
+   */
+  readonly identityVerification: RuntimeCapabilityIdentityVerification;
   readonly endpointDescriptorDigest: string;
   readonly runtime: RuntimeBuildIdentity;
   readonly backend: {
@@ -100,6 +107,38 @@ export interface RuntimeCapabilityProbeEvidence {
     readonly revision: string;
   };
   readonly configurationDigest: string;
+}
+
+export type RuntimeIdentityVerificationBasis =
+  | "operator-policy"
+  | "provider-reported"
+  | "unverified";
+
+export interface RuntimeCapabilityIdentityVerification {
+  readonly endpointBinding: "operator-policy";
+  readonly runtimeBuild: {
+    readonly basis: "operator-policy" | "provider-reported";
+    readonly observed: string | null;
+  };
+  readonly backend: {
+    readonly basis: "unverified" | "provider-reported";
+    readonly observed: {
+      readonly name: string;
+      readonly build: string;
+    } | null;
+  };
+  readonly modelId: {
+    readonly basis: "unverified" | "provider-reported";
+    readonly observed: string | null;
+  };
+  readonly modelRevision: {
+    readonly basis: "unverified" | "provider-reported";
+    readonly observed: string | null;
+  };
+  readonly configurationDigest: {
+    readonly basis: "unverified" | "provider-reported";
+    readonly observed: string | null;
+  };
 }
 
 export interface UnestablishedCapabilityExpectation {

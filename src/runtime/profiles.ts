@@ -10,6 +10,7 @@ import {
   type ResolvedRuntimeProfile,
   type RuntimeCapability,
   type RuntimeCapabilityEvidenceMap,
+  type RuntimeCapabilityIdentityVerification,
   type RuntimeCapabilityExpectations,
   type RuntimeCapabilityProbeEvidence,
   type RuntimeDocumentationSource,
@@ -1329,8 +1330,161 @@ const PROBE_KEYS = new Set([
   "capability",
   "state",
   "probedAt",
+  "identityVerification",
   ...INSTANCE_KEYS,
 ]);
+
+const IDENTITY_VERIFICATION_KEYS = new Set([
+  "endpointBinding",
+  "runtimeBuild",
+  "backend",
+  "modelId",
+  "modelRevision",
+  "configurationDigest",
+]);
+const BASIS_OBSERVATION_KEYS = new Set(["basis", "observed"]);
+
+function parseCapabilityIdentityVerification(
+  input: unknown,
+  instance: RuntimeInstanceIdentity,
+): RuntimeCapabilityIdentityVerification {
+  const verification = snapshotRecord(
+    input,
+    "runtime capability identity verification",
+    IDENTITY_VERIFICATION_KEYS,
+  );
+  if (verification.endpointBinding !== "operator-policy") {
+    throw new Error(
+      "runtime capability endpoint binding must be operator-policy scoped",
+    );
+  }
+  const runtimeBuild = snapshotRecord(
+    verification.runtimeBuild,
+    "runtime build verification",
+    BASIS_OBSERVATION_KEYS,
+  );
+  if (
+    runtimeBuild.basis !== "operator-policy"
+    && runtimeBuild.basis !== "provider-reported"
+  ) {
+    throw new Error("runtime build verification basis is invalid");
+  }
+  const runtimeBuildObserved = runtimeBuild.observed === null
+    ? null
+    : requiredBoundedString(
+      runtimeBuild.observed,
+      "observed runtime build",
+    );
+  if (
+    (runtimeBuild.basis === "operator-policy"
+      && runtimeBuildObserved !== null)
+    || (
+      runtimeBuild.basis === "provider-reported"
+      && runtimeBuildObserved !== instance.runtime.build
+    )
+  ) {
+    throw new Error("runtime build verification is inconsistent");
+  }
+
+  const backend = snapshotRecord(
+    verification.backend,
+    "runtime backend verification",
+    BASIS_OBSERVATION_KEYS,
+  );
+  if (
+    backend.basis !== "unverified"
+    && backend.basis !== "provider-reported"
+  ) {
+    throw new Error("runtime backend verification basis is invalid");
+  }
+  const backendObserved = backend.observed === null
+    ? null
+    : parseBackendIdentity(backend.observed);
+  if (
+    (backend.basis === "unverified" && backendObserved !== null)
+    || (
+      backend.basis === "provider-reported"
+      && (
+        backendObserved === null
+        || backendObserved.name !== instance.backend.name
+        || backendObserved.build !== instance.backend.build
+      )
+    )
+  ) {
+    throw new Error("runtime backend verification is inconsistent");
+  }
+
+  const parseIdentityPart = (
+    value: unknown,
+    label: string,
+    expected: string,
+    digest = false,
+  ): {
+    readonly basis: "unverified" | "provider-reported";
+    readonly observed: string | null;
+  } => {
+    const part = snapshotRecord(
+      value,
+      label,
+      BASIS_OBSERVATION_KEYS,
+    );
+    if (
+      part.basis !== "unverified"
+      && part.basis !== "provider-reported"
+    ) {
+      throw new Error(`${label} basis is invalid`);
+    }
+    const observed = part.observed === null
+      ? null
+      : digest
+        ? requiredDigest(part.observed, label)
+        : requiredBoundedString(part.observed, label);
+    if (
+      (part.basis === "unverified" && observed !== null)
+      || (
+        part.basis === "provider-reported"
+        && observed !== expected
+      )
+    ) {
+      throw new Error(`${label} is inconsistent`);
+    }
+    return Object.freeze({
+      basis: part.basis,
+      observed,
+    });
+  };
+  const modelId = parseIdentityPart(
+    verification.modelId,
+    "model id verification",
+    instance.model.id,
+  );
+  const modelRevision = parseIdentityPart(
+    verification.modelRevision,
+    "model revision verification",
+    instance.model.revision,
+  );
+  const configurationDigest = parseIdentityPart(
+    verification.configurationDigest,
+    "configuration digest verification",
+    instance.configurationDigest,
+    true,
+  );
+
+  return deepFreezeRuntimeValue({
+    endpointBinding: "operator-policy",
+    runtimeBuild: {
+      basis: runtimeBuild.basis,
+      observed: runtimeBuildObserved,
+    },
+    backend: {
+      basis: backend.basis,
+      observed: backendObserved,
+    },
+    modelId,
+    modelRevision,
+    configurationDigest,
+  });
+}
 
 export function parseRuntimeCapabilityProbeEvidence(
   input: unknown,
@@ -1380,12 +1534,17 @@ export function parseRuntimeCapabilityProbeEvidence(
     model: snapshot.model,
     configurationDigest: snapshot.configurationDigest,
   });
+  const identityVerification = parseCapabilityIdentityVerification(
+    snapshot.identityVerification,
+    instance,
+  );
   return deepFreezeRuntimeValue({
     schemaVersion: "tasc-runtime-capability-probe-v1",
     source: "live-probe",
     capability: snapshot.capability as RuntimeCapability,
     state: snapshot.state,
     probedAt,
+    identityVerification,
     ...instance,
   });
 }
