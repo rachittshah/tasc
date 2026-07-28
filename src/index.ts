@@ -48,8 +48,10 @@ export {
   MAX_ARTIFACT_TOTAL_BYTES,
   NO_DEPLOYMENT_AUTHORITY,
   PURE_NODE_NAMESPACE_LIMITATION,
+  readArtifactPacketIfPresent,
   verifyArtifactPacket,
   writeArtifactPacket,
+  writeArtifactPacketOrVerifyIdentical,
 } from "./artifacts.js";
 export type {
   ArtifactDurability,
@@ -59,7 +61,10 @@ export type {
   ArtifactPacketDescriptor,
   ArtifactPacketInput,
   ArtifactPayload,
+  ArtifactReadPayload,
+  ArtifactReadResult,
   ArtifactVerificationOptions,
+  ArtifactWriteOrVerifyResult,
   ArtifactWriteResult,
   ArtifactWriterOptions,
   AssessmentPacket,

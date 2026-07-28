@@ -22,8 +22,10 @@ import {
   NO_DEPLOYMENT_AUTHORITY,
   PURE_NODE_NAMESPACE_LIMITATION,
   nodeArtifactFilesystem,
+  readArtifactPacketIfPresent,
   verifyArtifactPacket,
   writeArtifactPacket,
+  writeArtifactPacketOrVerifyIdentical,
   type ArtifactFileHandle,
   type ArtifactFilesystem,
   type ArtifactPacketInput,
@@ -777,5 +779,338 @@ describe("packet verification", () => {
       "packet",
       { filesystem: boundedFilesystem },
     )).resolves.toMatchObject({ path: join(root, "packet") });
+  });
+});
+
+describe("resumable immutable artifact packets", () => {
+  it("returns null only for an absent target and exposes final verified copies", async () => {
+    const root = await freshRoot();
+    await expect(readArtifactPacketIfPresent(root, "missing")).resolves.toBeNull();
+    await writeArtifactPacket(root, "packet", packet());
+
+    const reads = new Map<string, number>();
+    const boundedFilesystem: ArtifactFilesystem = {
+      ...nodeArtifactFilesystem,
+      async readFile() {
+        throw new Error("unbounded path-level readFile is forbidden");
+      },
+      async open(path, flags, fileMode) {
+        const handle = await nodeArtifactFilesystem.open(path, flags, fileMode);
+        if (flags === "r" && path.startsWith(join(root, "packet", ""))) {
+          const name = basename(path);
+          reads.set(name, (reads.get(name) ?? 0) + 1);
+        }
+        return handle;
+      },
+    };
+
+    const result = await readArtifactPacketIfPresent(root, "packet", {
+      filesystem: boundedFilesystem,
+    });
+    expect(result).not.toBeNull();
+    expect(result!.path).toBe(join(root, "packet"));
+    expect(result!.files.map((file) => file.name)).toEqual([
+      "a.txt",
+      "b.json",
+    ]);
+    expect(result!.files.map(
+      (file) => Buffer.from(file.copyBytes()).toString("utf8"),
+    ))
+      .toEqual(["alpha\n", '{"b":2}\n']);
+    expect([...reads.entries()].sort()).toEqual([
+      ["a.txt", 2],
+      ["b.json", 2],
+      [ARTIFACT_MANIFEST_FILENAME, 2],
+    ]);
+    expect(Object.keys(result!.files[0]!)).toEqual([
+      "name",
+      "copyBytes",
+      "mediaType",
+      "schemaVersion",
+    ]);
+    expect(Object.isFrozen(result)).toBe(true);
+    expect(Object.isFrozen(result!.files)).toBe(true);
+    expect(result!.files.every((file) => Object.isFrozen(file))).toBe(true);
+
+    const payload = result!.files[0]!;
+    const copyDescriptor = Reflect.getOwnPropertyDescriptor(
+      payload,
+      "copyBytes",
+    );
+    expect(copyDescriptor).toMatchObject({
+      enumerable: true,
+      writable: false,
+    });
+    expect(copyDescriptor).not.toHaveProperty("get");
+    const firstCopy = payload.copyBytes();
+    const secondCopy = payload.copyBytes();
+    expect(firstCopy).not.toBe(secondCopy);
+    firstCopy[0] = 0x78;
+    expect(Buffer.from(secondCopy).toString("utf8")).toBe("alpha\n");
+    expect(Buffer.from(payload.copyBytes()).toString("utf8"))
+      .toBe("alpha\n");
+    expect(digest(payload.copyBytes())).toBe(
+      result!.manifest.files[0]!.sha256,
+    );
+  });
+
+  it("fails closed for partial, symlinked, corrupt, and untrusted targets", async () => {
+    const root = await freshRoot();
+    await mkdir(join(root, "partial"), { mode: 0o700 });
+    await expect(readArtifactPacketIfPresent(root, "partial"))
+      .rejects.toMatchObject({ code: "ENOENT" });
+
+    await writeArtifactPacket(root, "packet", packet());
+    await symlink(join(root, "packet"), join(root, "linked"), "dir");
+    await expect(readArtifactPacketIfPresent(root, "linked"))
+      .rejects.toThrow(/symlink|regular directory/i);
+
+    await writeFile(join(root, "packet", "a.txt"), "tampered\n", {
+      mode: 0o600,
+    });
+    await expect(readArtifactPacketIfPresent(root, "packet"))
+      .rejects.toThrow(/hash|size|drift/i);
+
+    const base = await freshRoot();
+    const linkedRoot = join(base, "linked-root");
+    await symlink(root, linkedRoot, "dir");
+    await expect(readArtifactPacketIfPresent(linkedRoot, "missing"))
+      .rejects.toThrow(/symlink/i);
+  });
+
+  it("detects payload and directory mode drift during a verified read", async () => {
+    for (const attack of ["payload", "directory"] as const) {
+      const root = await freshRoot();
+      const target = join(root, "packet");
+      await writeArtifactPacket(root, "packet", packet());
+      let attacked = false;
+      let targetReads = 0;
+      const driftingFilesystem: ArtifactFilesystem = {
+        ...nodeArtifactFilesystem,
+        async open(path, flags, fileMode) {
+          const handle = await nodeArtifactFilesystem.open(
+            path,
+            flags,
+            fileMode,
+          );
+          if (
+            attack !== "payload"
+            || flags !== "r"
+            || basename(path) !== "a.txt"
+          ) {
+            return handle;
+          }
+          return {
+            writeFile: (bytes) => handle.writeFile(bytes),
+            chmod: (requestedMode) => handle.chmod(requestedMode),
+            async read(buffer, offset, length, position) {
+              const result = await handle.read(
+                buffer,
+                offset,
+                length,
+                position,
+              );
+              if (!attacked && result.bytesRead === 0) {
+                attacked = true;
+                await nodeArtifactFilesystem.chmod(path, 0o644);
+              }
+              return result;
+            },
+            stat: () => handle.stat(),
+            sync: () => handle.sync(),
+            close: () => handle.close(),
+          };
+        },
+        async readdir(path) {
+          const names = await nodeArtifactFilesystem.readdir(path);
+          if (attack === "directory" && path === target) {
+            targetReads += 1;
+            if (targetReads === 2) {
+              await nodeArtifactFilesystem.chmod(target, 0o755);
+            }
+          }
+          return names;
+        },
+      };
+
+      await expect(readArtifactPacketIfPresent(
+        root,
+        "packet",
+        { filesystem: driftingFilesystem },
+      )).rejects.toThrow(/mode|0600|0700|drift/i);
+    }
+  });
+
+  it("detects late drift of an earlier payload when a later file is opened", async () => {
+    for (let iteration = 0; iteration < 20; iteration += 1) {
+      const root = await freshRoot();
+      const target = join(root, "packet");
+      const earlierPath = join(target, "a.txt");
+      await writeArtifactPacket(root, "packet", packet());
+      const baseline = await lstat(earlierPath);
+      let attacked = false;
+      const lateDriftFilesystem: ArtifactFilesystem = {
+        ...nodeArtifactFilesystem,
+        async open(path, flags, fileMode) {
+          if (
+            !attacked
+            && flags === "r"
+            && path === join(target, "b.json")
+          ) {
+            attacked = true;
+            await writeFile(earlierPath, "omega\n", { mode: 0o600 });
+          }
+          return nodeArtifactFilesystem.open(path, flags, fileMode);
+        },
+        async lstat(path) {
+          const stats = await nodeArtifactFilesystem.lstat(path);
+          if (!attacked || path !== earlierPath) return stats;
+          return Object.assign(
+            Object.create(Object.getPrototypeOf(stats)),
+            stats,
+            {
+              ctimeMs: baseline.ctimeMs,
+              mtimeMs: baseline.mtimeMs,
+            },
+          ) as typeof stats;
+        },
+      };
+
+      await expect(readArtifactPacketIfPresent(
+        root,
+        "packet",
+        { filesystem: lateDriftFilesystem },
+      )).rejects.toThrow(/custody|drift/i);
+      expect(attacked).toBe(true);
+    }
+  });
+
+  it("writes once and verifies canonically identical existing bytes", async () => {
+    const root = await freshRoot();
+    const first = await writeArtifactPacketOrVerifyIdentical(
+      root,
+      "packet",
+      packet(),
+    );
+    expect(first.disposition).toBe("written");
+
+    let stagingCalls = 0;
+    const noWriteFilesystem: ArtifactFilesystem = {
+      ...nodeArtifactFilesystem,
+      async mkdtemp(prefix) {
+        stagingCalls += 1;
+        return nodeArtifactFilesystem.mkdtemp(prefix);
+      },
+    };
+    const reordered = packet([
+      {
+        name: "a.txt",
+        bytes: "alpha\n",
+        mediaType: "text/plain",
+        schemaVersion: "fixture-a-v1",
+      },
+      {
+        name: "b.json",
+        bytes: Buffer.from('{"b":2}\n'),
+        mediaType: "application/json",
+        schemaVersion: "fixture-b-v1",
+      },
+    ]);
+    const resumed = await writeArtifactPacketOrVerifyIdentical(
+      root,
+      "packet",
+      reordered,
+      { filesystem: noWriteFilesystem },
+    );
+    expect(resumed.disposition).toBe("verified-identical");
+    expect(resumed.manifest.packetDigest).toBe(first.manifest.packetDigest);
+    expect(stagingCalls).toBe(0);
+  });
+
+  it("preserves an existing packet and reports one deterministic conflict", async () => {
+    const root = await freshRoot();
+    await writeArtifactPacketOrVerifyIdentical(root, "packet", packet());
+    const conflicting = packet([{
+      name: "a.txt",
+      bytes: "different\n",
+      mediaType: "text/plain",
+      schemaVersion: "fixture-a-v1",
+    }]);
+
+    await expect(writeArtifactPacketOrVerifyIdentical(
+      root,
+      "packet",
+      conflicting,
+    )).rejects.toThrow(
+      "artifact target conflicts with the expected immutable packet",
+    );
+    expect(await readFile(join(root, "packet", "a.txt"), "utf8"))
+      .toBe("alpha\n");
+    expect(
+      (await readdir(root)).filter((name) => name.includes(".tasc-stage-")),
+    ).toEqual([]);
+
+    await writeFile(join(root, "packet", "a.txt"), "corrupt\n", {
+      mode: 0o600,
+    });
+    await expect(writeArtifactPacketOrVerifyIdentical(
+      root,
+      "packet",
+      packet(),
+    )).rejects.toThrow(/hash|size|drift/i);
+  });
+
+  it("converges concurrent identical writers and rejects a different rival", async () => {
+    {
+      const root = await freshRoot();
+      const results = await Promise.all([
+        writeArtifactPacketOrVerifyIdentical(root, "packet", packet()),
+        writeArtifactPacketOrVerifyIdentical(root, "packet", packet()),
+        writeArtifactPacketOrVerifyIdentical(root, "packet", packet()),
+      ]);
+      expect(results.map((result) => result.disposition).sort()).toEqual([
+        "verified-identical",
+        "verified-identical",
+        "written",
+      ]);
+      await expect(readArtifactPacketIfPresent(root, "packet")).resolves
+        .toMatchObject({ path: join(root, "packet") });
+      expect(
+        (await readdir(root)).filter((name) => name.includes(".tasc-stage-")),
+      ).toEqual([]);
+    }
+
+    {
+      const root = await freshRoot();
+      const left = packet([{
+        name: "record.json",
+        bytes: '{"winner":"left"}\n',
+        mediaType: "application/json",
+        schemaVersion: "shadow-record-v1",
+      }]);
+      const right = packet([{
+        name: "record.json",
+        bytes: '{"winner":"right"}\n',
+        mediaType: "application/json",
+        schemaVersion: "shadow-record-v1",
+      }]);
+      const results = await Promise.allSettled([
+        writeArtifactPacketOrVerifyIdentical(root, "record", left),
+        writeArtifactPacketOrVerifyIdentical(root, "record", right),
+      ]);
+      expect(results.filter((result) => result.status === "fulfilled"))
+        .toHaveLength(1);
+      const rejected = results.find((result) => result.status === "rejected");
+      expect(rejected).toMatchObject({
+        status: "rejected",
+        reason: {
+          message:
+            "artifact target conflicts with the expected immutable packet",
+        },
+      });
+      expect(
+        (await readdir(root)).filter((name) => name.includes(".tasc-stage-")),
+      ).toEqual([]);
+    }
   });
 });

@@ -136,6 +136,21 @@ export interface ArtifactWriteResult {
   readonly durability: ArtifactDurability;
 }
 
+export interface ArtifactReadPayload {
+  readonly name: string;
+  readonly copyBytes: () => Uint8Array;
+  readonly mediaType: string;
+  readonly schemaVersion: string;
+}
+
+export interface ArtifactReadResult extends ArtifactWriteResult {
+  readonly files: readonly ArtifactReadPayload[];
+}
+
+export interface ArtifactWriteOrVerifyResult extends ArtifactWriteResult {
+  readonly disposition: "written" | "verified-identical";
+}
+
 export interface ArtifactFileHandle {
   writeFile(bytes: Uint8Array): Promise<void>;
   chmod(mode: number): Promise<void>;
@@ -205,6 +220,22 @@ interface PathIdentity {
   readonly ino: number;
 }
 
+interface ArtifactMemberCustody extends PathIdentity {
+  readonly size: number;
+  readonly mode: number;
+  readonly ctimeMs: number;
+  readonly mtimeMs: number;
+}
+
+interface VerifiedPayloadSet {
+  readonly custody: readonly ArtifactMemberCustody[];
+}
+
+interface FinalVerifiedPacket {
+  readonly manifest: ArtifactManifest;
+  readonly payloads: readonly ArtifactReadPayload[];
+}
+
 interface TrustedRoot {
   readonly path: string;
   readonly realPath: string;
@@ -215,6 +246,15 @@ type SyncStatus = "unknown" | "supported" | "unsupported";
 
 interface SyncCapability {
   status: SyncStatus;
+}
+
+class ArtifactTargetExistsError extends Error {
+  readonly code = "TASC_ARTIFACT_TARGET_EXISTS";
+
+  constructor(path: string) {
+    super(`output directory "${path}" already exists; use a fresh --out path`);
+    this.name = "ArtifactTargetExistsError";
+  }
 }
 
 const safeSegmentPattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -593,13 +633,64 @@ async function assertPathAbsent(
     if (isMissing(error)) return;
     throw error;
   }
-  throw new Error(
-    `output directory "${path}" already exists; use a fresh --out path`,
-  );
+  throw new ArtifactTargetExistsError(path);
 }
 
 function fileMode(stats: Stats): number {
   return stats.mode & 0o777;
+}
+
+function memberCustody(path: string, stats: Stats): ArtifactMemberCustody {
+  return Object.freeze({
+    path,
+    dev: stats.dev,
+    ino: stats.ino,
+    size: stats.size,
+    mode: fileMode(stats),
+    ctimeMs: stats.ctimeMs,
+    mtimeMs: stats.mtimeMs,
+  });
+}
+
+function sameCustody(
+  expected: ArtifactMemberCustody,
+  stats: Stats,
+): boolean {
+  return (
+    sameIdentity(expected, stats)
+    && expected.size === stats.size
+    && expected.mode === fileMode(stats)
+    && expected.ctimeMs === stats.ctimeMs
+    && expected.mtimeMs === stats.mtimeMs
+  );
+}
+
+function assertRegularFileCustody(
+  expected: ArtifactMemberCustody,
+  stats: Stats,
+  label: string,
+): void {
+  if (
+    stats.isSymbolicLink()
+    || !stats.isFile()
+    || !sameCustody(expected, stats)
+  ) {
+    throw new Error(`${label} custody drifted`);
+  }
+}
+
+function assertDirectoryCustody(
+  expected: ArtifactMemberCustody,
+  stats: Stats,
+  label: string,
+): void {
+  if (
+    stats.isSymbolicLink()
+    || !stats.isDirectory()
+    || !sameCustody(expected, stats)
+  ) {
+    throw new Error(`${label} custody drifted`);
+  }
 }
 
 function sha256(bytes: Uint8Array): string {
@@ -830,7 +921,7 @@ async function verifyPayloadSet(
   files: readonly ArtifactManifestFile[],
   filesystem: ArtifactFilesystem,
   includeManifest: boolean,
-): Promise<void> {
+): Promise<VerifiedPayloadSet> {
   const expectedNames = sortedNames([
     ...files.map((file) => file.name),
     ...(includeManifest ? [ARTIFACT_MANIFEST_FILENAME] : []),
@@ -842,6 +933,7 @@ async function verifyPayloadSet(
       + `expected [${expectedNames.join(", ")}], got [${actualNames.join(", ")}]`,
     );
   }
+  const custody: ArtifactMemberCustody[] = [];
   for (const file of files) {
     const path = join(directory, file.name);
     const stats = await filesystem.lstat(path);
@@ -854,6 +946,7 @@ async function verifyPayloadSet(
     if (stats.size !== file.byteLength) {
       throw new Error(`artifact payload "${file.name}" size drifted`);
     }
+    const beforeCustody = memberCustody(path, stats);
     const bytes = await readBoundedFile(
       path,
       MAX_ARTIFACT_FILE_BYTES,
@@ -862,7 +955,24 @@ async function verifyPayloadSet(
     if (bytes.byteLength !== file.byteLength || sha256(bytes) !== file.sha256) {
       throw new Error(`artifact payload "${file.name}" hash or size drifted`);
     }
+    const statsAfter = await filesystem.lstat(path);
+    assertRegularFileCustody(
+      beforeCustody,
+      statsAfter,
+      `artifact payload "${file.name}"`,
+    );
+    custody.push(memberCustody(path, statsAfter));
   }
+  const finalNames = sortedNames(await filesystem.readdir(directory));
+  if (!sameStrings(finalNames, expectedNames)) {
+    throw new Error(
+      "artifact directory violates its exact allowlist; "
+      + `expected [${expectedNames.join(", ")}], got [${finalNames.join(", ")}]`,
+    );
+  }
+  return Object.freeze({
+    custody: Object.freeze(custody),
+  });
 }
 
 function durabilityFrom(
@@ -985,6 +1095,174 @@ function parseManifestBytes(bytes: Buffer): ArtifactManifest {
   return deepFreeze(manifest);
 }
 
+/**
+ * Re-read and hash every member after the initial pass, then perform one final
+ * metadata barrier. Returned payload factories close over only these final
+ * verified bytes. The documented Pure Node namespace limitation still applies
+ * after the final filesystem operation.
+ */
+async function verifyFinalPacketCustody(
+  root: TrustedRoot,
+  targetName: string,
+  directory: string,
+  targetRealPath: string,
+  requireFinalSegment: boolean,
+  directoryCustody: ArtifactMemberCustody,
+  initialManifest: ArtifactManifest,
+  initialManifestBytes: Buffer,
+  initialManifestCustody: ArtifactMemberCustody,
+  initialPayloadCustody: readonly ArtifactMemberCustody[],
+  filesystem: ArtifactFilesystem,
+  capturePayloads: boolean,
+): Promise<FinalVerifiedPacket> {
+  const files = initialManifest.files;
+  if (initialPayloadCustody.length !== files.length) {
+    throw new Error("artifact payload custody set is incomplete");
+  }
+  const expectedNames = sortedNames([
+    ...files.map((file) => file.name),
+    ARTIFACT_MANIFEST_FILENAME,
+  ]);
+  const actualNames = sortedNames(await filesystem.readdir(directory));
+  if (!sameStrings(actualNames, expectedNames)) {
+    throw new Error(
+      "artifact directory violates its exact allowlist; "
+      + `expected [${expectedNames.join(", ")}], got [${actualNames.join(", ")}]`,
+    );
+  }
+
+  const manifestBefore = await filesystem.lstat(initialManifestCustody.path);
+  assertRegularFileCustody(
+    initialManifestCustody,
+    manifestBefore,
+    "artifact manifest",
+  );
+  const finalManifestBytes = await readBoundedFile(
+    initialManifestCustody.path,
+    MAX_MANIFEST_BYTES,
+    filesystem,
+  );
+  const manifestBeforeCustody = memberCustody(
+    initialManifestCustody.path,
+    manifestBefore,
+  );
+  const manifestAfter = await filesystem.lstat(initialManifestCustody.path);
+  assertRegularFileCustody(
+    manifestBeforeCustody,
+    manifestAfter,
+    "artifact manifest",
+  );
+  if (!finalManifestBytes.equals(initialManifestBytes)) {
+    throw new Error("artifact manifest content drifted");
+  }
+  const finalManifest = parseManifestBytes(finalManifestBytes);
+  const finalManifestCustody = memberCustody(
+    initialManifestCustody.path,
+    manifestAfter,
+  );
+
+  const payloads: ArtifactReadPayload[] = [];
+  const finalPayloadCustody: ArtifactMemberCustody[] = [];
+  let totalBytes = 0;
+  for (let index = 0; index < files.length; index += 1) {
+    const file = files[index]!;
+    const expected = initialPayloadCustody[index]!;
+    const expectedPath = join(directory, file.name);
+    if (expected.path !== expectedPath) {
+      throw new Error("artifact payload custody order is inconsistent");
+    }
+    const before = await filesystem.lstat(expected.path);
+    assertRegularFileCustody(
+      expected,
+      before,
+      `artifact payload "${basename(expected.path)}"`,
+    );
+    const finalBytes = await readBoundedFile(
+      expected.path,
+      MAX_ARTIFACT_FILE_BYTES,
+      filesystem,
+    );
+    totalBytes += finalBytes.byteLength;
+    if (
+      !Number.isSafeInteger(totalBytes)
+      || totalBytes > MAX_ARTIFACT_TOTAL_BYTES
+    ) {
+      throw new Error(
+        `artifact packet exceeds the ${MAX_ARTIFACT_TOTAL_BYTES}-byte total limit`,
+      );
+    }
+    if (
+      finalBytes.byteLength !== file.byteLength
+      || sha256(finalBytes) !== file.sha256
+    ) {
+      throw new Error(`artifact payload "${file.name}" content drifted`);
+    }
+    const beforeCustody = memberCustody(expected.path, before);
+    const after = await filesystem.lstat(expected.path);
+    assertRegularFileCustody(
+      beforeCustody,
+      after,
+      `artifact payload "${file.name}"`,
+    );
+    finalPayloadCustody.push(memberCustody(expected.path, after));
+    if (capturePayloads) {
+      const verifiedBytes = Uint8Array.from(finalBytes);
+      const copyBytes = (): Uint8Array => Uint8Array.from(verifiedBytes);
+      payloads.push(Object.freeze({
+        name: file.name,
+        copyBytes,
+        mediaType: file.mediaType,
+        schemaVersion: file.schemaVersion,
+      }));
+    }
+  }
+
+  const finalNames = sortedNames(await filesystem.readdir(directory));
+  if (!sameStrings(finalNames, expectedNames)) {
+    throw new Error(
+      "artifact directory violates its exact allowlist; "
+      + `expected [${expectedNames.join(", ")}], got [${finalNames.join(", ")}]`,
+    );
+  }
+  assertRegularFileCustody(
+    finalManifestCustody,
+    await filesystem.lstat(finalManifestCustody.path),
+    "artifact manifest",
+  );
+  for (const expected of finalPayloadCustody) {
+    assertRegularFileCustody(
+      expected,
+      await filesystem.lstat(expected.path),
+      `artifact payload "${basename(expected.path)}"`,
+    );
+  }
+  assertDirectoryCustody(
+    directoryCustody,
+    await filesystem.lstat(directory),
+    "artifact target directory",
+  );
+
+  const finalRealPath = normalize(await filesystem.realpath(directory));
+  if (finalRealPath !== targetRealPath) {
+    throw new Error("artifact target realpath drifted during verification");
+  }
+  assertContained(
+    root.realPath,
+    finalRealPath,
+    requireFinalSegment ? targetName : undefined,
+  );
+  assertDirectoryCustody(
+    directoryCustody,
+    await filesystem.lstat(directory),
+    "artifact target directory",
+  );
+  await recheckTrustedRoot(root, filesystem);
+  return Object.freeze({
+    manifest: finalManifest,
+    payloads: Object.freeze(payloads),
+  });
+}
+
 async function verifyPacketDirectory(
   root: TrustedRoot,
   targetName: string,
@@ -992,7 +1270,8 @@ async function verifyPacketDirectory(
   filesystem: ArtifactFilesystem,
   requireFinalSegment = true,
   expectedManifestDigest?: string,
-): Promise<ArtifactWriteResult> {
+  capturePayloads = false,
+): Promise<ArtifactReadResult> {
   const directoryStats = await filesystem.lstat(directory);
   if (directoryStats.isSymbolicLink() || !directoryStats.isDirectory()) {
     throw new Error("artifact target must be a regular directory, not a symlink");
@@ -1000,6 +1279,7 @@ async function verifyPacketDirectory(
   if (fileMode(directoryStats) !== 0o700) {
     throw new Error("artifact target directory must have mode 0700");
   }
+  const directoryCustody = memberCustody(directory, directoryStats);
   const targetRealPath = normalize(await filesystem.realpath(directory));
   assertContained(
     root.realPath,
@@ -1015,13 +1295,20 @@ async function verifyPacketDirectory(
   if (fileMode(manifestStats) !== 0o600) {
     throw new Error("artifact manifest must have mode 0600");
   }
-  const manifest = parseManifestBytes(
-    await readBoundedFile(
-      manifestPath,
-      MAX_MANIFEST_BYTES,
-      filesystem,
-    ),
+  const manifestCustodyBefore = memberCustody(manifestPath, manifestStats);
+  const manifestBytes = await readBoundedFile(
+    manifestPath,
+    MAX_MANIFEST_BYTES,
+    filesystem,
   );
+  const manifestStatsAfter = await filesystem.lstat(manifestPath);
+  assertRegularFileCustody(
+    manifestCustodyBefore,
+    manifestStatsAfter,
+    "artifact manifest",
+  );
+  const manifestCustody = memberCustody(manifestPath, manifestStatsAfter);
+  const manifest = parseManifestBytes(manifestBytes);
   if (manifest.targetName !== targetName) {
     throw new Error("artifact manifest is bound to a different target name");
   }
@@ -1031,20 +1318,39 @@ async function verifyPacketDirectory(
   ) {
     throw new Error("pinned manifest digest mismatch");
   }
-  await verifyPayloadSet(directory, manifest.files, filesystem, true);
-  const directoryAfter = await filesystem.lstat(directory);
-  if (
-    directoryAfter.isSymbolicLink()
-    || !directoryAfter.isDirectory()
-    || !sameIdentity(identity(directory, directoryStats), directoryAfter)
-  ) {
-    throw new Error("artifact target directory drifted during verification");
-  }
-  await recheckTrustedRoot(root, filesystem);
-  return deepFreeze({
-    path: directory,
+  const verifiedPayloads = await verifyPayloadSet(
+    directory,
+    manifest.files,
+    filesystem,
+    true,
+  );
+  const finalPacket = await verifyFinalPacketCustody(
+    root,
+    targetName,
+    directory,
+    targetRealPath,
+    requireFinalSegment,
+    directoryCustody,
     manifest,
-    durability: manifest.durability,
+    manifestBytes,
+    manifestCustody,
+    verifiedPayloads.custody,
+    filesystem,
+    capturePayloads,
+  );
+  return Object.freeze({
+    path: directory,
+    manifest: finalPacket.manifest,
+    durability: finalPacket.manifest.durability,
+    files: finalPacket.payloads,
+  });
+}
+
+function writeResultFrom(read: ArtifactReadResult): ArtifactWriteResult {
+  return Object.freeze({
+    path: read.path,
+    manifest: read.manifest,
+    durability: read.durability,
   });
 }
 
@@ -1086,10 +1392,23 @@ export async function writeArtifactPacket(
   input: ArtifactPacketInput,
   options: ArtifactWriterOptions = {},
 ): Promise<ArtifactWriteResult> {
+  return writeSnapshottedArtifactPacket(
+    rootDirectory,
+    targetName,
+    snapshotPacket(input),
+    options,
+  );
+}
+
+async function writeSnapshottedArtifactPacket(
+  rootDirectory: string,
+  targetName: string,
+  packet: SnapshottedPacket,
+  options: ArtifactWriterOptions,
+): Promise<ArtifactWriteResult> {
   const rootPath = String(rootDirectory);
   const targetSnapshot = String(targetName);
   assertSafeTargetName(targetSnapshot);
-  const packet = snapshotPacket(input);
   const filesystem = options.filesystem ?? nodeArtifactFilesystem;
   const root = await inspectTrustedRoot(rootPath, filesystem);
   const targetPath = join(root.path, targetSnapshot);
@@ -1269,7 +1588,7 @@ export async function writeArtifactPacket(
         limitations,
       );
     }
-    return result;
+    return writeResultFrom(result);
   } catch (error) {
     operationError = error;
     const failures: unknown[] = [error];
@@ -1335,12 +1654,146 @@ export async function verifyArtifactPacket(
   const root = await inspectTrustedRoot(rootPath, filesystem);
   const targetPath = join(root.path, targetSnapshot);
   assertContained(root.path, targetPath, targetSnapshot);
-  return verifyPacketDirectory(
+  return writeResultFrom(await verifyPacketDirectory(
     root,
     targetSnapshot,
     targetPath,
     filesystem,
     true,
     expectedManifestDigest,
+  ));
+}
+
+/**
+ * Read a complete packet if it exists. Absence is recognized only for the
+ * final target segment; an incomplete target, missing payload, symlink, or
+ * custody drift is an error. Each payload exposes only a copy-returning data
+ * method backed by closure-private bytes from the bounded descriptor read that
+ * verified its manifest hash.
+ */
+export async function readArtifactPacketIfPresent(
+  rootDirectory: string,
+  targetName: string,
+  options: ArtifactVerificationOptions = {},
+): Promise<ArtifactReadResult | null> {
+  const rootPath = String(rootDirectory);
+  const targetSnapshot = String(targetName);
+  assertSafeTargetName(targetSnapshot);
+  const expectedManifestDigest = options.expectedManifestDigest;
+  if (
+    expectedManifestDigest !== undefined
+    && !sha256Pattern.test(expectedManifestDigest)
+  ) {
+    throw new Error(
+      "expected manifest digest must be a lowercase SHA-256 digest",
+    );
+  }
+  const filesystem = options.filesystem ?? nodeArtifactFilesystem;
+  const root = await inspectTrustedRoot(rootPath, filesystem);
+  const targetPath = join(root.path, targetSnapshot);
+  assertContained(root.path, targetPath, targetSnapshot);
+
+  for (let check = 0; check < 2; check += 1) {
+    try {
+      await filesystem.lstat(targetPath);
+    } catch (error) {
+      if (!isMissing(error)) throw error;
+      await recheckTrustedRoot(root, filesystem);
+      continue;
+    }
+    return verifyPacketDirectory(
+      root,
+      targetSnapshot,
+      targetPath,
+      filesystem,
+      true,
+      expectedManifestDigest,
+      true,
+    );
+  }
+  return null;
+}
+
+const IMMUTABLE_PACKET_CONFLICT =
+  "artifact target conflicts with the expected immutable packet";
+
+function isTargetPublicationCollision(error: unknown): boolean {
+  return (
+    error instanceof ArtifactTargetExistsError
+    || new Set(["EEXIST", "ENOTEMPTY"]).has(errorCode(error) ?? "")
   );
+}
+
+function matchingPacketResult(
+  result: ArtifactWriteResult,
+  expectedPacketDigest: string,
+  disposition: ArtifactWriteOrVerifyResult["disposition"],
+): ArtifactWriteOrVerifyResult {
+  if (result.manifest.packetDigest !== expectedPacketDigest) {
+    throw new Error(IMMUTABLE_PACKET_CONFLICT);
+  }
+  return Object.freeze({
+    path: result.path,
+    manifest: result.manifest,
+    durability: result.durability,
+    disposition,
+  });
+}
+
+/**
+ * Publish an immutable packet, or verify that a concurrently/previously
+ * published packet has the exact same canonical identity. Valid but different
+ * bytes always produce the same conflict error and are never overwritten.
+ */
+export async function writeArtifactPacketOrVerifyIdentical(
+  rootDirectory: string,
+  targetName: string,
+  input: ArtifactPacketInput,
+  options: ArtifactWriterOptions = {},
+): Promise<ArtifactWriteOrVerifyResult> {
+  const rootPath = String(rootDirectory);
+  const targetSnapshot = String(targetName);
+  assertSafeTargetName(targetSnapshot);
+  const packet = snapshotPacket(input);
+  const expectedPacketDigest = packetDigest(
+    targetSnapshot,
+    packet.descriptor,
+    expectedManifestFiles(packet.files),
+  );
+  const filesystem = options.filesystem ?? nodeArtifactFilesystem;
+  const existing = await readArtifactPacketIfPresent(
+    rootPath,
+    targetSnapshot,
+    { filesystem },
+  );
+  if (existing !== null) {
+    return matchingPacketResult(
+      existing,
+      expectedPacketDigest,
+      "verified-identical",
+    );
+  }
+
+  try {
+    const written = await writeSnapshottedArtifactPacket(
+      rootPath,
+      targetSnapshot,
+      packet,
+      { filesystem },
+    );
+    return matchingPacketResult(written, expectedPacketDigest, "written");
+  } catch (error) {
+    if (!isTargetPublicationCollision(error)) throw error;
+    const winner = await readArtifactPacketIfPresent(
+      rootPath,
+      targetSnapshot,
+      { filesystem },
+    );
+    if (winner === null) throw error;
+    return matchingPacketResult(
+      winner,
+      expectedPacketDigest,
+      "verified-identical",
+    );
+  }
 }
