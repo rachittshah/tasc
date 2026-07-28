@@ -1,82 +1,165 @@
 # Contributing to TASC
 
-TASC is small by design. Contributions should preserve deterministic decisions,
-explicit trust boundaries, and a narrow separation between measurement,
-recommendation, and production mutation.
+TASC is a trace-aware inference control plane. Contributions must preserve the
+architectural boundary:
 
-## Local setup
+- P0 is the out-of-band protocol, evidence, policy-assessment, and controller
+  layer.
+- P1 performs explicitly authorized, bounded inference observations.
+- Evaluator evidence is external input. Do not add an LLM-as-judge client,
+  hidden grading fallback, or score-generation wrapper.
+- No code path may deploy a model, mutate a serving endpoint, or synchronously
+  route a production request.
+
+## Set up
+
+Use Node.js 22 or 24 and the npm version declared in `package.json`:
 
 ```bash
-git clone git@github.com:rachittshah/tasc.git
-cd tasc
 npm ci
 npm run typecheck
 npm test
-npm run build
-npm run demo
 ```
 
-Use Node.js 22 or newer. Do not commit changes to `package-lock.json` unless
-`package.json` or dependency resolution intentionally changed.
+The MLX parser/security suite has no MLX or Hugging Face import-time dependency:
 
-## Change workflow
+```bash
+python3 -m unittest benchmarks/mlx/test_run_benchmarks.py
+```
 
-1. Create a focused branch from `main`.
-2. Add or update tests with every behavior change.
-3. Run the full validation set.
-4. Use a conventional commit such as `feat(policy): ...` or `fix(schema): ...`.
-5. Explain any metric, gate, artifact-schema, or trust-boundary change in the
-   pull request.
+Actual MLX benchmarks require Apple Silicon and the two hash-locked installation
+steps documented in [`benchmarks/mlx/README.md`](benchmarks/mlx/README.md).
 
-Before requesting review:
+## Before changing behavior
+
+1. Identify the contract and trust boundary affected.
+2. Add or update a focused failing test.
+3. Keep the implementation narrow and deterministic.
+4. Run the focused test, then the proportional repository gates.
+5. Update versioned fixtures and operator documentation when behavior changes.
+
+Do not weaken a bound merely to make a fixture pass. Explain and test any new
+byte, item, work, concurrency, or deadline ceiling.
+
+## Required local gates
+
+For TypeScript changes:
 
 ```bash
 npm run typecheck
 npm test
+npm run coverage
 npm run build
-npm run demo
-npm pack --dry-run
+node scripts/package-smoke.mjs --git-archive
+npm audit --audit-level=high
 ```
 
-## Design rules
+`--git-archive` requires the relevant source to be committed. Before that
+commit, run `npm run package:smoke` against the bounded copied workspace.
 
-- Never select a policy on holdout data.
-- Never infer an unmeasured serving outcome.
-- Never let one good metric compensate for a failed hard gate.
-- Keep decisions deterministic for identical inputs and bootstrap settings.
-- Record failures, elapsed time, and incurred cost rather than dropping them.
-- Keep synthetic and real evidence visibly distinct.
-- Do not add an automatic production-deployment path.
+For documentation-only changes:
 
-## Fixtures and sensitive data
+```bash
+git diff --check
+npm run typecheck
+```
 
-Only explicitly fictional **TASC input fixtures** belong in Git. Never commit
-real customer prompts, model outputs, private traces, credentials, provider
-tokens, attestation keys, device identifiers, or proprietary benchmark data.
-Use `examples/synthetic/` as the pattern for reviewable decision-engine tests.
+For MLX changes:
 
-If a change needs realistic private measurements, reproduce the behavior with a
-minimal synthetic fixture and keep the source evidence in approved
-access-controlled storage.
+```bash
+python3 -m py_compile \
+  benchmarks/mlx/run_benchmarks.py \
+  benchmarks/mlx/test_run_benchmarks.py
+python3 -m unittest benchmarks/mlx/test_run_benchmarks.py
+git diff --check -- benchmarks/mlx
+```
 
-Sanitized measurements of public models on public benchmark tasks may be
-committed under `benchmarks/results/` when they include:
+Never run model downloads or GPU benchmarks in ordinary CI.
 
-- immutable model revisions and public task/evaluator versions;
-- exact runtime, quantization, hardware-class, and workload metadata;
-- raw numeric logs and reproducible summary derivation;
-- no prompts, generated text, usernames, serial numbers, UUIDs, cache paths,
-  tokens, or other host/customer identifiers; and
-- a clear boundary between a benchmark snapshot and TASC-ready paired evidence.
+## Contract rules
 
-Review the model, dataset, and evaluator licenses before publishing results.
+- All external data receives strict runtime validation; TypeScript types are not
+  an input boundary.
+- Reject proxies, accessors, inherited fields, symbols, duplicate JSON keys,
+  non-finite values, unsafe integers, unbounded strings, and unknown fields
+  where the contract is exact.
+- Estimate worst-case work before expansion, signing, filesystem access, or
+  network contact.
+- Keep locale, wall clock, randomness, filesystem order, and concurrency out of
+  deterministic identities unless they are explicit versioned inputs.
+- Preserve measured, reported, modeled, and unavailable evidence classes.
+- Never turn missing data or a partial transport success into measured success.
+- Public SHA-256 digests are identities, not authentication.
+- Persist only allowlisted, raw-free data.
 
-## Versioned contracts
+## Runtime profiles
 
-Input and artifact versions are part of the public contract. A breaking schema
-change requires:
+A new runtime profile or build upgrade needs:
 
-- a new version literal;
-- migration or explicit rejection behavior;
-- compatibility tests; and
-- operating-guide and changelog updates.
+- one pinned upstream release/build and primary-source documentation;
+- exact request route, response framing, terminal, usage, and error semantics;
+- separate `supported`, `conditional`, `unsupported`, and `unknown` capability
+  evidence;
+- success, malformed, oversized, timeout, cancellation, truncation, and missing
+  terminal/usage contract fixtures;
+- SSRF, redirect, DNS-pinning, authentication-reference, and redaction review;
+- honest provider-reported versus operator-configured identity fields; and
+- updates to [`docs/runtime-support.md`](docs/runtime-support.md).
+
+OpenAI-compatible JSON is not sufficient evidence that an existing codec or
+profile is semantically correct.
+
+Ray Serve, SkyPilot, BentoML, and similar systems are orchestration provenance
+unless a contribution adds and tests a distinct wire contract. Do not import
+their SDKs into the core simply for endpoint discovery.
+
+## Security-sensitive changes
+
+Read [`docs/threat-model.md`](docs/threat-model.md) before changing:
+
+- network authorization or DNS resolution;
+- authentication and secret handling;
+- bounded parsers or streaming codecs;
+- dispatch, retry, cancellation, or crash recovery;
+- evaluator trust and signatures;
+- artifact roots, staging, fsync, rename, or resume;
+- subprocess execution; or
+- release workflows and package contents.
+
+Tests should prove both the allowed behavior and zero contact/zero write on
+preflight rejection. Error tests must assert that source values, paths, provider
+text, and secrets are absent.
+
+Report vulnerabilities privately as described in [`SECURITY.md`](SECURITY.md).
+
+## Fixtures and examples
+
+Committed examples must be synthetic or sanitized, contain no credential or
+private endpoint, and state which fields are measured versus fictional. Do not
+commit raw prompts or outputs merely to exercise identity logic. Prefer a local
+contract server for live HTTP tests.
+
+Golden vectors must include the exact preimage/domain and digest. A test that
+asserts an unrelated hard-coded hash and bucket is worse than no golden vector.
+
+## Pull requests
+
+Use a conventional title such as:
+
+```text
+feat(runtime): add bounded MLC streaming profile
+fix(shadow): retain ambiguous dispatch after restart
+docs: explain evaluator evidence custody
+```
+
+Describe:
+
+- the operator-facing outcome;
+- contracts and security boundaries changed;
+- tests and exact pass counts;
+- runtime/model calls made, if any;
+- compatibility or migration impact; and
+- residual risks or unavailable verification.
+
+Keep generated artifacts, real measurements, credentials, private endpoints,
+model downloads, and local worktrees out of commits.
