@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  isAuthenticAssessmentDataset,
   joinAssessmentEvidence,
   resolveGroupSplit,
 } from "../src/evidence-join.js";
@@ -21,6 +22,7 @@ import {
   evaluatorKeyFixture,
   keyedIdentity,
   mutate,
+  signDispatchIntent,
   signEvaluatorEvidence,
   unsignedEvaluatorEvidence,
   validAssessmentContextInput,
@@ -37,7 +39,7 @@ function parseProtocol(input: ProtocolInput = validProtocolInput()) {
 }
 
 function parseTrace(input: TraceInput) {
-  return parseTraceEnvelope(input, TEST_WORK_BUDGET);
+  return parseTraceEnvelope(signDispatchIntent(input), TEST_WORK_BUDGET);
 }
 
 function verificationFor(
@@ -312,6 +314,14 @@ describe("deterministic assessment evidence join", () => {
     expect(Object.isFrozen(joined.executions)).toBe(true);
     expect(Object.isFrozen(joined.executions[0].trace)).toBe(true);
     expect(joined.executions[0].trace).not.toBe(traces[1]);
+    expect(joined).toMatchObject({
+      assessmentContextDigest: evidence[0].assessmentContextDigest,
+      traceSetDigest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
+      evaluatorSetDigest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
+      datasetDigest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
+    });
+    expect(isAuthenticAssessmentDataset(joined)).toBe(true);
+    expect(isAuthenticAssessmentDataset(structuredClone(joined))).toBe(false);
   });
 
   it.each([
@@ -396,6 +406,45 @@ describe("deterministic assessment evidence join", () => {
     },
   );
 
+  it.each([
+    [
+      "a different modeled-cost identity",
+      (protocol: ProtocolInput) => {
+        if (protocol.costAllocation.kind !== "modeled") {
+          throw new Error("fixture protocol must use modeled cost allocation");
+        }
+        protocol.costAllocation.modelDigest = digest("c");
+      },
+      /modeled cost.*model digest|cost model.*protocol/i,
+    ],
+    [
+      "an unavailable protocol cost allocation",
+      (protocol: ProtocolInput) => {
+        (protocol as any).costAllocation = { kind: "unavailable" };
+      },
+      /modeled cost.*(?:unavailable|allocation)|cost allocation.*modeled/i,
+    ],
+  ] as const)(
+    "rejects trace attempts priced by %s",
+    (_label, changeProtocol, expected) => {
+      const key = evaluatorKeyFixture();
+      const protocolInput = validProtocolInput();
+      changeProtocol(protocolInput);
+      const traces = withProtocolDigest(protocolInput, [
+        validTraceInputForProfile("champion"),
+        validTraceInputForProfile("candidate"),
+      ]);
+      const evidence = traces.map((trace) => verificationFor(trace, key));
+
+      expect(() => joinAssessmentEvidence(
+        parseProtocol(protocolInput),
+        traces.map(parseTrace),
+        evidence,
+        TEST_WORK_BUDGET,
+      )).toThrow(expected);
+    },
+  );
+
   it("rejects a post-dispatch route signal even with a complete trusted pair", () => {
     const key = evaluatorKeyFixture();
     const traces = [
@@ -435,6 +484,27 @@ describe("deterministic assessment evidence join", () => {
     ).admissibility.valid).toBe(true);
   });
 
+  it("retains an absent route signal for policy-specific assessment", () => {
+    const key = evaluatorKeyFixture();
+    const rawTraces = [
+      validTraceInputForProfile("champion"),
+      validTraceInputForProfile("candidate"),
+    ];
+    for (const trace of rawTraces) (trace as any).routeSignal = null;
+
+    const joined = joinAssessmentEvidence(
+      parseProtocol(),
+      rawTraces.map(parseTrace),
+      rawTraces.map((trace) => verificationFor(trace, key)),
+      TEST_WORK_BUDGET,
+    );
+
+    expect(joined.executions).toHaveLength(2);
+    expect(joined.executions.every(({ trace }) => trace.routeSignal === null))
+      .toBe(true);
+    expect(joined.pairs).toHaveLength(1);
+  });
+
   it("assigns zero only to a terminal failed execution and never fabricates evidence", () => {
     const key = evaluatorKeyFixture();
     const protocol = parseProtocol();
@@ -471,6 +541,118 @@ describe("deterministic assessment evidence join", () => {
       }),
     ]);
   });
+
+  it("does not convert ambiguous dispatch into a known failure-zero score", () => {
+    const protocol = parseProtocol();
+    const ambiguous = failedTerminal(validTraceInputForProfile("champion"));
+    ambiguous.attempts[0].dispatchState =
+      "sent_unknown" as unknown as "completed";
+    const candidate = validTraceInputForProfile("candidate");
+
+    const joined = joinAssessmentEvidence(
+      protocol,
+      [parseTrace(ambiguous), parseTrace(candidate)],
+      [],
+      TEST_WORK_BUDGET,
+    );
+
+    expect(joined.executions.find(
+      ({ profileId }) => profileId === "champion",
+    )?.outcome).toEqual({
+      kind: "ambiguous-execution",
+      reasonCode: "dispatch-outcome-ambiguous",
+      score: null,
+      evidence: null,
+    });
+
+    const retry = withFailedFirstAttempt(
+      validTraceInputForProfile("champion"),
+    );
+    retry.attempts[0].dispatchState =
+      "sent_unknown" as unknown as "completed";
+    const retryJoined = joinAssessmentEvidence(
+      protocol,
+      [parseTrace(retry)],
+      [],
+      TEST_WORK_BUDGET,
+    );
+    expect(retryJoined.executions[0].outcome.kind).toBe(
+      "ambiguous-execution",
+    );
+  });
+
+  it("rejects evaluator evidence produced before terminal completion", () => {
+    const key = evaluatorKeyFixture();
+    const champion = validTraceInputForProfile("champion");
+    const candidate = validTraceInputForProfile("candidate");
+    const premature = verificationFor(champion, key, (evidence) => {
+      evidence.producedAt = "2026-07-20T23:59:59.999Z";
+    });
+
+    const joined = joinAssessmentEvidence(
+      parseProtocol(),
+      [parseTrace(champion), parseTrace(candidate)],
+      [premature],
+      TEST_WORK_BUDGET,
+    );
+
+    expect(joined.diagnostics.invalidEvidence).toContainEqual(
+      expect.objectContaining({
+        evidenceDigest: premature.evidenceDigest,
+        reason: "evaluator-evidence-predates-terminal-completion",
+      }),
+    );
+    expect(joined.executions.find(
+      ({ profileId }) => profileId === "champion",
+    )?.outcome).toMatchObject({
+      kind: "invalid-evidence",
+      reasonCode: "evaluator-evidence-predates-terminal-completion",
+      evidenceAccepted: false,
+    });
+  });
+
+  it.each([
+    [
+      "group identity",
+      (trace: TraceInput) => {
+        trace.groupId = "conversation-2";
+      },
+    ],
+    [
+      "traffic weight",
+      (trace: TraceInput) => {
+        trace.workload.declaredTrafficWeight = 1_000;
+      },
+    ],
+    [
+      "slice membership",
+      (trace: TraceInput) => {
+        trace.slices = ["payments"];
+      },
+    ],
+    [
+      "route signal",
+      (trace: TraceInput) => {
+        trace.routeSignal!.value = 0.01;
+      },
+    ],
+  ] as const)(
+    "rejects post-dispatch %s rewrites even with the original trusted evaluator receipt",
+    (_label, tamper) => {
+      const protocol = parseProtocol();
+      const key = evaluatorKeyFixture();
+      const trace = validTraceInputForProfile("champion");
+      const receipt = verificationFor(trace, key);
+      tamper(trace);
+
+      expect(() => joinAssessmentEvidence(
+        protocol,
+        [parseTraceEnvelope(trace, TEST_WORK_BUDGET)],
+        [receipt],
+        TEST_WORK_BUDGET,
+      )).toThrow(/invalid dispatch-intent signature/i);
+    },
+  );
 
   it("requires evaluator evidence when an earlier retry fails but the terminal attempt succeeds", () => {
     const trace = validTraceInputForProfile("champion");
@@ -1094,6 +1276,15 @@ describe("deterministic assessment evidence join", () => {
       valid: false,
       blockingReasons: expect.arrayContaining(["duplicate-traces"]),
     });
+
+    const withoutDuplicate = joinAssessmentEvidence(
+      protocol,
+      [champion, candidate],
+      [],
+      TEST_WORK_BUDGET,
+    );
+    expect(joined.traceSetDigest).not.toBe(withoutDuplicate.traceSetDigest);
+    expect(joined.datasetDigest).not.toBe(withoutDuplicate.datasetDigest);
   });
 
   it("preflights row and full work budgets before reading collection elements", () => {

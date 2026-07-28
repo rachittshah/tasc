@@ -1,9 +1,15 @@
 import { Buffer } from "node:buffer";
+import {
+  createPublicKey,
+  verify as verifySignature,
+  type KeyObject,
+} from "node:crypto";
 import { canonicalJson, compareCodeUnits } from "./determinism.js";
 import {
   compareEvidenceIdentities,
   contractSlugSchema,
   deepFreezeContract,
+  dispatchIntentSigningBytes,
   domainSeparatedDigest,
   fingerprintExecutionProfile,
   fingerprintNormalizedProtocol,
@@ -21,13 +27,13 @@ import {
 } from "./evaluator-trust.js";
 import type { WorkBudget } from "./work-budget.js";
 
-type OfflineSplit = "dev" | "holdout";
-type AssessmentSplit = OfflineSplit | "online";
+export type OfflineAssessmentSplit = "dev" | "holdout";
+export type AssessmentSplit = OfflineAssessmentSplit | "online";
 
 export interface ResolvedGroupSplit {
   readonly algorithm: "tasc-seeded-sha256-group-bucket-v1";
   readonly bucket: number;
-  readonly split: OfflineSplit;
+  readonly split: OfflineAssessmentSplit;
 }
 
 interface ScoredAssessmentOutcome {
@@ -49,6 +55,13 @@ interface ProtocolFailureOutcome {
   readonly evidence: null;
 }
 
+interface AmbiguousExecutionOutcome {
+  readonly kind: "ambiguous-execution";
+  readonly reasonCode: "dispatch-outcome-ambiguous";
+  readonly score: null;
+  readonly evidence: null;
+}
+
 interface NonScoredAssessmentOutcome {
   readonly kind: "missing-evidence" | "invalid-evidence" | "abstained";
   readonly reasonCode: string;
@@ -61,6 +74,7 @@ interface NonScoredAssessmentOutcome {
 export type AssessmentExecutionOutcome =
   | ScoredAssessmentOutcome
   | ProtocolFailureOutcome
+  | AmbiguousExecutionOutcome
   | NonScoredAssessmentOutcome;
 
 export interface AssessmentExecutionRow {
@@ -166,6 +180,10 @@ export interface AssessmentDataset {
   readonly version: "tasc-assessment-dataset-v2";
   readonly studyId: string;
   readonly protocolDigest: string;
+  readonly assessmentContextDigest: string | null;
+  readonly traceSetDigest: string;
+  readonly evaluatorSetDigest: string;
+  readonly datasetDigest: string;
   readonly splitIdentity: ExperimentProtocol["splitMembership"];
   readonly evaluatorIdentity: ExperimentProtocol["evaluator"];
   readonly requiredProfileIds: readonly string[];
@@ -212,6 +230,47 @@ export interface AssessmentDataset {
     readonly blockingReasons: readonly string[];
   };
 }
+
+type ExecutionForSplit<Split extends AssessmentSplit> = Omit<
+  AssessmentExecutionRow,
+  "split"
+> & {
+  readonly split: Split;
+};
+
+type PairForSplit<Split extends AssessmentSplit> = Omit<
+  AssessmentPair,
+  "split"
+> & {
+  readonly split: Split;
+};
+
+type CountsForSplit<Split extends AssessmentSplit> = Omit<
+  AssessmentDataset["counts"],
+  "splits"
+> & {
+  readonly splits: readonly (
+    Omit<AssessmentDataset["counts"]["splits"][number], "split">
+    & { readonly split: Split }
+  )[];
+};
+
+/** A runtime-authenticated dataset whose complete row population has one phase. */
+export type AssessmentDatasetForSplit<Split extends AssessmentSplit> = Omit<
+  AssessmentDataset,
+  "executions" | "pairs" | "counts"
+> & {
+  readonly executions: readonly ExecutionForSplit<Split>[];
+  readonly pairs: readonly PairForSplit<Split>[];
+  readonly counts: CountsForSplit<Split>;
+};
+
+export type DevelopmentAssessmentDataset =
+  AssessmentDatasetForSplit<"dev">;
+export type HoldoutAssessmentDataset =
+  AssessmentDatasetForSplit<"holdout">;
+export type OnlineAssessmentDataset =
+  AssessmentDatasetForSplit<"online">;
 
 export interface AssessmentJoinWork {
   /** Observed input and cardinality dimensions. */
@@ -260,6 +319,7 @@ interface RejectedEvidenceRecord {
 }
 
 const FAILURE_SCORE = 0 as const;
+const authenticAssessmentDatasets = new WeakSet<object>();
 
 function sortStrings(values: readonly string[]): string[] {
   return [...values].sort(compareCodeUnits);
@@ -309,6 +369,29 @@ function traceProfileKey(
 
 function fingerprintTrace(trace: TraceEnvelope): string {
   return identity("tasc/trace-envelope/v2", trace);
+}
+
+function fingerprintVerificationSource(
+  input: EvaluatorEvidenceVerification,
+): string {
+  if (!isAuthenticEvaluatorEvidenceVerification(input)) {
+    return identity("tasc/assessment-evaluator-source/v2", {
+      kind: "inauthentic-verification-receipt",
+    });
+  }
+  return identity("tasc/assessment-evaluator-source/v2", {
+    kind: "authentic-verification-receipt",
+    evidenceDigest: input.evidenceDigest,
+    status: input.status,
+    trusted: input.trusted,
+    assessedAt: input.assessedAt,
+    assessmentContextDigest: input.assessmentContextDigest,
+    operatorTrustPolicySnapshotDigest:
+      input.operatorTrustPolicySnapshotDigest,
+    evaluatorRevocationSnapshotDigest:
+      input.evaluatorRevocationSnapshotDigest,
+    keyId: input.keyId,
+  });
 }
 
 /**
@@ -594,6 +677,9 @@ function normalizeTraces(
       },
     ]),
   );
+  const dispatchAuthorityKey = importCanonicalEd25519PublicKey(
+    protocol.dispatchAuthority.publicKeySpki,
+  );
   const splitsByGroup = new Map<string, ResolvedGroupSplit>();
   for (const trace of traces) {
     if (trace.studyId !== protocol.studyId) {
@@ -601,6 +687,25 @@ function normalizeTraces(
     }
     if (trace.protocolDigest !== protocolDigest) {
       throw new Error(`trace "${trace.traceId}" protocol digest conflicts with protocol`);
+    }
+    assertAuthenticDispatchIntent(
+      trace,
+      protocol,
+      dispatchAuthorityKey,
+    );
+    const firstAttemptStartedAt = Date.parse(
+      trace.attempts[0].observerTimings.startedAt,
+    );
+    const terminalCompletedAt = Date.parse(
+      trace.attempts[trace.attempts.length - 1].observerTimings.completedAt,
+    );
+    if (
+      firstAttemptStartedAt < Date.parse(protocol.createdAt)
+      || terminalCompletedAt >= Date.parse(protocol.expiresAt)
+    ) {
+      throw new Error(
+        `trace "${trace.traceId}" falls outside the protocol validity interval`,
+      );
     }
     const expectedProfile = profilesById.get(trace.profileId);
     if (expectedProfile === undefined) {
@@ -610,6 +715,21 @@ function normalizeTraces(
       throw new Error(`trace "${trace.traceId}" execution profile digest drift`);
     }
     for (const attempt of trace.attempts) {
+      if (attempt.cost.kind === "modeled") {
+        if (protocol.costAllocation.kind !== "modeled") {
+          throw new Error(
+            `trace "${trace.traceId}" modeled cost requires a protocol modeled cost allocation`,
+          );
+        }
+        if (
+          attempt.cost.modelDigest
+            !== protocol.costAllocation.modelDigest
+        ) {
+          throw new Error(
+            `trace "${trace.traceId}" modeled cost model digest conflicts with protocol`,
+          );
+        }
+      }
       if (
         attempt.requestedModel.id !== expectedProfile.profile.model.id
         || attempt.requestedModel.revision
@@ -633,23 +753,24 @@ function normalizeTraces(
       }
     }
     const routeSignal = trace.routeSignal;
-    if (
-      routeSignal === null
-      || routeSignal.definitionId !== protocol.routeSignal.definitionId
-      || routeSignal.version !== protocol.routeSignal.version
-      || routeSignal.calibrationDigest !== protocol.routeSignal.calibrationDigest
-      || routeSignal.value < protocol.routeSignal.minimum
-      || routeSignal.value > protocol.routeSignal.maximum
-    ) {
-      throw new Error(`trace "${trace.traceId}" route-signal drift`);
-    }
-    if (
-      Date.parse(routeSignal.provenance.observedAt)
-        > Date.parse(trace.attempts[0].observerTimings.startedAt)
-    ) {
-      throw new Error(
-        `trace "${trace.traceId}" route signal was observed after the first attempt started`,
-      );
+    if (routeSignal !== null) {
+      if (
+        routeSignal.definitionId !== protocol.routeSignal.definitionId
+        || routeSignal.version !== protocol.routeSignal.version
+        || routeSignal.calibrationDigest !== protocol.routeSignal.calibrationDigest
+        || routeSignal.value < protocol.routeSignal.minimum
+        || routeSignal.value > protocol.routeSignal.maximum
+      ) {
+        throw new Error(`trace "${trace.traceId}" route-signal drift`);
+      }
+      if (
+        Date.parse(routeSignal.provenance.observedAt)
+          > Date.parse(trace.attempts[0].observerTimings.startedAt)
+      ) {
+        throw new Error(
+          `trace "${trace.traceId}" route signal was observed after the first attempt started`,
+        );
+      }
     }
     if (trace.split !== "online") {
       let resolved = splitsByGroup.get(trace.groupId);
@@ -1064,6 +1185,86 @@ function terminalStatus(trace: TraceEnvelope): "success" | "failure" | "aborted"
   return trace.attempts[trace.attempts.length - 1].status;
 }
 
+function hasAmbiguousDispatch(trace: TraceEnvelope): boolean {
+  return trace.attempts.some((attempt) =>
+    attempt.dispatchState === "sent_unknown"
+    || attempt.abortLifecycle === "abort-ambiguous"
+  );
+}
+
+function terminalCompletion(trace: TraceEnvelope): number {
+  return Date.parse(
+    trace.attempts[trace.attempts.length - 1].observerTimings.completedAt,
+  );
+}
+
+function importCanonicalEd25519PublicKey(encoded: string): KeyObject {
+  let bytes: Buffer;
+  try {
+    bytes = Buffer.from(encoded, "base64url");
+  } catch {
+    throw new Error("dispatch authority public key is not valid base64url");
+  }
+  if (bytes.toString("base64url") !== encoded) {
+    throw new Error("dispatch authority public key is not canonical base64url");
+  }
+  let key: KeyObject;
+  try {
+    key = createPublicKey({ key: bytes, type: "spki", format: "der" });
+  } catch {
+    throw new Error("dispatch authority public key is not valid SPKI");
+  }
+  const canonical = key.export({ type: "spki", format: "der" });
+  if (
+    key.asymmetricKeyType !== "ed25519"
+    || !Buffer.isBuffer(canonical)
+    || !canonical.equals(bytes)
+  ) {
+    throw new Error("dispatch authority must use canonical Ed25519 SPKI");
+  }
+  return key;
+}
+
+function assertAuthenticDispatchIntent(
+  trace: TraceEnvelope,
+  protocol: ExperimentProtocol,
+  publicKey: KeyObject,
+): void {
+  if (
+    trace.dispatchIntent.authorityKeyId !== protocol.dispatchAuthority.keyId
+    || trace.dispatchIntent.signatureAlgorithm
+      !== protocol.dispatchAuthority.algorithm
+  ) {
+    throw new Error(
+      `trace "${trace.traceId}" dispatch authority conflicts with protocol`,
+    );
+  }
+  if (
+    Date.parse(trace.dispatchIntent.issuedAt) < Date.parse(protocol.createdAt)
+  ) {
+    throw new Error(
+      `trace "${trace.traceId}" dispatch intent predates the protocol`,
+    );
+  }
+  const signature = Buffer.from(
+    trace.dispatchIntent.signature,
+    "base64url",
+  );
+  if (
+    signature.toString("base64url") !== trace.dispatchIntent.signature
+    || !verifySignature(
+      null,
+      dispatchIntentSigningBytes(trace),
+      publicKey,
+      signature,
+    )
+  ) {
+    throw new Error(
+      `trace "${trace.traceId}" has an invalid dispatch-intent signature`,
+    );
+  }
+}
+
 function traceLineageMatches(
   trace: TraceEnvelope,
   evidence: EvaluatorEvidence,
@@ -1120,6 +1321,14 @@ export function joinAssessmentEvidence(
     evidenceRows,
   );
   const traces = normalizedTraces.traces;
+  const traceSetDigest = identity(
+    "tasc/assessment-trace-set/v2",
+    sortStrings(traces.map(fingerprintTrace)),
+  );
+  const evaluatorSetDigest = identity(
+    "tasc/assessment-evaluator-set/v2",
+    sortStrings(verificationSnapshot.map(fingerprintVerificationSource)),
+  );
 
   const duplicateTraces: DuplicateTraceDiagnostic[] = [];
   const conflictingTraces: ConflictingTraceDiagnostic[] = [];
@@ -1141,6 +1350,7 @@ export function joinAssessmentEvidence(
   const authenticRecords: EvidenceRecord[] = [];
   const rejectedEvidenceRecords: RejectedEvidenceRecord[] = [];
   const authenticContextIdentities: string[] = [];
+  const authenticAssessmentContextDigests: string[] = [];
   const verificationContextIdentityCache = new Map<string, string>();
   const rejectEvidence = (
     evidence: EvaluatorEvidence | null,
@@ -1176,6 +1386,7 @@ export function joinAssessmentEvidence(
       continue;
     }
     const verification = authenticVerificationProvenance(input);
+    authenticAssessmentContextDigests.push(input.assessmentContextDigest);
     const contextCacheKey = verificationContextCacheKey(input);
     let contextIdentity = verificationContextIdentityCache.get(contextCacheKey);
     if (contextIdentity === undefined) {
@@ -1245,6 +1456,9 @@ export function joinAssessmentEvidence(
 
   const contextIdentities = sortStrings([
     ...new Set(authenticContextIdentities),
+  ]);
+  const assessmentContextDigests = sortStrings([
+    ...new Set(authenticAssessmentContextDigests),
   ]);
   let identityStableRecords = authenticRecords;
   if (contextIdentities.length > 1) {
@@ -1361,6 +1575,26 @@ export function joinAssessmentEvidence(
       });
       continue;
     }
+    if (
+      Date.parse(record.evidence.producedAt)
+        < terminalCompletion(trace.trace)
+    ) {
+      const reason = "evaluator-evidence-predates-terminal-completion";
+      rejectEvidence(
+        record.evidence,
+        record.evidenceDigest,
+        reason,
+        record.verification,
+      );
+      rejectedEvidenceByExecution.set(trace.executionKey, {
+        evidence: record.evidence,
+        evidenceDigest: record.evidenceDigest,
+        joinKey: record.joinKey,
+        verification: record.verification,
+        reason,
+      });
+      continue;
+    }
     if (record.evidence.outcome.kind === "scored") {
       evidenceByExecution.set(trace.executionKey, record);
       continue;
@@ -1408,7 +1642,14 @@ export function joinAssessmentEvidence(
   for (const record of traceRecords) {
     const status = terminalStatus(record.trace);
     let outcome: AssessmentExecutionOutcome;
-    if (status !== "success") {
+    if (hasAmbiguousDispatch(record.trace)) {
+      outcome = {
+        kind: "ambiguous-execution",
+        reasonCode: "dispatch-outcome-ambiguous",
+        score: null,
+        evidence: null,
+      };
+    } else if (status !== "success") {
       outcome = {
         kind: "protocol-failure-zero",
         score: FAILURE_SCORE,
@@ -1489,7 +1730,10 @@ export function joinAssessmentEvidence(
     });
   }
   executions.sort((left, right) =>
-    compareEvidenceIdentities(left.executionKey, right.executionKey)
+    compareEvidenceIdentities(left.caseId, right.caseId)
+    || compareEvidenceIdentities(left.replicateId, right.replicateId)
+    || compareEvidenceIdentities(left.profileId, right.profileId)
+    || compareEvidenceIdentities(left.executionKey, right.executionKey)
   );
 
   const requiredProfileIds = sortStrings([
@@ -1654,10 +1898,15 @@ export function joinAssessmentEvidence(
     "missing-profile-executions",
   );
 
-  return deepFreezeContract({
+  const datasetBody = {
     version: "tasc-assessment-dataset-v2",
     studyId: protocol.studyId,
     protocolDigest,
+    assessmentContextDigest: assessmentContextDigests.length === 1
+      ? assessmentContextDigests[0]
+      : null,
+    traceSetDigest,
+    evaluatorSetDigest,
     splitIdentity: protocol.splitMembership,
     evaluatorIdentity: protocol.evaluator,
     requiredProfileIds,
@@ -1691,5 +1940,50 @@ export function joinAssessmentEvidence(
       valid: blockingReasons.length === 0,
       blockingReasons: sortStrings(blockingReasons),
     },
+  } as const;
+  const result = deepFreezeContract({
+    ...datasetBody,
+    datasetDigest: identity("tasc/assessment-dataset/v2", datasetBody),
   });
+  authenticAssessmentDatasets.add(result);
+  return result;
+}
+
+/**
+ * Assessment accepts only the exact recursively frozen value emitted by the
+ * trusted join in this process. Serialized inputs must be rejoined from raw
+ * traces and locally verified evaluator receipts.
+ */
+export function isAuthenticAssessmentDataset(
+  value: unknown,
+): value is DeepReadonly<AssessmentDataset> {
+  return (
+    value !== null
+    && typeof value === "object"
+    && authenticAssessmentDatasets.has(value)
+  );
+}
+
+/**
+ * Narrow an authentic joined dataset to one assessment phase. The returned
+ * object is the original authenticated value; this function never blesses a
+ * clone or caller-authored structure.
+ */
+export function requireAssessmentDatasetSplit<
+  Split extends AssessmentSplit,
+>(
+  value: DeepReadonly<AssessmentDataset>,
+  expected: Split,
+): DeepReadonly<AssessmentDatasetForSplit<Split>> {
+  if (!isAuthenticAssessmentDataset(value)) {
+    throw new Error("phase narrowing requires an authentic assessment dataset");
+  }
+  if (
+    value.executions.some(({ split }) => split !== expected)
+    || value.pairs.some(({ split }) => split !== expected)
+    || value.counts.splits.some(({ split }) => split !== expected)
+  ) {
+    throw new Error(`assessment dataset contains rows outside ${expected} split`);
+  }
+  return value as DeepReadonly<AssessmentDatasetForSplit<Split>>;
 }
