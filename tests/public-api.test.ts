@@ -1,5 +1,34 @@
 import { describe, expect, it } from "vitest";
 import * as tasc from "../src/index.js";
+import type {
+  AuthorizedControlledReference,
+  BoundedInputErrorCode,
+  BoundedJsonLimits,
+  BoundedNdjsonLimits,
+  ByteChunkSource,
+  ControlledReference,
+  ControlledReferenceRegistry,
+  ControlledReferenceStore,
+  KeyedPayloadIdentity,
+  PersistedError,
+  PersistedErrorCategory,
+} from "../src/index.js";
+
+type TaskEightPublicTypes = [
+  AuthorizedControlledReference,
+  BoundedInputErrorCode,
+  BoundedJsonLimits,
+  BoundedNdjsonLimits,
+  ByteChunkSource,
+  ControlledReference,
+  ControlledReferenceRegistry,
+  ControlledReferenceStore,
+  KeyedPayloadIdentity,
+  PersistedError,
+  PersistedErrorCategory,
+];
+
+const taskEightPublicTypeCount: TaskEightPublicTypes["length"] = 11;
 
 describe("standalone public API", () => {
   it("exports the complete policy-lab surface from one package entry point", () => {
@@ -14,8 +43,11 @@ describe("standalone public API", () => {
       buildConfirmationReport: expect.any(Function),
       proposeNextExperiment: expect.any(Function),
       parseExperimentProtocol: expect.any(Function),
+      parseExperimentProtocolJson: expect.any(Function),
       parseTraceEnvelope: expect.any(Function),
+      parseTraceEnvelopeJson: expect.any(Function),
       parseEvaluatorEvidence: expect.any(Function),
+      parseEvaluatorEvidenceJson: expect.any(Function),
       verifyEvaluatorEvidence: expect.any(Function),
       parseAssessmentContext: expect.any(Function),
       fingerprintExecutionProfile: expect.any(Function),
@@ -32,7 +64,25 @@ describe("standalone public API", () => {
       parseExperimentBudget: expect.any(Function),
       parseExperimentHistory: expect.any(Function),
       parseExperimentProposalDecision: expect.any(Function),
+      BoundedInputError: expect.any(Function),
+      MAX_BOUNDED_INPUT_CHUNKS: expect.any(Number),
+      parseBoundedJson: expect.any(Function),
+      parseBoundedNdjson: expect.any(Function),
+      readBoundedJson: expect.any(Function),
+      readBoundedNdjson: expect.any(Function),
+      PERSISTED_ERROR_VERSION: "tasc-persisted-error-v1",
+      sanitizeErrorForPersistence: expect.any(Function),
+      CONTROLLED_REFERENCE_REGISTRY_VERSION:
+        "tasc-controlled-reference-registry-v1",
+      MAX_CONTROLLED_REFERENCE_STORES: expect.any(Number),
+      MAX_PAYLOAD_IDENTITY_BYTES: expect.any(Number),
+      parseControlledReference: expect.any(Function),
+      createControlledReferenceRegistry: expect.any(Function),
+      authorizeControlledReference: expect.any(Function),
+      resolveAuthorizedControlledReferenceRoot: expect.any(Function),
+      createStudyPayloadIdentity: expect.any(Function),
     });
+    expect(taskEightPublicTypeCount).toBe(11);
   });
 
   it("keeps deterministic identities independent of object insertion order", () => {
@@ -50,6 +100,14 @@ describe("standalone public API", () => {
     expect(tasc).not.toHaveProperty("normalizeEvaluatorEvidence");
     expect(tasc).not.toHaveProperty("bootstrapGroupedWeightedMeanCI");
     expect(tasc).not.toHaveProperty("computePolicyMetrics");
+    expect(tasc).not.toHaveProperty("ERROR_MESSAGES");
+    expect(tasc).not.toHaveProperty("Scanner");
+    expect(tasc).not.toHaveProperty("scanValue");
+    expect(tasc).not.toHaveProperty("registryAuthorities");
+    expect(tasc).not.toHaveProperty("referenceAuthorities");
+    expect(tasc).not.toHaveProperty("SECRET_KEY_PROBE");
+    expect(tasc).not.toHaveProperty("CONSTANT_SAFE_MESSAGES");
+    expect(tasc).not.toHaveProperty("snapshotAllowlistedMetadata");
     expect(tasc).not.toHaveProperty("deploy");
     expect(tasc).not.toHaveProperty("promoteDeployment");
     expect(tasc).not.toHaveProperty("rollbackDeployment");

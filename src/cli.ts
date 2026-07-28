@@ -1,5 +1,10 @@
 #!/usr/bin/env node
-import { readFile } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import {
+  BoundedInputError,
+  readBoundedJson,
+  type BoundedJsonLimits,
+} from "./bounded-input.js";
 import {
   confirmNomination,
   nominatePolicy,
@@ -18,6 +23,17 @@ import {
 } from "./schema.js";
 
 type Command = "nominate" | "confirm";
+
+const LEGACY_JSON_LIMITS: BoundedJsonLimits = Object.freeze({
+  maxBytes: 4 * 1024 * 1024,
+  maxDepth: 32,
+  maxObjectKeys: 65_536,
+  maxArrayItems: 65_536,
+  maxTokens: 1_000_000,
+  maxDecodedStringLength: 65_536,
+  maxNumericTokenLength: 128,
+  maxDiagnosticSnippetLength: 0,
+});
 
 interface Arguments {
   command: Command;
@@ -80,16 +96,16 @@ function parseArguments(argv: string[]): Arguments {
 }
 
 async function readJson(path: string, label: string): Promise<unknown> {
-  let source: string;
   try {
-    source = await readFile(path, "utf8");
+    return await readBoundedJson(
+      createReadStream(path),
+      LEGACY_JSON_LIMITS,
+    );
   } catch (error) {
-    throw new Error(`cannot read ${label} JSON at "${path}": ${(error as Error).message}`);
-  }
-  try {
-    return JSON.parse(source);
-  } catch (error) {
-    throw new Error(`invalid ${label} JSON at "${path}": ${(error as Error).message}`);
+    const code = error instanceof BoundedInputError
+      ? error.code
+      : "input-failure";
+    throw new Error(`invalid ${label} JSON (${code})`);
   }
 }
 

@@ -1,6 +1,14 @@
 import { createHash, createPublicKey } from "node:crypto";
 import { z } from "zod";
+import {
+  parseBoundedJson,
+  type BoundedJsonLimits,
+} from "./bounded-input.js";
 import { canonicalJsonBytes, compareCodeUnits } from "./determinism.js";
+import {
+  parseControlledReference,
+  type ControlledReference,
+} from "./references.js";
 import {
   assertWithinWorkBudget,
   estimateAssessmentWork,
@@ -85,12 +93,21 @@ const keyedIdentitySchema = z.object({
   value: hexIdentitySchema,
 }).strict();
 
-const controlledReferenceSchema = z.object({
-  kind: z.literal("controlled-reference"),
-  storeId: contractSlugSchema,
-  referenceId: contractSlugSchema,
-  digest: contractDigestSchema.optional(),
-}).strict();
+const controlledReferenceSchema: z.ZodType<
+  ControlledReference,
+  z.ZodTypeDef,
+  unknown
+> = z.unknown().transform((value, context) => {
+  try {
+    return parseControlledReference(value);
+  } catch {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "invalid controlled payload reference",
+    });
+    return z.NEVER;
+  }
+});
 
 const payloadIdentitySchema = z.union([
   keyedIdentitySchema,
@@ -564,7 +581,7 @@ const evaluatorOutcomeSchema = z.discriminatedUnion("kind", [
   ...nonScoreOutcomeSchemas,
 ]);
 
-const evaluatorSourceSchema = z.discriminatedUnion("kind", [
+const evaluatorSourceSchema = z.union([
   z.object({
     kind: z.literal("digest"),
     digest: contractDigestSchema,
@@ -1189,6 +1206,42 @@ export function parseEvaluatorEvidence(
 ): EvaluatorEvidence {
   assertSingleRowBudget("evidence", requireWorkBudget(workBudget));
   return normalizeEvaluatorEvidence(input);
+}
+
+/** Byte-level admission followed by the existing semantic protocol contract. */
+export function parseExperimentProtocolJson(
+  input: Uint8Array,
+  limits: BoundedJsonLimits,
+  workBudget: WorkBudget,
+): ExperimentProtocol {
+  return parseExperimentProtocol(
+    parseBoundedJson(input, limits),
+    workBudget,
+  );
+}
+
+/** Byte-level admission followed by the existing semantic trace contract. */
+export function parseTraceEnvelopeJson(
+  input: Uint8Array,
+  limits: BoundedJsonLimits,
+  workBudget: WorkBudget,
+): TraceEnvelope {
+  return parseTraceEnvelope(
+    parseBoundedJson(input, limits),
+    workBudget,
+  );
+}
+
+/** Byte-level admission followed by the existing semantic evidence contract. */
+export function parseEvaluatorEvidenceJson(
+  input: Uint8Array,
+  limits: BoundedJsonLimits,
+  workBudget: WorkBudget,
+): EvaluatorEvidence {
+  return parseEvaluatorEvidence(
+    parseBoundedJson(input, limits),
+    workBudget,
+  );
 }
 
 /** Portable ordering helper for later joins without locale-sensitive collation. */

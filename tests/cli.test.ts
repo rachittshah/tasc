@@ -467,4 +467,65 @@ describe("TASC CLI synthetic end-to-end example", () => {
     expect(tampered.status).not.toBe(0);
     expect(tampered.stderr).toMatch(/self-digest|edited/i);
   }, 30_000);
+
+  it("bounds raw CLI JSON before materialization without reflecting input secrets", async () => {
+    const root = await mkdtemp(resolve(tmpdir(), "tasc-cli-bounded-"));
+    const output = resolve(root, "out");
+    const duplicateSpecPath = resolve(root, "duplicate-spec.json");
+    const specSource = await readFile(SPEC, "utf8");
+    await writeFile(
+      duplicateSpecPath,
+      specSource.replace(
+        '"version": "tasc-inference-spec-v1"',
+        '"version": "tasc-inference-spec-v1",'
+          + '\n  "version": "tasc-inference-spec-v1"',
+      ),
+    );
+
+    const duplicate = runCli([
+      "nominate",
+      "--spec", duplicateSpecPath,
+      "--measurements", DEV,
+      "--out", output,
+    ]);
+    expect(duplicate.status).not.toBe(0);
+    expect(duplicate.stderr).toMatch(/invalid spec JSON.*duplicate-key/i);
+    expect(() => readdir(output)).rejects.toThrow();
+
+    const secret = "Bearer planted-cli-secret-must-not-echo";
+    const malformedPath = resolve(root, "malformed-secret.json");
+    await writeFile(
+      malformedPath,
+      Buffer.concat([
+        Buffer.from(`{"secret":"${secret}","value":"`, "utf8"),
+        Buffer.from([0xc3, 0x28]),
+        Buffer.from('"}', "utf8"),
+      ]),
+    );
+    const malformed = runCli([
+      "nominate",
+      "--spec", SPEC,
+      "--measurements", malformedPath,
+      "--out", output,
+    ]);
+    expect(malformed.status).not.toBe(0);
+    expect(malformed.stderr).toMatch(/invalid measurement JSON.*invalid-utf8/i);
+    expect(malformed.stderr).not.toContain(secret);
+    expect(() => readdir(output)).rejects.toThrow();
+
+    const oversizedPath = resolve(root, "oversized.json");
+    await writeFile(
+      oversizedPath,
+      `{"value":"${"x".repeat((4 * 1024 * 1024) + 1)}"}`,
+    );
+    const oversized = runCli([
+      "nominate",
+      "--spec", SPEC,
+      "--measurements", oversizedPath,
+      "--out", output,
+    ]);
+    expect(oversized.status).not.toBe(0);
+    expect(oversized.stderr).toMatch(/invalid measurement JSON.*byte-limit/i);
+    expect(() => readdir(output)).rejects.toThrow();
+  }, 30_000);
 });

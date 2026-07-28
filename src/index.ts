@@ -65,6 +65,20 @@ export type {
   AssessmentPacket,
 } from "./artifacts.js";
 export {
+  BoundedInputError,
+  MAX_BOUNDED_INPUT_CHUNKS,
+  parseBoundedJson,
+  parseBoundedNdjson,
+  readBoundedJson,
+  readBoundedNdjson,
+} from "./bounded-input.js";
+export type {
+  BoundedInputErrorCode,
+  BoundedJsonLimits,
+  BoundedNdjsonLimits,
+  ByteChunkSource,
+} from "./bounded-input.js";
+export {
   createController,
   isLiveControllerSnapshot,
   markDevelopmentReady,
@@ -134,8 +148,11 @@ export {
   fingerprintExecutionProfile,
   fingerprintProtocol,
   parseEvaluatorEvidence,
+  parseEvaluatorEvidenceJson,
   parseExperimentProtocol,
+  parseExperimentProtocolJson,
   parseTraceEnvelope,
+  parseTraceEnvelopeJson,
 } from "./evidence.js";
 export type {
   EvaluatorEvidence,
@@ -259,6 +276,31 @@ export type {
   Split,
   SuccessfulObservation,
 } from "./schema.js";
+export {
+  PERSISTED_ERROR_VERSION,
+  sanitizeErrorForPersistence,
+} from "./redaction.js";
+export type {
+  PersistedError,
+  PersistedErrorCategory,
+} from "./redaction.js";
+export {
+  CONTROLLED_REFERENCE_REGISTRY_VERSION,
+  MAX_CONTROLLED_REFERENCE_STORES,
+  MAX_PAYLOAD_IDENTITY_BYTES,
+  authorizeControlledReference,
+  createControlledReferenceRegistry,
+  createStudyPayloadIdentity,
+  parseControlledReference,
+  resolveAuthorizedControlledReferenceRoot,
+} from "./references.js";
+export type {
+  AuthorizedControlledReference,
+  ControlledReference,
+  ControlledReferenceRegistry,
+  ControlledReferenceStore,
+  KeyedPayloadIdentity,
+} from "./references.js";
 export {
   bootstrapMeanCI,
   mean,

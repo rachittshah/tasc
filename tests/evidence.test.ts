@@ -3,9 +3,13 @@ import {
   fingerprintExecutionProfile,
   fingerprintProtocol,
   parseEvaluatorEvidence,
+  parseEvaluatorEvidenceJson,
   parseExperimentProtocol,
+  parseExperimentProtocolJson,
   parseTraceEnvelope,
+  parseTraceEnvelopeJson,
 } from "../src/evidence.js";
+import type { BoundedJsonLimits } from "../src/bounded-input.js";
 import {
   TEST_WORK_BUDGET,
   digest,
@@ -17,7 +21,69 @@ import {
   validTraceInput,
 } from "./fixtures/evidence.js";
 
+const encoder = new TextEncoder();
+const RAW_JSON_LIMITS: BoundedJsonLimits = Object.freeze({
+  maxBytes: 1_048_576,
+  maxDepth: 32,
+  maxObjectKeys: 8_192,
+  maxArrayItems: 1_024,
+  maxTokens: 131_072,
+  maxDecodedStringLength: 16_384,
+  maxNumericTokenLength: 128,
+  maxDiagnosticSnippetLength: 0,
+});
+
 describe("evidence v2 contracts", () => {
+  it("admits raw bytes through bounded JSON before semantic parsing", () => {
+    const key = evaluatorKeyFixture();
+    const protocolInput = validProtocolInput();
+    const traceInput = validTraceInput();
+    const evidenceInput = validEvaluatorEvidenceInput(key.privateKey);
+
+    expect(parseExperimentProtocolJson(
+      encoder.encode(JSON.stringify(protocolInput)),
+      RAW_JSON_LIMITS,
+      TEST_WORK_BUDGET,
+    )).toEqual(parseExperimentProtocol(protocolInput, TEST_WORK_BUDGET));
+    expect(parseTraceEnvelopeJson(
+      encoder.encode(JSON.stringify(traceInput)),
+      RAW_JSON_LIMITS,
+      TEST_WORK_BUDGET,
+    )).toEqual(parseTraceEnvelope(traceInput, TEST_WORK_BUDGET));
+    expect(parseEvaluatorEvidenceJson(
+      encoder.encode(JSON.stringify(evidenceInput)),
+      RAW_JSON_LIMITS,
+      TEST_WORK_BUDGET,
+    )).toEqual(parseEvaluatorEvidence(
+      evidenceInput,
+      TEST_WORK_BUDGET,
+    ));
+  });
+
+  it("rejects duplicate raw keys and byte overages before semantic parsing", () => {
+    const protocolSource = JSON.stringify(validProtocolInput());
+    const duplicatedVersion = protocolSource.replace(
+      '"version":"tasc-experiment-protocol-v2"',
+      '"version":"tasc-experiment-protocol-v2",'
+        + '"version":"tasc-experiment-protocol-v2"',
+    );
+    expect(() => parseExperimentProtocolJson(
+      encoder.encode(duplicatedVersion),
+      RAW_JSON_LIMITS,
+      TEST_WORK_BUDGET,
+    )).toThrow(/duplicate key/i);
+
+    const traceBytes = encoder.encode(JSON.stringify(validTraceInput()));
+    expect(() => parseTraceEnvelopeJson(
+      traceBytes,
+      {
+        ...RAW_JSON_LIMITS,
+        maxBytes: traceBytes.byteLength - 1,
+      },
+      TEST_WORK_BUDGET,
+    )).toThrow(/byte limit/i);
+  });
+
   it("parses and freezes a bounded protocol, logical profile trace, and evaluator record", () => {
     const key = evaluatorKeyFixture();
     const protocol = parseExperimentProtocol(validProtocolInput(), TEST_WORK_BUDGET);
@@ -315,6 +381,16 @@ describe("evidence v2 contracts", () => {
       };
     });
     expect(() => parseTraceEnvelope(rawUrl, TEST_WORK_BUDGET)).toThrow();
+
+    const traversalLike = mutate(validTraceInput(), (trace: any) => {
+      trace.attempts[0].payloads.response = {
+        kind: "controlled-reference",
+        storeId: "approved-payload-store",
+        referenceId: "case..private-output",
+      };
+    });
+    expect(() => parseTraceEnvelope(traversalLike, TEST_WORK_BUDGET))
+      .toThrow(/controlled payload reference/i);
 
     const modeledWithoutDigest = mutate(validTraceInput(), (trace: any) => {
       delete trace.attempts[0].cost.modelDigest;
