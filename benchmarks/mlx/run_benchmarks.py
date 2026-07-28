@@ -236,7 +236,11 @@ def validate_command(command: Sequence[str]) -> list[str]:
     return snapshot
 
 
-def terminate_process_group(process: subprocess.Popen[bytes]) -> None:
+def terminate_process_group(
+    process: subprocess.Popen[bytes],
+    *,
+    leader_exit_observed: bool = False,
+) -> None:
     try:
         if os.name == "posix":
             # The leader may have exited while a descendant still holds the
@@ -247,6 +251,13 @@ def terminate_process_group(process: subprocess.Popen[bytes]) -> None:
             process.kill()
     except ProcessLookupError:
         pass
+    except PermissionError:
+        # Darwin reports EPERM when the reserved process group contains only
+        # the unreaped (zombie) leader. This is safe to accept only after an
+        # exit event was observed without reaping; a timeout-path EPERM still
+        # propagates so containment can never silently fail.
+        if not (sys.platform == "darwin" and leader_exit_observed):
+            raise
     if process.poll() is not None:
         return
     try:
@@ -261,28 +272,40 @@ def wait_for_macos_leader_exit_without_reaping(
     deadline: float,
     output: bytearray,
 ) -> None:
-    required_kqueue_api = (
-        "kqueue",
-        "kevent",
-        "KQ_FILTER_PROC",
-        "KQ_EV_ADD",
-        "KQ_EV_ENABLE",
-        "KQ_EV_ONESHOT",
-        "KQ_NOTE_EXIT",
-    )
-    if any(not hasattr(select, name) for name in required_kqueue_api):
+    if not hasattr(select, "kqueue") or not hasattr(select, "kevent"):
         terminate_process_group(process)
         raise RuntimeError(
             "bounded macOS process cleanup requires kqueue process events"
         )
 
+    # Some python.org 3.12 macOS builds expose kqueue/kevent but omit the
+    # process-filter constants documented by CPython. These values are stable
+    # Darwin ABI constants from <sys/event.h>; prefer the runtime exports when
+    # present and use the XNU values only on macOS.
+    def kqueue_constant(name: str, darwin_value: int) -> int:
+        exported = getattr(select, name, None)
+        if isinstance(exported, int):
+            return exported
+        if sys.platform == "darwin":
+            return darwin_value
+        terminate_process_group(process)
+        raise RuntimeError(
+            f"bounded macOS process cleanup requires select.{name}"
+        )
+
+    filter_proc = kqueue_constant("KQ_FILTER_PROC", -5)
+    event_add = kqueue_constant("KQ_EV_ADD", 0x0001)
+    event_enable = kqueue_constant("KQ_EV_ENABLE", 0x0004)
+    event_oneshot = kqueue_constant("KQ_EV_ONESHOT", 0x0010)
+    note_exit = kqueue_constant("KQ_NOTE_EXIT", 0x80000000)
+
     queue = select.kqueue()
     try:
         exit_event = select.kevent(
             process.pid,
-            filter=select.KQ_FILTER_PROC,
-            flags=select.KQ_EV_ADD | select.KQ_EV_ENABLE | select.KQ_EV_ONESHOT,
-            fflags=select.KQ_NOTE_EXIT,
+            filter=filter_proc,
+            flags=event_add | event_enable | event_oneshot,
+            fflags=note_exit,
         )
         # Register while the leader is deliberately unreaped. NOTE_EXIT remains
         # observable for a zombie, so the PID continues to reserve its PGID.
@@ -338,7 +361,7 @@ def reap_leader_after_group_shutdown(
             deadline,
             output,
         )
-        terminate_process_group(process)
+        terminate_process_group(process, leader_exit_observed=True)
         return process.wait()
 
     if not hasattr(os, "waitid") or not hasattr(os, "WNOWAIT"):
@@ -360,7 +383,7 @@ def reap_leader_after_group_shutdown(
         if status is not None:
             # The unreaped leader reserves both its PID and process-group ID.
             # Kill the group before poll()/wait() can release that identity.
-            terminate_process_group(process)
+            terminate_process_group(process, leader_exit_observed=True)
             return process.wait()
         time.sleep(min(0.01, remaining))
 

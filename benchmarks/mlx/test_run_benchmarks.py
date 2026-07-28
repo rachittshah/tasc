@@ -306,6 +306,77 @@ class BoundedProcessTest(unittest.TestCase):
         fake_process.poll.assert_not_called()
         fake_process.wait.assert_not_called()
 
+    def test_macos_python_312_uses_darwin_kqueue_constant_fallbacks(
+        self,
+    ) -> None:
+        class FakeKqueue:
+            def control(
+                self,
+                changes: object,
+                max_events: int,
+                timeout: object,
+            ) -> list[object]:
+                return [] if max_events == 0 else [object()]
+
+            def close(self) -> None:
+                pass
+
+        queue = FakeKqueue()
+        kevent = mock.Mock(return_value=object())
+        select_without_constants = argparse.Namespace(
+            kqueue=mock.Mock(return_value=queue),
+            kevent=kevent,
+        )
+
+        with (
+            mock.patch.object(run_benchmarks, "select", select_without_constants),
+            mock.patch.object(run_benchmarks.sys, "platform", "darwin"),
+        ):
+            run_benchmarks.wait_for_macos_leader_exit_without_reaping(
+                mock.Mock(pid=1234),
+                time.monotonic() + 1,
+                bytearray(),
+            )
+
+        kevent.assert_called_once_with(
+            1234,
+            filter=-5,
+            flags=0x0001 | 0x0004 | 0x0010,
+            fflags=0x80000000,
+        )
+
+    def test_darwin_accepts_zombie_only_group_eperm_after_exit_event(
+        self,
+    ) -> None:
+        process = mock.Mock(pid=1234)
+        process.poll.return_value = 0
+        with (
+            mock.patch.object(run_benchmarks.sys, "platform", "darwin"),
+            mock.patch.object(
+                run_benchmarks.os,
+                "killpg",
+                side_effect=PermissionError,
+            ),
+        ):
+            run_benchmarks.terminate_process_group(
+                process,
+                leader_exit_observed=True,
+            )
+
+        process.wait.assert_not_called()
+
+    def test_darwin_does_not_hide_timeout_path_eperm(self) -> None:
+        with (
+            mock.patch.object(run_benchmarks.sys, "platform", "darwin"),
+            mock.patch.object(
+                run_benchmarks.os,
+                "killpg",
+                side_effect=PermissionError,
+            ),
+            self.assertRaises(PermissionError),
+        ):
+            run_benchmarks.terminate_process_group(mock.Mock(pid=1234))
+
     def test_excludes_unrelated_environment_and_captures_success(self) -> None:
         environment = run_benchmarks.reduced_environment(
             {
