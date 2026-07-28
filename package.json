@@ -2,7 +2,6 @@
   "name": "@rachittshah/tasc",
   "version": "0.1.0",
   "description": "Eval-gated inference policy optimization with deterministic replay and holdout confirmation.",
-  "private": true,
   "packageManager": "npm@11.6.1",
   "license": "MIT",
   "keywords": [
@@ -13,27 +12,40 @@
     "optimization"
   ],
   "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "bin": {
     "tasc": "./dist/cli.js"
   },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
     }
   },
   "files": [
     "dist",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "CHANGELOG.md",
+    "SECURITY.md"
   ],
+  "sideEffects": false,
+  "publishConfig": {
+    "access": "public"
+  },
   "engines": {
     "node": ">=22"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
     "check": "npm run typecheck && npm test && npm run build && npm pack --dry-run",
+    "coverage": "vitest run --coverage --testTimeout=20000",
     "demo": "tsx scripts/demo.ts",
+    "package:smoke": "node scripts/package-smoke.mjs",
+    "prepack": "npm run clean && npm run build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -56,9 +68,10 @@
     "zod": "^3.25.0"
   },
   "devDependencies": {
+    "@vitest/coverage-v8": "4.1.10",
     "@types/node": "^22.10.0",
     "tsx": "^4.22.4",
     "typescript": "^5.6.0",
-    "vitest": "^4.1.9"
+    "vitest": "4.1.10"
   }
 }
