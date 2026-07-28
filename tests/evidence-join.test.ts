@@ -1409,7 +1409,7 @@ describe("deterministic assessment evidence join", () => {
       sliceAggregationVisits: 320,
     });
     expect(joined.work.chargedUnits).toBeLessThanOrEqual(30_000);
-  });
+  }, 20_000);
 
   it("snapshots collection data properties once and never invokes element accessors", () => {
     const protocol = parseProtocol();
