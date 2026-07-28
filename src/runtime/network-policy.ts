@@ -7,13 +7,23 @@ import {
 } from "node:path";
 import { isProxy } from "node:util/types";
 import { domainSeparatedDigest } from "../evidence.js";
-import { RUNTIME_PROFILE_IDS } from "./profiles.js";
-import type { RuntimeBuildIdentity, RuntimeProfileId } from "./types.js";
+import {
+  fingerprintEndpointDescriptor,
+  parseEndpointDescriptor,
+} from "./orchestration.js";
+import { getRuntimeProfile, RUNTIME_PROFILE_IDS } from "./profiles.js";
+import type {
+  EndpointDescriptor,
+  RuntimeBuildIdentity,
+  RuntimeProfileId,
+} from "./types.js";
 
 export const COLLECTOR_TRUST_POLICY_VERSION =
   "tasc-collector-trust-policy-v1" as const;
 
 const POLICY_FINGERPRINT_DOMAIN = "tasc/collector-trust-policy/v1";
+const ENDPOINT_BINDING_FINGERPRINT_DOMAIN =
+  "tasc/collector-endpoint-binding/v1";
 const AUTHORIZATION_FINGERPRINT_DOMAIN =
   "tasc/collector-request-authorization/v1";
 const MAX_ENDPOINTS = 64;
@@ -812,6 +822,105 @@ function pathIsWithin(path: string, prefix: string): boolean {
   return prefix === "/"
     || path === prefix
     || path.startsWith(`${prefix}/`);
+}
+
+function prefixedRuntimePath(basePath: string, path: string): string {
+  if (basePath === "/") return path;
+  if (path === "/") return basePath;
+  return `${basePath}${path}`;
+}
+
+function declaredRuntimeRoutes(
+  profileId: RuntimeProfileId,
+): readonly {
+  readonly method: CollectorRequestMethod;
+  readonly path: string;
+}[] {
+  const endpoints = getRuntimeProfile(profileId).endpoints;
+  return [
+    ...Object.values(endpoints.inference),
+    ...Object.values(endpoints.models),
+    ...Object.values(endpoints.health),
+    endpoints.version,
+    ...endpoints.metrics,
+  ].flatMap((route) =>
+    route === undefined
+      ? []
+      : [{ method: route.method, path: route.path }]
+  );
+}
+
+function validateOrchestrationDescriptorBinding(
+  endpoint: CollectorEndpointTrust,
+  descriptorInput: EndpointDescriptor | unknown,
+): string {
+  const descriptor = parseEndpointDescriptor(descriptorInput);
+  if (
+    descriptor.origin !== endpoint.origin
+    || descriptor.runtime.profileId !== endpoint.runtime.profileId
+    || descriptor.runtime.build !== endpoint.runtime.build
+  ) {
+    throw new Error(
+      "endpoint descriptor does not match collector endpoint identity",
+    );
+  }
+
+  const declared = declaredRuntimeRoutes(endpoint.runtime.profileId)
+    .map((route) => ({
+      method: route.method,
+      path: prefixedRuntimePath(descriptor.basePath, route.path),
+    }));
+  for (const route of endpoint.routes) {
+    const withinBasePath = descriptor.basePath === "/"
+      || route.pathPrefix === descriptor.basePath
+      || route.pathPrefix.startsWith(`${descriptor.basePath}/`);
+    const coversDeclaredRoute = declared.some((candidate) =>
+      candidate.method === route.method
+      && pathIsWithin(candidate.path, route.pathPrefix)
+    );
+    if (!withinBasePath || !coversDeclaredRoute) {
+      throw new Error(
+        "endpoint descriptor route prefix does not match the runtime profile",
+      );
+    }
+  }
+  return fingerprintEndpointDescriptor(descriptor);
+}
+
+/**
+ * Bind runtime-instance provenance to the exact operator-authorized endpoint.
+ *
+ * Unrelated evaluator keys, store roots, and policy deadlines deliberately do
+ * not affect this identity. Route or endpoint changes do. Ray/Sky descriptors
+ * are accepted only after their origin, runtime, build, and route prefix are
+ * proven to agree with the authentic collector policy.
+ */
+export function fingerprintCollectorEndpointBinding(
+  policy: CollectorTrustPolicy,
+  endpointAliasInput: unknown,
+  endpointDescriptorInput?: EndpointDescriptor | unknown,
+): string {
+  const authority = authenticPolicyAuthority(policy);
+  const endpointAlias = parseOpaqueId(
+    endpointAliasInput,
+    "endpoint alias",
+  );
+  const endpoint = authority.endpoints.get(endpointAlias)?.endpoint;
+  if (endpoint === undefined) {
+    throw new Error("collector endpoint binding is not authorized");
+  }
+  const orchestrationDescriptorDigest =
+    endpointDescriptorInput === undefined
+      ? null
+      : validateOrchestrationDescriptorBinding(
+        endpoint,
+        endpointDescriptorInput,
+      );
+  return domainSeparatedDigest(ENDPOINT_BINDING_FINGERPRINT_DOMAIN, {
+    schemaVersion: "tasc-collector-endpoint-binding-v1",
+    endpoint,
+    orchestrationDescriptorDigest,
+  });
 }
 
 function mostSpecificRoute(

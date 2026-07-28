@@ -116,6 +116,7 @@ describe("standalone public API", () => {
       createStudyPayloadIdentity: expect.any(Function),
       COLLECTOR_TRUST_POLICY_VERSION: "tasc-collector-trust-policy-v1",
       parseCollectorTrustPolicy: expect.any(Function),
+      fingerprintCollectorEndpointBinding: expect.any(Function),
       fingerprintCollectorTrustPolicy: expect.any(Function),
       narrowCollectorTrustPolicy: expect.any(Function),
       authorizeCollectorRequest: expect.any(Function),

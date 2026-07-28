@@ -4,6 +4,7 @@ import {
   assertCollectorStoreRootAuthorized,
   authorizeCollectorRequest,
   consumePinnedCollectorRequest,
+  fingerprintCollectorEndpointBinding,
   fingerprintCollectorTrustPolicy,
   narrowCollectorTrustPolicy,
   parseCollectorTrustPolicy,
@@ -11,6 +12,9 @@ import {
   type CollectorDnsLookup,
   type CollectorTrustPolicy,
 } from "../src/runtime/network-policy.js";
+import {
+  createRayServeEndpointDescriptor,
+} from "../src/runtime/orchestration.js";
 
 const remotePolicyInput = () => ({
   schemaVersion: "tasc-collector-trust-policy-v1" as const,
@@ -122,6 +126,91 @@ describe("collector trust policy", () => {
     expect(fingerprintCollectorTrustPolicy(input)).toMatch(
       /^sha256:[a-f0-9]{64}$/,
     );
+  });
+
+  it("binds instance identity to exact live authority and validated orchestration", () => {
+    const policy = parseCollectorTrustPolicy(remotePolicyInput());
+    const direct = fingerprintCollectorEndpointBinding(
+      policy,
+      "approved-vllm",
+    );
+    expect(direct).toMatch(/^sha256:[a-f0-9]{64}$/);
+
+    const unrelated = remotePolicyInput();
+    unrelated.evaluatorKeyIds = ["different-evaluator"];
+    unrelated.storeRoots = ["/srv/tasc/other-payloads"];
+    expect(
+      fingerprintCollectorEndpointBinding(
+        parseCollectorTrustPolicy(unrelated),
+        "approved-vllm",
+      ),
+    ).toBe(direct);
+
+    const changedRoute = remotePolicyInput();
+    changedRoute.endpoints[0]!.routes[1]!.pathPrefix =
+      "/v1/chat/completions";
+    expect(
+      fingerprintCollectorEndpointBinding(
+        parseCollectorTrustPolicy(changedRoute),
+        "approved-vllm",
+      ),
+    ).not.toBe(direct);
+
+    const changedAlias = remotePolicyInput();
+    changedAlias.endpoints[0]!.alias = "renamed-vllm";
+    expect(
+      fingerprintCollectorEndpointBinding(
+        parseCollectorTrustPolicy(changedAlias),
+        "renamed-vllm",
+      ),
+    ).not.toBe(direct);
+
+    const descriptorInput = remotePolicyInput();
+    descriptorInput.endpoints[0]!.routes =
+      descriptorInput.endpoints[0]!.routes.slice(0, 2);
+    const descriptorPolicy = parseCollectorTrustPolicy(descriptorInput);
+    const descriptor = createRayServeEndpointDescriptor({
+      origin: "https://inference.example.com:8443",
+      routePrefix: "/",
+      runtimeProfileId: "vllm",
+      runtimeBuild: "0.26.0",
+      rayBuild: "2.48.0",
+      configurationDigest: `sha256:${"a".repeat(64)}`,
+      applicationName: "tasc",
+      deploymentName: "vllm",
+    });
+    const orchestrated = fingerprintCollectorEndpointBinding(
+      descriptorPolicy,
+      "approved-vllm",
+      descriptor,
+    );
+    expect(orchestrated).not.toBe(
+      fingerprintCollectorEndpointBinding(
+        descriptorPolicy,
+        "approved-vllm",
+      ),
+    );
+
+    expect(() =>
+      fingerprintCollectorEndpointBinding(
+        descriptorPolicy,
+        "approved-vllm",
+        { ...descriptor, origin: "https://other.example.com:8443" },
+      )
+    ).toThrow(/does not match/);
+    expect(() =>
+      fingerprintCollectorEndpointBinding(
+        descriptorPolicy,
+        "approved-vllm",
+        { ...descriptor, basePath: "/serve" },
+      )
+    ).toThrow(/route prefix/);
+    expect(() =>
+      fingerprintCollectorEndpointBinding(
+        { ...descriptorPolicy },
+        "approved-vllm",
+      )
+    ).toThrow(/authentic/);
   });
 
   it("rejects proxies, accessors, symbols, hidden fields, holes, and duplicates without invoking them", () => {

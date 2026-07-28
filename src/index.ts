@@ -388,6 +388,7 @@ export {
   assertCollectorEvaluatorKeyAuthorized,
   assertCollectorStoreRootAuthorized,
   authorizeCollectorRequest,
+  fingerprintCollectorEndpointBinding,
   fingerprintCollectorTrustPolicy,
   narrowCollectorTrustPolicy,
   parseCollectorTrustPolicy,
