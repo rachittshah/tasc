@@ -1,10 +1,27 @@
 #!/usr/bin/env node
-import { createReadStream } from "node:fs";
+import { createReadStream, realpathSync } from "node:fs";
+import { createRequire } from "node:module";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   BoundedInputError,
   readBoundedJson,
   type BoundedJsonLimits,
 } from "./bounded-input.js";
+import {
+  CLI_USAGE,
+  CliArgumentError,
+  parseCliArguments,
+  type LegacyConfirmCommand,
+  type LegacyNominateCommand,
+  type ParsedCliCommand,
+} from "./cli-args.js";
+import {
+  CliInputError,
+  CliOutputError,
+  executeCliV2,
+} from "./cli-v2.js";
+import { canonicalJson } from "./determinism.js";
 import {
   confirmNomination,
   nominatePolicy,
@@ -22,7 +39,31 @@ import {
   type Split,
 } from "./schema.js";
 
-type Command = "nominate" | "confirm";
+const packageMetadata = createRequire(import.meta.url)("../package.json") as {
+  readonly version: string;
+};
+const CLI_VERSION = packageMetadata.version;
+
+type LegacyJsonInputLabel = "spec" | "measurement" | "nomination";
+
+class LegacyJsonInputError extends Error {
+  readonly input: LegacyJsonInputLabel;
+  readonly detail: string;
+
+  constructor(input: LegacyJsonInputLabel, detail: string) {
+    super("Legacy JSON input validation failed.");
+    this.name = "LegacyJsonInputError";
+    this.input = input;
+    this.detail = detail;
+  }
+}
+
+class LegacyOutputError extends Error {
+  constructor() {
+    super("Legacy artifact publication failed.");
+    this.name = "LegacyOutputError";
+  }
+}
 
 const LEGACY_JSON_LIMITS: BoundedJsonLimits = Object.freeze({
   maxBytes: 4 * 1024 * 1024,
@@ -35,67 +76,10 @@ const LEGACY_JSON_LIMITS: BoundedJsonLimits = Object.freeze({
   maxDiagnosticSnippetLength: 0,
 });
 
-interface Arguments {
-  command: Command;
-  spec: string;
-  measurements: string;
-  out: string;
-  nomination?: string;
-}
-
-function usage(): string {
-  return [
-    "Usage:",
-    "  tasc nominate --spec <path> --measurements <path> --out <directory>",
-    "  tasc confirm --spec <path> --measurements <path> --nomination <path> --out <directory>",
-  ].join("\n");
-}
-
-function parseArguments(argv: string[]): Arguments {
-  const command = argv[0];
-  if (command !== "nominate" && command !== "confirm") {
-    throw new Error(`expected command "nominate" or "confirm"\n${usage()}`);
-  }
-  const allowed = new Set([
-    "--spec",
-    "--measurements",
-    "--out",
-    ...(command === "confirm" ? ["--nomination"] : []),
-  ]);
-  const values = new Map<string, string>();
-  for (let index = 1; index < argv.length; index += 2) {
-    const flag = argv[index];
-    const value = argv[index + 1];
-    if (!flag?.startsWith("--") || !allowed.has(flag)) {
-      throw new Error(`unknown argument "${flag ?? ""}"\n${usage()}`);
-    }
-    if (!value || value.startsWith("--")) {
-      throw new Error(`argument "${flag}" requires a value\n${usage()}`);
-    }
-    if (values.has(flag)) {
-      throw new Error(`argument "${flag}" was provided more than once`);
-    }
-    values.set(flag, value);
-  }
-  const required = [
-    "--spec",
-    "--measurements",
-    "--out",
-    ...(command === "confirm" ? ["--nomination"] : []),
-  ];
-  for (const flag of required) {
-    if (!values.has(flag)) throw new Error(`missing required argument "${flag}"\n${usage()}`);
-  }
-  return {
-    command,
-    spec: values.get("--spec")!,
-    measurements: values.get("--measurements")!,
-    out: values.get("--out")!,
-    ...(command === "confirm" ? { nomination: values.get("--nomination")! } : {}),
-  };
-}
-
-async function readJson(path: string, label: string): Promise<unknown> {
+async function readJson(
+  path: string,
+  label: LegacyJsonInputLabel,
+): Promise<unknown> {
   try {
     return await readBoundedJson(
       createReadStream(path),
@@ -105,7 +89,7 @@ async function readJson(path: string, label: string): Promise<unknown> {
     const code = error instanceof BoundedInputError
       ? error.code
       : "input-failure";
-    throw new Error(`invalid ${label} JSON (${code})`);
+    throw new LegacyJsonInputError(label, code);
   }
 }
 
@@ -182,12 +166,16 @@ function parseNomination(input: unknown): NominationArtifact {
   return input as unknown as NominationArtifact;
 }
 
-function attestationOptions(): AttestationOptions {
-  const attestationKey = process.env.TASC_ATTESTATION_KEY;
+function attestationOptions(
+  environment: Readonly<NodeJS.ProcessEnv>,
+): AttestationOptions {
+  const attestationKey = environment.TASC_ATTESTATION_KEY;
   return attestationKey === undefined ? {} : { attestationKey };
 }
 
-async function parsedInputs(args: Arguments, split: Split) {
+type LegacyCommand = LegacyNominateCommand | LegacyConfirmCommand;
+
+async function parsedInputs(args: LegacyCommand, split: Split) {
   const [specInput, measurementsInput] = await Promise.all([
     readJson(args.spec, "spec"),
     readJson(args.measurements, "measurement"),
@@ -198,34 +186,245 @@ async function parsedInputs(args: Arguments, split: Split) {
   return { spec, measurements };
 }
 
-async function main(): Promise<void> {
-  const args = parseArguments(process.argv.slice(2));
-  if (args.command === "nominate") {
-    const { spec, measurements } = await parsedInputs(args, "dev");
-    const result = nominatePolicy(spec, measurements, attestationOptions());
-    await writeDevelopmentArtifacts(args.out, result, {
-      synthetic: measurements.dataset.synthetic,
+export interface CliIo {
+  readonly stdout: { write(value: string): unknown };
+  readonly stderr: { write(value: string): unknown };
+}
+
+export type CliExitCode = 0 | 1 | 2 | 3 | 4;
+
+async function executeLegacy(
+  command: LegacyCommand,
+  environment: Readonly<NodeJS.ProcessEnv>,
+  io: CliIo,
+): Promise<void> {
+  if (command.kind === "legacy-nominate") {
+    const { spec, measurements } = await parsedInputs(command, "dev");
+    const result = nominatePolicy(
       spec,
       measurements,
-    });
-    process.stdout.write(`${result.status} — artifacts: ${args.out}\n`);
+      attestationOptions(environment),
+    );
+    try {
+      await writeDevelopmentArtifacts(command.out, result, {
+        synthetic: measurements.dataset.synthetic,
+        spec,
+        measurements,
+      });
+    } catch {
+      throw new LegacyOutputError();
+    }
+    io.stdout.write(`${result.status} — artifacts written\n`);
     return;
   }
 
   const [{ spec, measurements }, nominationInput] = await Promise.all([
-    parsedInputs(args, "holdout"),
-    readJson(args.nomination!, "nomination"),
+    parsedInputs(command, "holdout"),
+    readJson(command.nomination, "nomination"),
   ]);
   const nomination = parseNomination(nominationInput);
-  const result = confirmNomination(spec, measurements, nomination, attestationOptions());
-  await writeConfirmationArtifacts(args.out, result, {
-    synthetic: measurements.dataset.synthetic || nomination.developmentSynthetic,
-  });
-  process.stdout.write(`${result.status} — artifacts: ${args.out}\n`);
+  const result = confirmNomination(
+    spec,
+    measurements,
+    nomination,
+    attestationOptions(environment),
+  );
+  try {
+    await writeConfirmationArtifacts(command.out, result, {
+      synthetic:
+        measurements.dataset.synthetic || nomination.developmentSynthetic,
+    });
+  } catch {
+    throw new LegacyOutputError();
+  }
+  io.stdout.write(`${result.status} — artifacts written\n`);
 }
 
-main().catch((error: unknown) => {
-  const message = error instanceof Error ? error.message : String(error);
-  process.stderr.write(`TASC error: ${message}\n`);
-  process.exitCode = 1;
-});
+function writeJsonLine(
+  destination: { write(value: string): unknown },
+  value: unknown,
+): void {
+  destination.write(`${canonicalJson(value)}\n`);
+}
+
+function writeUsageDiagnostic(io: CliIo): void {
+  writeJsonLine(io.stderr, {
+    version: "tasc-cli-diagnostic-v1",
+    code: "USAGE",
+    message: "Invalid command usage.",
+  });
+}
+
+function isLegacyCommand(
+  command: ParsedCliCommand | undefined,
+): command is LegacyCommand {
+  return command?.kind === "legacy-nominate"
+    || command?.kind === "legacy-confirm";
+}
+
+function legacyFailure(
+  error: unknown,
+): Readonly<{
+  exitCode: CliExitCode;
+  code: string;
+  message: string;
+  input?: LegacyJsonInputLabel;
+  detail?: string;
+}> {
+  if (error instanceof LegacyJsonInputError) {
+    return Object.freeze({
+      exitCode: 3,
+      code: "INPUT_INVALID",
+      message: `Invalid ${error.input} JSON (${error.detail}).`,
+      input: error.input,
+      detail: error.detail,
+    });
+  }
+  if (error instanceof LegacyOutputError) {
+    return Object.freeze({
+      exitCode: 4,
+      code: "OUTPUT_FAILURE",
+      message: "Output directory already exists; fresh output required.",
+    });
+  }
+
+  const internalMessage = error instanceof Error ? error.message : "";
+  if (internalMessage.includes("attestation mismatch")) {
+    return Object.freeze({
+      exitCode: 3,
+      code: "NOMINATION_INVALID",
+      message: "Nomination attestation mismatch.",
+    });
+  }
+  if (
+    internalMessage.includes("self-digest")
+    || internalMessage.includes("artifact was edited")
+  ) {
+    return Object.freeze({
+      exitCode: 3,
+      code: "NOMINATION_INVALID",
+      message: "Nomination self-digest mismatch; artifact may have been edited.",
+    });
+  }
+  if (internalMessage.startsWith("invalid nomination")) {
+    return Object.freeze({
+      exitCode: 3,
+      code: "NOMINATION_INVALID",
+      message: "Invalid nomination artifact.",
+    });
+  }
+  return Object.freeze({
+    exitCode: 3,
+    code: "LEGACY_INPUT_INVALID",
+    message: "Legacy evaluation input was rejected.",
+  });
+}
+
+/**
+ * Execute one CLI invocation without importing ambient process state.
+ *
+ * V2 commands ignore `environment`; only the legacy attestation seam may read
+ * `TASC_ATTESTATION_KEY`.
+ */
+export async function runCli(
+  argv: readonly string[],
+  environment: Readonly<NodeJS.ProcessEnv>,
+  io: CliIo,
+): Promise<CliExitCode> {
+  let command: ParsedCliCommand;
+  try {
+    command = parseCliArguments(argv);
+  } catch (error) {
+    if (error instanceof CliArgumentError) {
+      writeUsageDiagnostic(io);
+      return 2;
+    }
+    writeJsonLine(io.stderr, {
+      version: "tasc-cli-diagnostic-v1",
+      code: "INTERNAL",
+      message: "The command failed unexpectedly.",
+    });
+    return 1;
+  }
+
+  try {
+    if (command.kind === "help") {
+      io.stdout.write(`${CLI_USAGE}\n`);
+      return 0;
+    }
+    if (command.kind === "version") {
+      io.stdout.write(`${CLI_VERSION}\n`);
+      return 0;
+    }
+    if (isLegacyCommand(command)) {
+      await executeLegacy(command, environment, io);
+      return 0;
+    }
+
+    const result = await executeCliV2(command);
+    writeJsonLine(io.stdout, result);
+    return 0;
+  } catch (error) {
+    if (error instanceof CliInputError) {
+      writeJsonLine(io.stderr, {
+        version: "tasc-cli-diagnostic-v1",
+        code: "INPUT_INVALID",
+        message: "Input validation failed.",
+        input: error.input,
+        detail: error.detail,
+        ...(error.line === undefined ? {} : { line: error.line }),
+      });
+      return 3;
+    }
+    if (error instanceof CliOutputError) {
+      writeJsonLine(io.stderr, {
+        version: "tasc-cli-diagnostic-v1",
+        code: "OUTPUT_FAILURE",
+        message: "Artifact publication failed.",
+      });
+      return 4;
+    }
+    if (isLegacyCommand(command)) {
+      const failure = legacyFailure(error);
+      writeJsonLine(io.stderr, {
+        version: "tasc-cli-diagnostic-v1",
+        code: failure.code,
+        message: failure.message,
+        ...(failure.input === undefined ? {} : { input: failure.input }),
+        ...(failure.detail === undefined ? {} : { detail: failure.detail }),
+      });
+      return failure.exitCode;
+    }
+    writeJsonLine(io.stderr, {
+      version: "tasc-cli-diagnostic-v1",
+      code: "INTERNAL",
+      message: "The command failed unexpectedly.",
+    });
+    return 1;
+  }
+}
+
+function isDirectExecution(argvEntry: string | undefined): boolean {
+  if (argvEntry === undefined) return false;
+  const modulePath = fileURLToPath(import.meta.url);
+  try {
+    return realpathSync(argvEntry) === realpathSync(modulePath);
+  } catch {
+    return resolve(argvEntry) === resolve(modulePath);
+  }
+}
+
+if (isDirectExecution(process.argv[1])) {
+  runCli(
+    process.argv.slice(2),
+    process.env,
+    { stdout: process.stdout, stderr: process.stderr },
+  ).then(
+    (code) => {
+      process.exitCode = code;
+    },
+    () => {
+      process.exitCode = 1;
+    },
+  );
+}

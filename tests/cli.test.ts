@@ -78,7 +78,8 @@ describe("TASC CLI synthetic end-to-end example", () => {
     ]);
     expect(firstNomination.status, firstNomination.stderr).toBe(0);
     expect(firstNomination.stdout).toContain("NOMINATED");
-    expect(firstNomination.stdout).toContain(devOne);
+    expect(firstNomination.stdout).toContain("artifacts written");
+    expect(firstNomination.stdout).not.toContain(devOne);
     expect((await readdir(devOne)).sort()).toEqual([
       "development-report.json",
       ARTIFACT_MANIFEST_FILENAME,
@@ -145,7 +146,8 @@ describe("TASC CLI synthetic end-to-end example", () => {
     ]);
     expect(firstConfirmation.status, firstConfirmation.stderr).toBe(0);
     expect(firstConfirmation.stdout).toContain("DEMO_ONLY");
-    expect(firstConfirmation.stdout).toContain(holdoutOne);
+    expect(firstConfirmation.stdout).toContain("artifacts written");
+    expect(firstConfirmation.stdout).not.toContain(holdoutOne);
     expect((await readdir(holdoutOne)).sort()).toEqual([
       "confirmation.json",
       ARTIFACT_MANIFEST_FILENAME,
@@ -527,5 +529,54 @@ describe("TASC CLI synthetic end-to-end example", () => {
     expect(oversized.status).not.toBe(0);
     expect(oversized.stderr).toMatch(/invalid measurement JSON.*byte-limit/i);
     expect(() => readdir(output)).rejects.toThrow();
+  }, 30_000);
+
+  it("never reflects legacy source values or output paths", async () => {
+    const root = await mkdtemp(resolve(tmpdir(), "tasc-cli-redaction-"));
+    const sourceSecret = "TOP_SECRET_CASE_DO_NOT_LOG";
+    const pathSecret = "TOP_SECRET_OUTPUT_PATH_DO_NOT_LOG";
+    const invalidMeasurements = await json(DEV);
+    invalidMeasurements.cases[0].id = sourceSecret;
+    invalidMeasurements.cases[0].observations =
+      invalidMeasurements.cases[0].observations.filter(
+        ({ profileId }: { profileId: string }) => profileId !== "fast",
+      );
+    const invalidPath = resolve(root, "invalid-measurements.json");
+    await writeFile(
+      invalidPath,
+      `${JSON.stringify(invalidMeasurements)}\n`,
+    );
+
+    const rejected = runCli([
+      "nominate",
+      "--spec", SPEC,
+      "--measurements", invalidPath,
+      "--out", resolve(root, pathSecret),
+    ]);
+    expect(rejected.status).toBe(3);
+    expect(rejected.stderr).toContain("Legacy evaluation input was rejected.");
+    expect(rejected.stderr).not.toContain(sourceSecret);
+    expect(rejected.stderr).not.toContain(pathSecret);
+
+    const output = resolve(root, pathSecret);
+    const first = runCli([
+      "nominate",
+      "--spec", SPEC,
+      "--measurements", DEV,
+      "--out", output,
+    ]);
+    expect(first.status, first.stderr).toBe(0);
+    expect(first.stdout).not.toContain(pathSecret);
+    const repeated = runCli([
+      "nominate",
+      "--spec", SPEC,
+      "--measurements", DEV,
+      "--out", output,
+    ]);
+    expect(repeated.status).toBe(4);
+    expect(repeated.stderr).toContain(
+      "Output directory already exists; fresh output required.",
+    );
+    expect(repeated.stderr).not.toContain(pathSecret);
   }, 30_000);
 });
