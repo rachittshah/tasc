@@ -11,9 +11,18 @@ import type {
   ControlledReferenceStore,
   ControllerEventBody,
   ControllerSnapshotBody,
+  CollectorTrustPolicy,
+  BoundedRuntimeHttpResult,
+  BoundedSseLimits,
+  BoundedNdjsonStreamLimits,
+  PrometheusParseResult,
   KeyedPayloadIdentity,
+  PinnedCollectorRequest,
   PersistedError,
   PersistedErrorCategory,
+  RuntimeHttpLimits,
+  RuntimeWireDispatchState,
+  RuntimeWireErrorCode,
 } from "../src/index.js";
 
 type TaskEightPublicTypes = [
@@ -38,6 +47,21 @@ type ControllerPublicTypes = [
 ];
 
 const controllerPublicTypeCount: ControllerPublicTypes["length"] = 2;
+
+type RuntimeTransportPublicTypes = [
+  CollectorTrustPolicy,
+  PinnedCollectorRequest,
+  RuntimeHttpLimits,
+  RuntimeWireDispatchState,
+  RuntimeWireErrorCode,
+  BoundedRuntimeHttpResult<unknown>,
+  BoundedSseLimits,
+  BoundedNdjsonStreamLimits,
+  PrometheusParseResult,
+];
+
+const runtimeTransportPublicTypeCount:
+  RuntimeTransportPublicTypes["length"] = 9;
 
 describe("standalone public API", () => {
   it("exports the complete policy-lab surface from one package entry point", () => {
@@ -90,9 +114,23 @@ describe("standalone public API", () => {
       authorizeControlledReference: expect.any(Function),
       resolveAuthorizedControlledReferenceRoot: expect.any(Function),
       createStudyPayloadIdentity: expect.any(Function),
+      COLLECTOR_TRUST_POLICY_VERSION: "tasc-collector-trust-policy-v1",
+      parseCollectorTrustPolicy: expect.any(Function),
+      fingerprintCollectorTrustPolicy: expect.any(Function),
+      narrowCollectorTrustPolicy: expect.any(Function),
+      authorizeCollectorRequest: expect.any(Function),
+      pinAuthorizedCollectorRequest: expect.any(Function),
+      withBoundedHttpResponse: expect.any(Function),
+      RuntimeWireError: expect.any(Function),
+      RuntimeCodecError: expect.any(Function),
+      parseBoundedSse: expect.any(Function),
+      parseBoundedJsonSse: expect.any(Function),
+      parseBoundedNdjsonStream: expect.any(Function),
+      parsePrometheusText: expect.any(Function),
     });
     expect(taskEightPublicTypeCount).toBe(11);
     expect(controllerPublicTypeCount).toBe(2);
+    expect(runtimeTransportPublicTypeCount).toBe(9);
   });
 
   it("keeps deterministic identities independent of object insertion order", () => {
@@ -121,5 +159,6 @@ describe("standalone public API", () => {
     expect(tasc).not.toHaveProperty("deploy");
     expect(tasc).not.toHaveProperty("promoteDeployment");
     expect(tasc).not.toHaveProperty("rollbackDeployment");
+    expect(tasc).not.toHaveProperty("consumePinnedCollectorRequest");
   });
 });
