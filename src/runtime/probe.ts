@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { generateKeySync } from "node:crypto";
 import { isProxy } from "node:util/types";
 import {
   parseBoundedJson,
@@ -16,6 +17,10 @@ import {
   type RuntimeWireDispatchState,
   type RuntimeWireTiming,
 } from "./http.js";
+import {
+  DEFAULT_PROMETHEUS_LIMITS,
+  parsePrometheusText,
+} from "./metrics.js";
 import {
   authorizeCollectorRequest,
   fingerprintCollectorEndpointBinding,
@@ -42,6 +47,10 @@ export const RUNTIME_CAPABILITY_AUTHORIZATION_VERSION =
 
 export type RuntimeProbeCapability =
   | "modelDiscovery"
+  | "liveness"
+  | "readiness"
+  | "prometheusMetrics"
+  | "jsonMetrics"
   | "chatCompletions"
   | "completions"
   | "responses"
@@ -50,7 +59,8 @@ export type RuntimeProbeCapability =
 
 export type RuntimeProbeObservationEffect =
   | "non-mutating"
-  | "inference-canary";
+  | "inference-canary"
+  | "consumptive";
 
 export interface RuntimeCapabilityProbeInput {
   readonly policy: CollectorTrustPolicy;
@@ -65,6 +75,11 @@ export interface RuntimeCapabilityProbeInput {
   readonly observationEffect: RuntimeProbeObservationEffect;
   readonly totalDeadlineMs: number;
   readonly authorizationTtlMs?: number;
+  /**
+   * Metrics callers may retain a strict subset of the library-owned
+   * operational allowlist. Arbitrary metric namespaces are never accepted.
+   */
+  readonly selectedMetricNames?: readonly string[];
   readonly authenticationReference?: string;
   readonly secretHeaderFactory?: RuntimeSecretHeaderFactory;
   readonly signal?: AbortSignal;
@@ -98,6 +113,24 @@ export interface RuntimeProbeObservation {
   readonly statusCode: number | null;
   readonly wireTiming: RuntimeWireTiming | null;
   readonly error: PersistedError | null;
+  readonly metrics: RuntimeProbeMetricsObservation | null;
+}
+
+export interface RuntimeProbeMetric {
+  readonly name: string;
+  readonly value: number;
+  readonly timestampMs: string | null;
+}
+
+export interface RuntimeProbeMetricsObservation {
+  readonly format: "prometheus" | "json";
+  readonly method: "GET";
+  readonly path: string;
+  readonly effect: "non-mutating" | "consumptive";
+  readonly selectedMetricNames: readonly string[];
+  readonly metrics: readonly RuntimeProbeMetric[];
+  readonly totalSamples: number;
+  readonly ignoredSamples: number;
 }
 
 export interface RuntimeCapabilityProbeResult {
@@ -155,7 +188,22 @@ interface NormalizedProbe {
   readonly method: "GET" | "POST";
   readonly path: string;
   readonly requestBody?: Uint8Array;
-  readonly wireProtocol: RuntimeInferenceRoute["wireProtocol"] | "model-list";
+  readonly wireProtocol:
+    | RuntimeInferenceRoute["wireProtocol"]
+    | "model-list"
+    | "health"
+    | "prometheus-metrics"
+    | "json-metrics";
+  readonly responseKind:
+    | "json"
+    | "empty"
+    | "tensorrt-generation-health"
+    | "prometheus"
+    | "json-metrics";
+  readonly accept:
+    | "application/json"
+    | "text/plain; version=0.0.4";
+  readonly selectedMetricNames: readonly string[];
   readonly totalDeadlineMs: number;
   readonly authorizationTtlMs: number;
   readonly authenticationReference?: string;
@@ -177,6 +225,7 @@ const INPUT_KEYS = new Set([
   "observationEffect",
   "totalDeadlineMs",
   "authorizationTtlMs",
+  "selectedMetricNames",
   "authenticationReference",
   "secretHeaderFactory",
   "signal",
@@ -189,6 +238,10 @@ const EXPECTATION_KEYS = new Set([
 ]);
 const PROBE_CAPABILITIES = new Set<RuntimeProbeCapability>([
   "modelDiscovery",
+  "liveness",
+  "readiness",
+  "prometheusMetrics",
+  "jsonMetrics",
   "chatCompletions",
   "completions",
   "responses",
@@ -202,6 +255,78 @@ const INFERENCE_CAPABILITIES = new Set<RuntimeProbeCapability>([
   "nativeChat",
   "nativeGenerate",
 ]);
+const METRICS_CAPABILITIES = new Set<RuntimeProbeCapability>([
+  "prometheusMetrics",
+  "jsonMetrics",
+]);
+const PROMETHEUS_OPERATIONAL_METRICS: Readonly<
+  Partial<Record<RuntimeInstanceIdentity["runtime"]["profileId"], readonly string[]>>
+> = Object.freeze({
+  "llama.cpp": Object.freeze([
+    "llamacpp:requests_processing",
+    "llamacpp:requests_deferred",
+    "llamacpp:prompt_tokens_total",
+    "llamacpp:tokens_predicted_total",
+  ]),
+  sglang: Object.freeze([
+    "sglang:num_running_reqs",
+    "sglang:num_queue_reqs",
+    "sglang:token_usage",
+  ]),
+  "tensorrt-llm": Object.freeze([
+    "trtllm_request_success_total",
+    "trtllm_e2e_request_latency_seconds_sum",
+    "trtllm_e2e_request_latency_seconds_count",
+    "trtllm_time_to_first_token_seconds_sum",
+    "trtllm_time_to_first_token_seconds_count",
+    "trtllm_request_queue_time_seconds_sum",
+    "trtllm_request_queue_time_seconds_count",
+    "trtllm_kv_cache_hit_rate",
+    "trtllm_kv_cache_utilization",
+  ]),
+  tgi: Object.freeze([
+    "tgi_queue_size",
+    "tgi_batch_current_size",
+    "tgi_request_count",
+    "tgi_request_duration_sum",
+    "tgi_request_duration_count",
+  ]),
+  vllm: Object.freeze([
+    "vllm:num_requests_running",
+    "vllm:num_requests_waiting",
+    "vllm:request_success_total",
+    "vllm:e2e_request_latency_seconds_sum",
+    "vllm:e2e_request_latency_seconds_count",
+  ]),
+});
+const TENSORRT_JSON_OPERATIONAL_METRICS = Object.freeze([
+  "gpuMemUsage",
+  "cpuMemUsage",
+  "iter",
+  "iterLatencyMS",
+  "numActiveRequests",
+  "numQueuedRequests",
+  "numContextRequests",
+  "numGenerationRequests",
+  "kvCacheStats.allocNewBlocks",
+  "kvCacheStats.allocTotalBlocks",
+  "kvCacheStats.cacheHitRate",
+  "kvCacheStats.freeNumBlocks",
+  "kvCacheStats.maxNumBlocks",
+  "kvCacheStats.missedBlocks",
+  "kvCacheStats.reusedBlocks",
+  "kvCacheStats.tokensPerBlock",
+  "kvCacheStats.usedNumBlocks",
+] as const);
+const MAX_JSON_METRIC_ROWS = 4_096;
+const MAX_RETAINED_JSON_METRICS = 65_536;
+const TENSORRT_GENERATION_HEALTH_BODY =
+  "Generation health check OK";
+const METRICS_IDENTITY = Object.freeze({
+  studyId: "runtime-probe-operational-metrics",
+  keyId: "runtime-probe-ephemeral-v1",
+  key: generateKeySync("hmac", { length: 256 }),
+});
 const MAX_JSON_BYTES = 1024 * 1024;
 const MAX_MODEL_ID_LENGTH = 512;
 const MAX_AUTHORIZATION_TTL_MS = 5 * 60 * 1_000;
@@ -311,6 +436,47 @@ function boundedText(value: unknown, maximum: number): string {
     fail();
   }
   return value;
+}
+
+function metricSelection(
+  value: unknown,
+  allowlist: readonly string[],
+): readonly string[] {
+  if (value === undefined) return Object.freeze([...allowlist]);
+  if (
+    !Array.isArray(value)
+    || isProxy(value)
+    || Reflect.getPrototypeOf(value) !== Array.prototype
+    || value.length > allowlist.length
+  ) {
+    fail();
+  }
+  const keys = Reflect.ownKeys(value);
+  if (
+    keys.length !== value.length + 1
+    || !keys.includes("length")
+  ) {
+    fail();
+  }
+  const allowed = new Set(allowlist);
+  const selected: string[] = [];
+  const seen = new Set<string>();
+  for (let index = 0; index < value.length; index += 1) {
+    const descriptor = Reflect.getOwnPropertyDescriptor(value, `${index}`);
+    if (
+      descriptor === undefined
+      || !descriptor.enumerable
+      || !Object.hasOwn(descriptor, "value")
+      || typeof descriptor.value !== "string"
+      || !allowed.has(descriptor.value)
+      || seen.has(descriptor.value)
+    ) {
+      fail();
+    }
+    seen.add(descriptor.value);
+    selected.push(descriptor.value);
+  }
+  return Object.freeze(selected);
 }
 
 function parseAbortSignal(value: unknown): AbortSignal | undefined {
@@ -472,21 +638,100 @@ function normalizeProbe(input: RuntimeCapabilityProbeInput): NormalizedProbe {
   let path: string;
   let requestBody: Uint8Array | undefined;
   let wireProtocol: NormalizedProbe["wireProtocol"];
+  let responseKind: NormalizedProbe["responseKind"];
+  let accept: NormalizedProbe["accept"];
+  let selectedMetricNames: readonly string[] = Object.freeze([]);
   if (capability === "modelDiscovery") {
     if (snapshot.observationEffect !== "non-mutating") fail();
+    if (snapshot.selectedMetricNames !== undefined) fail();
     const route = profile.endpoints.models.list;
     if (route === undefined) fail("UNSUPPORTED_PROBE");
     method = route.method;
     path = prefixedPath(endpointDescriptor, route.path);
     wireProtocol = "model-list";
+    responseKind = "json";
+    accept = "application/json";
+  } else if (capability === "liveness" || capability === "readiness") {
+    if (snapshot.selectedMetricNames !== undefined) fail();
+    /*
+     * SGLang v0.5.16 can wire /health to a generation health check via
+     * SGLANG_ENABLE_HEALTH_ENDPOINT_GENERATION. The pinned profile does not
+     * carry authentic launch configuration, so a passive classification would
+     * misrepresent a potentially billable call.
+     */
+    if (capability === "liveness" && profile.id === "sglang") {
+      fail("UNSUPPORTED_PROBE");
+    }
+    const route = profile.endpoints.health[capability];
+    if (route === undefined) fail("UNSUPPORTED_PROBE");
+    const expectation = profile.capabilities[capability];
+    if (
+      expectation.state === "unsupported"
+      || expectation.state === "unknown"
+      || snapshot.observationEffect !== route.observationEffect
+    ) {
+      fail("UNSUPPORTED_PROBE");
+    }
+    method = route.method;
+    path = prefixedPath(endpointDescriptor, route.path);
+    wireProtocol = "health";
+    responseKind =
+      capability === "readiness"
+        && profile.id === "tensorrt-llm"
+        ? "tensorrt-generation-health"
+        : profile.id === "llama.cpp"
+            || profile.id === "mlx-lm"
+            || profile.id === "ollama"
+          ? "json"
+          : "empty";
+    accept = "application/json";
+  } else if (METRICS_CAPABILITIES.has(capability)) {
+    const route = profile.endpoints.metrics.find(
+      (candidate) => candidate.capability === capability,
+    );
+    if (route === undefined) fail("UNSUPPORTED_PROBE");
+    const expectation = profile.capabilities[capability];
+    if (
+      expectation.state === "unsupported"
+      || expectation.state === "unknown"
+      || route.availability === "unsupported"
+      || route.availability === "unknown"
+      || snapshot.observationEffect !== route.observationEffect
+    ) {
+      fail("UNSUPPORTED_PROBE");
+    }
+    const allowlist = capability === "prometheusMetrics"
+      ? PROMETHEUS_OPERATIONAL_METRICS[profile.id]
+      : profile.id === "tensorrt-llm"
+        ? TENSORRT_JSON_OPERATIONAL_METRICS
+        : undefined;
+    if (allowlist === undefined) fail("UNSUPPORTED_PROBE");
+    selectedMetricNames = metricSelection(
+      snapshot.selectedMetricNames,
+      allowlist,
+    );
+    method = route.method;
+    path = prefixedPath(endpointDescriptor, route.path);
+    wireProtocol = capability === "prometheusMetrics"
+      ? "prometheus-metrics"
+      : "json-metrics";
+    responseKind = capability === "prometheusMetrics"
+      ? "prometheus"
+      : "json-metrics";
+    accept = capability === "prometheusMetrics"
+      ? "text/plain; version=0.0.4"
+      : "application/json";
   } else {
+    if (snapshot.selectedMetricNames !== undefined) fail();
     if (
       snapshot.observationEffect !== "inference-canary"
       || !INFERENCE_CAPABILITIES.has(capability)
     ) {
       fail();
     }
-    const route = profile.endpoints.inference[capability];
+    const inferenceCapability =
+      capability as RuntimeInferenceRoute["capability"];
+    const route = profile.endpoints.inference[inferenceCapability];
     if (route === undefined) fail("UNSUPPORTED_PROBE");
     const expectation = profile.capabilities[route.capability];
     if (
@@ -499,6 +744,8 @@ function normalizeProbe(input: RuntimeCapabilityProbeInput): NormalizedProbe {
     path = prefixedPath(endpointDescriptor, route.path);
     wireProtocol = route.wireProtocol;
     requestBody = canaryBody(route, instance.model.id);
+    responseKind = "json";
+    accept = "application/json";
   }
 
   if (
@@ -535,7 +782,8 @@ function normalizeProbe(input: RuntimeCapabilityProbeInput): NormalizedProbe {
     ...(endpointDescriptor === undefined ? {} : { endpointDescriptor }),
     instance,
     capability,
-    observationEffect: snapshot.observationEffect,
+    observationEffect:
+      snapshot.observationEffect as RuntimeProbeObservationEffect,
     method,
     path,
     ...(requestBody === undefined
@@ -545,6 +793,9 @@ function normalizeProbe(input: RuntimeCapabilityProbeInput): NormalizedProbe {
           Uint8Array.prototype.slice.call(requestBody) as Uint8Array,
       }),
     wireProtocol,
+    responseKind,
+    accept,
+    selectedMetricNames,
     totalDeadlineMs,
     authorizationTtlMs,
     ...(snapshot.authenticationReference === undefined
@@ -575,20 +826,247 @@ function record(
 async function readJson(
   response: BoundedRuntimeHttpResponse,
 ): Promise<unknown> {
+  const bytes = await readBytes(response, MAX_JSON_BYTES);
+  const parameters = response.contentTypeParameters ?? [];
+  if (
+    response.contentType !== "application/json"
+    || parameters.length > 1
+    || (
+      parameters.length === 1
+      && (
+        parameters[0]?.name !== "charset"
+        || parameters[0].value.toLowerCase() !== "utf-8"
+      )
+    )
+  ) {
+    throw new Error("invalid probe response");
+  }
+  return parseBoundedJson(bytes, RESPONSE_JSON_LIMITS);
+}
+
+async function readBytes(
+  response: BoundedRuntimeHttpResponse,
+  maximumBytes: number,
+): Promise<Buffer> {
   const chunks: Buffer[] = [];
   let total = 0;
   for await (const chunk of response.body) {
     total += chunk.byteLength;
-    if (total > MAX_JSON_BYTES) throw new Error("invalid probe response");
+    if (total > maximumBytes) throw new Error("invalid probe response");
     chunks.push(Buffer.from(chunk));
   }
-  if (response.contentType !== "application/json") {
+  return Buffer.concat(chunks, total);
+}
+
+function validateClassicPrometheusContentType(
+  response: BoundedRuntimeHttpResponse,
+): void {
+  if (response.contentType !== "text/plain") {
     throw new Error("invalid probe response");
   }
-  return parseBoundedJson(
-    Buffer.concat(chunks, total),
-    RESPONSE_JSON_LIMITS,
-  );
+  const parameters = response.contentTypeParameters ?? [];
+  if (parameters.length < 1 || parameters.length > 2) {
+    throw new Error("invalid probe response");
+  }
+  let version = false;
+  let charset = false;
+  for (const parameter of parameters) {
+    if (parameter.name === "version" && parameter.value === "0.0.4") {
+      version = true;
+    } else if (
+      parameter.name === "charset"
+      && parameter.value.toLowerCase() === "utf-8"
+    ) {
+      charset = true;
+    } else {
+      throw new Error("invalid probe response");
+    }
+  }
+  if (!version || (parameters.length === 2 && !charset)) {
+    throw new Error("invalid probe response");
+  }
+}
+
+function validateHealthJson(
+  value: unknown,
+  probe: NormalizedProbe,
+): RuntimeCapabilityIdentityVerification {
+  const json = record(value);
+  if (json === null || Object.hasOwn(json, "error")) {
+    throw new Error("invalid probe response");
+  }
+  if (probe.instance.runtime.profileId === "ollama") {
+    if (json.version !== probe.instance.runtime.build) {
+      throw new Error("probe runtime identity mismatch");
+    }
+    return identityVerification({
+      probe,
+      providerRuntimeBuild: probe.instance.runtime.build,
+    });
+  }
+  if (
+    (probe.instance.runtime.profileId !== "llama.cpp"
+      && probe.instance.runtime.profileId !== "mlx-lm")
+    || json.status !== "ok"
+  ) {
+    throw new Error("invalid probe response");
+  }
+  return identityVerification({ probe });
+}
+
+function validateTensorRtJsonMetrics(
+  value: unknown,
+  probe: NormalizedProbe,
+): RuntimeProbeMetricsObservation {
+  if (
+    !Array.isArray(value)
+    || value.length > MAX_JSON_METRIC_ROWS
+  ) {
+    throw new Error("invalid probe response");
+  }
+  const selected = new Set(probe.selectedMetricNames);
+  const metrics: RuntimeProbeMetric[] = [];
+  let totalSamples = 0;
+  for (const item of value) {
+    const row = record(item);
+    if (row === null || Object.hasOwn(row, "error")) {
+      throw new Error("invalid probe response");
+    }
+    const rawKv = row.kvCacheStats;
+    const kv = rawKv === undefined ? null : record(rawKv);
+    if (rawKv !== undefined && kv === null) {
+      throw new Error("invalid probe response");
+    }
+    for (const name of TENSORRT_JSON_OPERATIONAL_METRICS) {
+      const raw = name.startsWith("kvCacheStats.")
+        ? kv?.[name.slice("kvCacheStats.".length)]
+        : row[name];
+      if (raw === undefined) continue;
+      if (
+        typeof raw !== "number"
+        || !Number.isFinite(raw)
+        || (Number.isInteger(raw) && !Number.isSafeInteger(raw))
+      ) {
+        throw new Error("invalid probe response");
+      }
+      totalSamples += 1;
+      if (!selected.has(name)) continue;
+      if (metrics.length >= MAX_RETAINED_JSON_METRICS) {
+        throw new Error("invalid probe response");
+      }
+      metrics.push(Object.freeze({
+        name,
+        value: raw,
+        timestampMs: null,
+      }));
+    }
+  }
+  return deepFreeze({
+    format: "json",
+    method: "GET",
+    path: probe.path,
+    effect: "consumptive",
+    selectedMetricNames: probe.selectedMetricNames,
+    metrics,
+    totalSamples,
+    ignoredSamples: totalSamples - metrics.length,
+  });
+}
+
+async function validateProbeResponse(
+  response: BoundedRuntimeHttpResponse,
+  probe: NormalizedProbe,
+): Promise<{
+  readonly verification: RuntimeCapabilityIdentityVerification;
+  readonly metrics: RuntimeProbeMetricsObservation | null;
+}> {
+  if (probe.responseKind === "tensorrt-generation-health") {
+    const expected = Buffer.from(
+      TENSORRT_GENERATION_HEALTH_BODY,
+      "utf8",
+    );
+    const bytes = await readBytes(response, expected.byteLength + 1);
+    if (
+      response.statusCode !== 200
+      || bytes.byteLength !== expected.byteLength
+      || !bytes.equals(expected)
+    ) {
+      throw new Error("invalid probe response");
+    }
+    return Object.freeze({
+      verification: identityVerification({ probe }),
+      metrics: null,
+    });
+  }
+  if (probe.responseKind === "empty") {
+    const bytes = await readBytes(response, 1);
+    if (
+      response.statusCode !== 200
+      || bytes.byteLength !== 0
+    ) {
+      throw new Error("invalid probe response");
+    }
+    return Object.freeze({
+      verification: identityVerification({ probe }),
+      metrics: null,
+    });
+  }
+  if (probe.responseKind === "prometheus") {
+    const bytes = await readBytes(
+      response,
+      DEFAULT_PROMETHEUS_LIMITS.maxBytes,
+    );
+    if (response.statusCode !== 200) {
+      throw new Error("invalid probe response");
+    }
+    validateClassicPrometheusContentType(response);
+    const parsed = parsePrometheusText(bytes, {
+      limits: DEFAULT_PROMETHEUS_LIMITS,
+      selectedMetricNames: probe.selectedMetricNames,
+      identity: METRICS_IDENTITY,
+    });
+    const metrics = parsed.samples.map((sample) => Object.freeze({
+      name: sample.metric,
+      value: sample.value,
+      timestampMs: sample.timestampMs,
+    }));
+    const metricsObservation: RuntimeProbeMetricsObservation = deepFreeze({
+      format: "prometheus",
+      method: "GET",
+      path: probe.path,
+      effect: "non-mutating",
+      selectedMetricNames: probe.selectedMetricNames,
+      metrics,
+      totalSamples: parsed.summary.totalSamples,
+      ignoredSamples: parsed.summary.ignoredSamples,
+    });
+    return Object.freeze({
+      verification: identityVerification({ probe }),
+      metrics: metricsObservation,
+    });
+  }
+  const json = await readJson(response);
+  if (response.statusCode !== 200) {
+    throw new Error("invalid probe response");
+  }
+  if (probe.responseKind === "json-metrics") {
+    return Object.freeze({
+      verification: identityVerification({ probe }),
+      metrics: validateTensorRtJsonMetrics(json, probe),
+    });
+  }
+  if (probe.wireProtocol === "health") {
+    return Object.freeze({
+      verification: validateHealthJson(json, probe),
+      metrics: null,
+    });
+  }
+  return Object.freeze({
+    verification: probe.capability === "modelDiscovery"
+      ? validateModelList(json, probe)
+      : validateCanary(json, probe),
+    metrics: null,
+  });
 }
 
 function identityVerification(input: {
@@ -807,6 +1285,9 @@ function validateCanary(
         providerModelId: probe.instance.model.id,
       });
     case "model-list":
+    case "health":
+    case "prometheus-metrics":
+    case "json-metrics":
       throw new Error("invalid probe response");
   }
 }
@@ -945,6 +1426,7 @@ function observation(
   statusCode: number | null,
   wireTiming: RuntimeWireTiming | null,
   error: PersistedError | null,
+  metrics: RuntimeProbeMetricsObservation | null = null,
 ): RuntimeProbeObservation {
   return deepFreeze({
     effect: probe.observationEffect,
@@ -952,6 +1434,7 @@ function observation(
     statusCode,
     wireTiming,
     error,
+    metrics,
   });
 }
 
@@ -1030,7 +1513,7 @@ export async function probeRuntimeCapability(
     const response = await withBoundedHttpResponse(
       pin,
       {
-        accept: "application/json",
+        accept: probe.accept,
         ...(probe.requestBody === undefined
           ? {}
           : { body: probe.requestBody }),
@@ -1040,19 +1523,16 @@ export async function probeRuntimeCapability(
           : { secretHeaderFactory: probe.secretHeaderFactory }),
       },
       async (wireResponse) => {
-        const json = await readJson(wireResponse);
-        return probe.capability === "modelDiscovery"
-          ? validateModelList(json, probe)
-          : validateCanary(json, probe);
+        return validateProbeResponse(wireResponse, probe);
       },
     );
-    const authority = probe.capability === "modelDiscovery"
-      ? null
-      : issueAuthorization(probe, response.value);
+    const authority = INFERENCE_CAPABILITIES.has(probe.capability)
+      ? issueAuthorization(probe, response.value.verification)
+      : null;
     return result(
       probe,
       "supported",
-      response.value,
+      response.value.verification,
       authority,
       observation(
         probe,
@@ -1060,6 +1540,7 @@ export async function probeRuntimeCapability(
         response.statusCode,
         response.timing,
         null,
+        response.value.metrics,
       ),
     );
   } catch (error) {

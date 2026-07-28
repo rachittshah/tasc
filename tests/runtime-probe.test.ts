@@ -11,6 +11,8 @@ import {
   RuntimeProbeInputError,
   verifyRuntimeCapabilityAuthorization,
   type RuntimeCapabilityProbeInput,
+  type RuntimeProbeCapability,
+  type RuntimeProbeObservationEffect,
 } from "../src/runtime/probe.js";
 import {
   fingerprintCollectorEndpointBinding,
@@ -141,12 +143,10 @@ function jsonResponse(
 function fixture(input: {
   readonly server: TestServer;
   readonly profileId: RuntimeProfileId;
-  readonly capability:
-    | "modelDiscovery"
-    | "chatCompletions"
-    | "nativeChat";
-  readonly observationEffect: "non-mutating" | "inference-canary";
+  readonly capability: RuntimeProbeCapability;
+  readonly observationEffect: RuntimeProbeObservationEffect;
   readonly authorizationTtlMs?: number;
+  readonly selectedMetricNames?: readonly string[];
 }): {
   readonly policy: CollectorTrustPolicy;
   readonly instance: RuntimeInstanceIdentity;
@@ -155,7 +155,15 @@ function fixture(input: {
   const profile = getRuntimeProfile(input.profileId);
   const route = input.capability === "modelDiscovery"
     ? profile.endpoints.models.list
-    : profile.endpoints.inference[input.capability];
+    : input.capability === "liveness"
+        || input.capability === "readiness"
+      ? profile.endpoints.health[input.capability]
+      : input.capability === "prometheusMetrics"
+          || input.capability === "jsonMetrics"
+        ? profile.endpoints.metrics.find(
+          ({ capability }) => capability === input.capability,
+        )
+        : profile.endpoints.inference[input.capability];
   if (route === undefined) throw new Error("fixture route is missing");
   const endpointAlias = `probe-${input.profileId.replace(".", "-")}`;
   const policy = parseCollectorTrustPolicy({
@@ -205,11 +213,410 @@ function fixture(input: {
       ...(input.authorizationTtlMs === undefined
         ? {}
         : { authorizationTtlMs: input.authorizationTtlMs }),
+      ...(input.selectedMetricNames === undefined
+        ? {}
+        : { selectedMetricNames: input.selectedMetricNames }),
     },
   };
 }
 
 describe("runtime capability probes", () => {
+  it.each([
+    ["vllm", "/health", "empty"],
+    ["tensorrt-llm", "/health", "empty"],
+    ["tgi", "/health", "empty"],
+    ["llama.cpp", "/health", "status"],
+    ["mlx-lm", "/health", "status"],
+    ["ollama", "/api/version", "version"],
+  ] as const)(
+    "observes the exact passive %s liveness contract",
+    async (profileId, path, responseKind) => {
+      const profile = getRuntimeProfile(profileId);
+      const server = await startServer((_request, response) => {
+        if (responseKind === "empty") {
+          response.statusCode = 200;
+          response.end();
+        } else if (responseKind === "version") {
+          jsonResponse(response, { version: profile.runtime.build });
+        } else {
+          jsonResponse(response, { status: "ok" });
+        }
+      });
+      const { probe } = fixture({
+        server,
+        profileId,
+        capability: "liveness",
+        observationEffect: "non-mutating",
+      });
+
+      const result = await deadline(probeRuntimeCapability(probe));
+
+      expect(server.contacts()).toBe(1);
+      expect(server.requests()).toMatchObject([{
+        method: "GET",
+        path,
+        accept: "application/json",
+      }]);
+      expect(result).toMatchObject({
+        evidence: {
+          capability: "liveness",
+          state: "supported",
+        },
+        authorization: null,
+        observation: {
+          effect: "non-mutating",
+          dispatchState: "completed",
+          statusCode: 200,
+          error: null,
+          metrics: null,
+        },
+      });
+    },
+  );
+
+  it("rejects ambiguous SGLang liveness before contact without authentic launch configuration", async () => {
+    const server = await startServer((_request, response) => {
+      response.statusCode = 200;
+      response.end();
+    });
+    const { probe } = fixture({
+      server,
+      profileId: "sglang",
+      capability: "liveness",
+      observationEffect: "non-mutating",
+    });
+
+    await expect(probeRuntimeCapability(probe)).rejects.toMatchObject({
+      code: "UNSUPPORTED_PROBE",
+    });
+    expect(server.contacts()).toBe(0);
+  });
+
+  it.each([
+    [
+      "vllm",
+      "/metrics",
+      "vllm:e2e_request_latency_seconds_sum",
+      "vllm:e2e_request_latency_seconds",
+    ],
+    ["sglang", "/metrics", "sglang:num_running_reqs", null],
+    [
+      "tensorrt-llm",
+      "/prometheus/metrics",
+      "trtllm_e2e_request_latency_seconds_sum",
+      "trtllm_e2e_request_latency_seconds",
+    ],
+    [
+      "tgi",
+      "/metrics",
+      "tgi_request_duration_sum",
+      "tgi_request_duration",
+    ],
+    ["llama.cpp", "/metrics", "llamacpp:requests_processing", null],
+  ] as const)(
+    "parses only allowlisted classic Prometheus numbers from %s",
+    async (profileId, path, metricName, histogramFamily) => {
+      const server = await startServer((_request, response) => {
+        response.statusCode = 200;
+        response.setHeader(
+          "content-type",
+          "text/plain; version=0.0.4; charset=utf-8",
+        );
+        response.end(histogramFamily === null
+          ? `# HELP ${metricName} Current operational value.\n`
+            + `# TYPE ${metricName} gauge\n`
+            + `${metricName}{model="must-not-persist"} 2\n`
+            + "unselected_provider_metric 99\n"
+          : `# HELP ${histogramFamily} Request latency.\n`
+            + `# TYPE ${histogramFamily} histogram\n`
+            + `${histogramFamily}_bucket{le="1",model="must-not-persist"} 1\n`
+            + `${histogramFamily}_sum{model="must-not-persist"} 2\n`
+            + `${histogramFamily}_count{model="must-not-persist"} 1\n`
+            + "unselected_provider_metric 99\n");
+      });
+      const { probe } = fixture({
+        server,
+        profileId,
+        capability: "prometheusMetrics",
+        observationEffect: "non-mutating",
+        selectedMetricNames: [metricName],
+      });
+
+      const result = await deadline(probeRuntimeCapability(probe));
+
+      expect(server.contacts()).toBe(1);
+      expect(server.requests()).toMatchObject([{
+        method: "GET",
+        path,
+        accept: "text/plain; version=0.0.4",
+      }]);
+      expect(result).toMatchObject({
+        evidence: {
+          capability: "prometheusMetrics",
+          state: "supported",
+        },
+        authorization: null,
+        observation: {
+          effect: "non-mutating",
+          error: null,
+          metrics: {
+            format: "prometheus",
+            method: "GET",
+            path,
+            effect: "non-mutating",
+            selectedMetricNames: [metricName],
+            metrics: [{
+              name: metricName,
+              value: 2,
+              timestampMs: null,
+            }],
+            totalSamples: histogramFamily === null ? 2 : 4,
+            ignoredSamples: histogramFamily === null ? 1 : 3,
+          },
+        },
+      });
+      expect(JSON.stringify(result)).not.toContain("must-not-persist");
+      expect(JSON.stringify(result)).not.toContain(
+        "unselected_provider_metric",
+      );
+    },
+  );
+
+  it.each([
+    ["sglang", "/health_generate", ""],
+    [
+      "tensorrt-llm",
+      "/health_generate",
+      "Generation health check OK",
+    ],
+  ] as const)(
+    "runs exactly one explicit %s readiness canary without minting inference authority",
+    async (profileId, path, responseBody) => {
+      const server = await startServer((_request, response) => {
+        response.statusCode = 200;
+        response.end(responseBody);
+      });
+      const { probe } = fixture({
+        server,
+        profileId,
+        capability: "readiness",
+        observationEffect: "inference-canary",
+      });
+
+      const result = await deadline(probeRuntimeCapability(probe));
+
+      expect(server.contacts()).toBe(1);
+      expect(server.requests()).toMatchObject([{
+        method: "GET",
+        path,
+        accept: "application/json",
+      }]);
+      expect(server.requests()[0]?.body.byteLength).toBe(0);
+      expect(result).toMatchObject({
+        evidence: {
+          capability: "readiness",
+          state: "supported",
+        },
+        authorization: null,
+        observation: {
+          effect: "inference-canary",
+          dispatchState: "completed",
+          statusCode: 200,
+          error: null,
+          metrics: null,
+        },
+      });
+    },
+  );
+
+  it("rejects a non-exact TensorRT generation-health body after one canary", async () => {
+    const server = await startServer((_request, response) => {
+      response.statusCode = 200;
+      response.end("Generation health check OK\n");
+    });
+    const { probe } = fixture({
+      server,
+      profileId: "tensorrt-llm",
+      capability: "readiness",
+      observationEffect: "inference-canary",
+    });
+
+    const result = await deadline(probeRuntimeCapability(probe));
+
+    expect(server.contacts()).toBe(1);
+    expect(result).toMatchObject({
+      evidence: {
+        capability: "readiness",
+        state: "unknown",
+      },
+      authorization: null,
+      observation: {
+        effect: "inference-canary",
+        dispatchState: "completed",
+        metrics: null,
+      },
+    });
+  });
+
+  it("retains only selected bounded numbers from consumptive TensorRT JSON metrics", async () => {
+    const server = await startServer((_request, response) => {
+      jsonResponse(response, [{
+        gpuMemUsage: 76_665_782_272,
+        iter: 154,
+        iterLatencyMS: 7.00688362121582,
+        kvCacheStats: {
+          cacheHitRate: 0.00128,
+          freeNumBlocks: 101_253,
+          unrecognizedPrivateCounter: 7,
+        },
+        numActiveRequests: 1,
+        privateBackendMessage: "must-not-persist",
+      }]);
+    });
+    const { probe } = fixture({
+      server,
+      profileId: "tensorrt-llm",
+      capability: "jsonMetrics",
+      observationEffect: "consumptive",
+      selectedMetricNames: [
+        "iterLatencyMS",
+        "kvCacheStats.cacheHitRate",
+      ],
+    });
+
+    const result = await deadline(probeRuntimeCapability(probe));
+
+    expect(server.contacts()).toBe(1);
+    expect(server.requests()).toMatchObject([{
+      method: "GET",
+      path: "/metrics",
+      accept: "application/json",
+    }]);
+    expect(result).toMatchObject({
+      evidence: {
+        capability: "jsonMetrics",
+        state: "supported",
+      },
+      authorization: null,
+      observation: {
+        effect: "consumptive",
+        dispatchState: "completed",
+        error: null,
+        metrics: {
+          format: "json",
+          method: "GET",
+          path: "/metrics",
+          effect: "consumptive",
+          selectedMetricNames: [
+            "iterLatencyMS",
+            "kvCacheStats.cacheHitRate",
+          ],
+          metrics: [
+            {
+              name: "iterLatencyMS",
+              value: 7.00688362121582,
+              timestampMs: null,
+            },
+            {
+              name: "kvCacheStats.cacheHitRate",
+              value: 0.00128,
+              timestampMs: null,
+            },
+          ],
+          totalSamples: 6,
+          ignoredSamples: 4,
+        },
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain("must-not-persist");
+    expect(JSON.stringify(result)).not.toContain(
+      "unrecognizedPrivateCounter",
+    );
+  });
+
+  it("rejects wrong effects and arbitrary metric namespaces before contact", async () => {
+    const server = await startServer((_request, response) => {
+      jsonResponse(response, []);
+    });
+    const readiness = fixture({
+      server,
+      profileId: "tensorrt-llm",
+      capability: "readiness",
+      observationEffect: "inference-canary",
+    });
+    await expect(probeRuntimeCapability({
+      ...readiness.probe,
+      observationEffect: "non-mutating",
+    })).rejects.toMatchObject({ code: "UNSUPPORTED_PROBE" });
+
+    const metrics = fixture({
+      server,
+      profileId: "tensorrt-llm",
+      capability: "jsonMetrics",
+      observationEffect: "consumptive",
+    });
+    await expect(probeRuntimeCapability({
+      ...metrics.probe,
+      observationEffect: "non-mutating",
+    })).rejects.toMatchObject({ code: "UNSUPPORTED_PROBE" });
+    await expect(probeRuntimeCapability({
+      ...metrics.probe,
+      selectedMetricNames: ["judge_score"],
+    })).rejects.toBeInstanceOf(RuntimeProbeInputError);
+    expect(server.contacts()).toBe(0);
+  });
+
+  it("classifies missing classic version and malformed JSON metrics as unknown after one call each", async () => {
+    const prometheusServer = await startServer((_request, response) => {
+      response.statusCode = 200;
+      response.setHeader("content-type", "text/plain");
+      response.end("vllm:num_requests_running 1\n");
+    });
+    const prometheus = fixture({
+      server: prometheusServer,
+      profileId: "vllm",
+      capability: "prometheusMetrics",
+      observationEffect: "non-mutating",
+    });
+    const wrongPrometheus = await deadline(
+      probeRuntimeCapability(prometheus.probe),
+    );
+    expect(wrongPrometheus).toMatchObject({
+      evidence: { state: "unknown" },
+      authorization: null,
+      observation: {
+        dispatchState: "completed",
+        statusCode: 200,
+        metrics: null,
+      },
+    });
+    expect(prometheusServer.contacts()).toBe(1);
+
+    const jsonServer = await startServer((_request, response) => {
+      jsonResponse(response, [{ iterLatencyMS: "provider-secret" }]);
+    });
+    const jsonMetrics = fixture({
+      server: jsonServer,
+      profileId: "tensorrt-llm",
+      capability: "jsonMetrics",
+      observationEffect: "consumptive",
+    });
+    const malformedJson = await deadline(
+      probeRuntimeCapability(jsonMetrics.probe),
+    );
+    expect(malformedJson).toMatchObject({
+      evidence: { state: "unknown" },
+      authorization: null,
+      observation: {
+        dispatchState: "completed",
+        statusCode: 200,
+        metrics: null,
+      },
+    });
+    expect(JSON.stringify(malformedJson)).not.toContain("provider-secret");
+    expect(jsonServer.contacts()).toBe(1);
+  });
+
   it("passively discovers the exact pinned vLLM model with no authority side effect", async () => {
     const server = await startServer((_request, response) => {
       jsonResponse(response, {

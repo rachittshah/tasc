@@ -191,6 +191,7 @@ interface MutableTiming {
 
 interface LifecycleState {
   dispatchState: RuntimeWireDispatchState;
+  responseStatusCode?: number;
   responseComplete: boolean;
   responseBytes: number;
   responseChunks: number;
@@ -1034,6 +1035,18 @@ function classifyTransportError(
   abortSource: OperationAbortSource | undefined,
 ): RuntimeWireError {
   if (isAuthenticRuntimeWireError(error, timing)) {
+    if (
+      error.statusCode === undefined
+      && state.responseStatusCode !== undefined
+    ) {
+      return wireError(
+        timing,
+        error.code,
+        error.message,
+        error.dispatchState,
+        state.responseStatusCode,
+      );
+    }
     return error;
   }
   if (abortSource === "caller") {
@@ -1042,6 +1055,7 @@ function classifyTransportError(
       "CALLER_CANCELLED",
       "Runtime request was cancelled by the caller.",
       state.dispatchState,
+      state.responseStatusCode,
     );
   }
   if (abortSource === "deadline") {
@@ -1050,6 +1064,7 @@ function classifyTransportError(
       "DEADLINE_EXCEEDED",
       "Runtime request exceeded its total deadline.",
       state.dispatchState,
+      state.responseStatusCode,
     );
   }
   if (abortSource === "connect") {
@@ -1058,6 +1073,7 @@ function classifyTransportError(
       "CONNECT_TIMEOUT",
       "Runtime connection timed out.",
       state.dispatchState,
+      state.responseStatusCode,
     );
   }
   if (abortSource === "headers") {
@@ -1066,6 +1082,7 @@ function classifyTransportError(
       "HEADERS_TIMEOUT",
       "Runtime response headers timed out.",
       state.dispatchState,
+      state.responseStatusCode,
     );
   }
   if (abortSource === "body") {
@@ -1074,6 +1091,7 @@ function classifyTransportError(
       "BODY_TIMEOUT",
       "Runtime response body timed out.",
       state.dispatchState,
+      state.responseStatusCode,
     );
   }
   if (error instanceof errors.ConnectTimeoutError) {
@@ -1082,6 +1100,7 @@ function classifyTransportError(
       "CONNECT_TIMEOUT",
       "Runtime connection timed out.",
       state.dispatchState,
+      state.responseStatusCode,
     );
   }
   if (error instanceof errors.HeadersTimeoutError) {
@@ -1090,6 +1109,7 @@ function classifyTransportError(
       "HEADERS_TIMEOUT",
       "Runtime response headers timed out.",
       state.dispatchState,
+      state.responseStatusCode,
     );
   }
   if (error instanceof errors.HeadersOverflowError) {
@@ -1098,6 +1118,7 @@ function classifyTransportError(
       "INVALID_RESPONSE_HEADERS",
       "Runtime response headers exceeded a configured limit.",
       state.dispatchState,
+      state.responseStatusCode,
     );
   }
   if (error instanceof errors.InvalidArgumentError) {
@@ -1114,6 +1135,7 @@ function classifyTransportError(
       "BODY_TIMEOUT",
       "Runtime response body timed out.",
       state.dispatchState,
+      state.responseStatusCode,
     );
   }
   if (error instanceof errors.ResponseExceededMaxSizeError) {
@@ -1122,6 +1144,7 @@ function classifyTransportError(
       "RESPONSE_TOO_LARGE",
       "Runtime response exceeded the configured byte limit.",
       state.dispatchState,
+      state.responseStatusCode,
     );
   }
   if (error instanceof errors.ResponseContentLengthMismatchError) {
@@ -1130,6 +1153,7 @@ function classifyTransportError(
       "RESPONSE_TRUNCATED",
       "Runtime response ended before its declared length.",
       state.dispatchState,
+      state.responseStatusCode,
     );
   }
   if (
@@ -1142,6 +1166,7 @@ function classifyTransportError(
       "RESPONSE_TRUNCATED",
       "Runtime response transport ended unexpectedly.",
       state.dispatchState,
+      state.responseStatusCode,
     );
   }
   if (state.dispatchState === "not_sent") {
@@ -1165,6 +1190,7 @@ function classifyTransportError(
     "RESPONSE_REJECTED",
     "Runtime response processing failed.",
     state.responseComplete ? "completed" : state.dispatchState,
+    state.responseStatusCode,
   );
 }
 
@@ -1416,6 +1442,7 @@ export async function withBoundedHttpResponse<T>(
       }),
       abortPromise,
     ]);
+    state.responseStatusCode = response.statusCode;
     connectTimer = clearPhaseTimer(connectTimer);
     headersTimer = clearPhaseTimer(headersTimer);
     state.dispatchState = "sent_unknown";

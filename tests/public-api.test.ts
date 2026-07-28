@@ -27,6 +27,8 @@ import type {
   RuntimeCapabilityAuthorization,
   RuntimeCapabilityProbeInput,
   RuntimeCapabilityProbeResult,
+  RuntimeProbeMetric,
+  RuntimeProbeMetricsObservation,
   RuntimeInvocationInput,
   RuntimeInvocationOutcome,
 } from "../src/index.js";
@@ -74,11 +76,13 @@ type RuntimeCallPublicTypes = [
   RuntimeCapabilityAuthorization,
   RuntimeCapabilityProbeInput,
   RuntimeCapabilityProbeResult,
+  RuntimeProbeMetric,
+  RuntimeProbeMetricsObservation,
   RuntimeInvocationInput,
   RuntimeInvocationOutcome,
 ];
 
-const runtimeCallPublicTypeCount: RuntimeCallPublicTypes["length"] = 5;
+const runtimeCallPublicTypeCount: RuntimeCallPublicTypes["length"] = 7;
 
 describe("standalone public API", () => {
   it("exports the complete policy-lab surface from one package entry point", () => {
@@ -164,7 +168,7 @@ describe("standalone public API", () => {
     expect(taskEightPublicTypeCount).toBe(11);
     expect(controllerPublicTypeCount).toBe(2);
     expect(runtimeTransportPublicTypeCount).toBe(10);
-    expect(runtimeCallPublicTypeCount).toBe(5);
+    expect(runtimeCallPublicTypeCount).toBe(7);
   });
 
   it("keeps deterministic identities independent of object insertion order", () => {

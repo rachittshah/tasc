@@ -518,6 +518,8 @@ export type {
   RuntimeCapabilityProbeResult,
   RuntimeProbeCapability,
   RuntimeProbeInputErrorCode,
+  RuntimeProbeMetric,
+  RuntimeProbeMetricsObservation,
   RuntimeProbeObservation,
   RuntimeProbeObservationEffect,
 } from "./runtime/probe.js";

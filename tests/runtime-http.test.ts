@@ -317,6 +317,7 @@ describe("bounded runtime HTTP lifecycle", () => {
         expect(error).toMatchObject({
           code: "INVALID_RESPONSE_HEADERS",
           dispatchState: "sent_unknown",
+          statusCode: 200,
         });
       });
     }
@@ -507,6 +508,7 @@ describe("bounded runtime HTTP lifecycle", () => {
       expect(error).toMatchObject({
         code: "RESPONSE_REJECTED",
         dispatchState: "completed",
+        statusCode: 200,
         persistedError: {
           category: "invalid-response",
           runtime: "vllm",
@@ -567,6 +569,7 @@ describe("bounded runtime HTTP lifecycle", () => {
       expect(error).toMatchObject({
         code: "RESPONSE_REJECTED",
         dispatchState: "completed",
+        statusCode: 200,
         target: {
           endpointAlias: "request-b-sglang",
           runtime: requestBRuntime,
@@ -762,6 +765,7 @@ describe("bounded runtime HTTP lifecycle", () => {
       expect(error).toMatchObject({
         code: "BODY_TIMEOUT",
         dispatchState: "sent_unknown",
+        statusCode: 200,
       });
     });
 
