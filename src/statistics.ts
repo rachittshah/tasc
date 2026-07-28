@@ -1,4 +1,28 @@
+import { createHash } from "node:crypto";
+import { canonicalJsonBytes } from "./determinism.js";
 import { compareCodeUnits } from "./determinism.js";
+
+const UINT32_MODULUS = 0x1_0000_0000n;
+
+/**
+ * Portable mapping from a preregistered string seed to the uint32 consumed by
+ * the deterministic PRNG. The complete SHA-256 integer participates.
+ */
+export function bootstrapSeedFromString(seed: string): number {
+  if (
+    typeof seed !== "string"
+    || !/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/.test(seed)
+    || seed.length > 128
+  ) {
+    throw new Error("bootstrap seed must be a lowercase contract slug");
+  }
+  const bytes = canonicalJsonBytes({
+    domain: "tasc/paired-group-bootstrap-seed/v1",
+    value: seed,
+  });
+  const digest = createHash("sha256").update(bytes).digest("hex");
+  return Number(BigInt(`0x${digest}`) % UINT32_MODULUS);
+}
 
 /** Deterministic PRNG used to make bootstrap decisions reproducible. */
 export function mulberry32(seed: number): () => number {
@@ -26,16 +50,70 @@ export function median(values: readonly number[]): number {
     : (sorted[middle - 1] + sorted[middle]) / 2;
 }
 
-export function quantile(values: readonly number[], probability: number): number {
-  if (values.length === 0) return Number.NaN;
-  if (values.length === 1) return values[0];
-  const sorted = [...values].sort((left, right) => left - right);
+function quantileFromSorted(
+  sorted: readonly number[],
+  probability: number,
+): number {
+  if (sorted.length === 0) return Number.NaN;
+  if (sorted.length === 1) return sorted[0];
   const boundedProbability = Math.min(1, Math.max(0, probability));
   const position = (sorted.length - 1) * boundedProbability;
   const lower = Math.floor(position);
   const upper = Math.ceil(position);
   if (lower === upper) return sorted[lower];
   return sorted[lower] + (sorted[upper] - sorted[lower]) * (position - lower);
+}
+
+export function quantile(values: readonly number[], probability: number): number {
+  return quantileFromSorted(
+    [...values].sort((left, right) => left - right),
+    probability,
+  );
+}
+
+export interface WeightedValue {
+  value: number;
+  weight: number;
+  identity: string;
+}
+
+/**
+ * Traffic-weighted inverse empirical CDF. Stable identity ordering resolves
+ * equal-value rows before finite summation.
+ */
+export function weightedQuantile(
+  values: readonly WeightedValue[],
+  probability: number,
+): number {
+  if (values.length === 0) return Number.NaN;
+  if (!Number.isFinite(probability) || probability < 0 || probability > 1) {
+    throw new Error("weighted quantile probability must be between zero and one");
+  }
+  const sorted = [...values].sort((left, right) => (
+    left.value - right.value
+    || compareCodeUnits(left.identity, right.identity)
+  ));
+  let mass = 0;
+  for (const entry of sorted) {
+    if (!Number.isFinite(entry.value)) {
+      throw new Error("weighted quantile values must be finite");
+    }
+    if (!Number.isFinite(entry.weight) || entry.weight <= 0) {
+      throw new Error("weighted quantile weights must be finite and positive");
+    }
+    mass = checkedFiniteAdd(mass, entry.weight, "weighted quantile mass");
+  }
+  const target = probability * mass;
+  let cumulative = 0;
+  for (const entry of sorted) {
+    cumulative = checkedFiniteAdd(
+      cumulative,
+      entry.weight,
+      "weighted quantile cumulative mass",
+    );
+    if (cumulative >= target) return entry.value;
+  }
+  return sorted[sorted.length - 1].value;
 }
 
 export interface BootstrapCI {
@@ -57,6 +135,7 @@ export interface GroupedWeightedBootstrapCI {
   method: "paired-group-percentile-v1";
   alpha: number;
   caseCount: number;
+  replicateCount: number;
   groupCount: number;
   effectiveTrafficMass: number;
   estimate: number;
@@ -87,7 +166,12 @@ function checkedFiniteAdd(left: number, right: number, name: string): number {
  */
 export function bootstrapGroupedWeightedMeanCI(
   caseEffects: readonly GroupedCaseEffect[],
-  options: { iters?: number; alpha?: number; seed?: number } = {},
+  options: {
+    iters?: number;
+    alpha?: number;
+    seed?: number;
+    replicateCount?: number;
+  } = {},
 ): GroupedWeightedBootstrapCI {
   const iters = options.iters ?? 10_000;
   const alpha = options.alpha ?? 0.05;
@@ -102,6 +186,17 @@ export function bootstrapGroupedWeightedMeanCI(
   if (caseEffects.length === 0) throw new Error("grouped bootstrap requires at least one case effect");
   if (caseEffects.length > 100_000) {
     throw new Error("grouped bootstrap case effects exceed the bounded maximum");
+  }
+  const replicateCount = options.replicateCount ?? caseEffects.length;
+  if (
+    !Number.isSafeInteger(replicateCount)
+    || replicateCount < caseEffects.length
+    || replicateCount > 1_000_000
+  ) {
+    throw new Error(
+      "grouped bootstrap replicate count must be a bounded integer "
+      + "at least as large as case count",
+    );
   }
 
   const caseIds = new Set<string>();
@@ -156,12 +251,14 @@ export function bootstrapGroupedWeightedMeanCI(
     }
     estimates[bootstrapIndex] = numerator / mass;
   }
-  const lo = quantile(estimates, alpha / 2);
-  const hi = quantile(estimates, 1 - alpha / 2);
+  estimates.sort((left, right) => left - right);
+  const lo = quantileFromSorted(estimates, alpha / 2);
+  const hi = quantileFromSorted(estimates, 1 - alpha / 2);
   return {
     method: "paired-group-percentile-v1",
     alpha,
     caseCount: caseEffects.length,
+    replicateCount,
     groupCount: groups.length,
     effectiveTrafficMass,
     estimate: totalNumerator / effectiveTrafficMass,

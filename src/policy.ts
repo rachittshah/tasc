@@ -2,6 +2,18 @@ import { z } from "zod";
 import { compareCodeUnits, canonicalJson } from "./determinism.js";
 import { sha256 } from "./integrity.js";
 import {
+  contractDigestSchema,
+  contractSlugSchema,
+  contractTimestampSchema,
+  deepFreezeContract,
+  domainSeparatedDigest,
+  fingerprintNormalizedProtocol,
+  normalizeExperimentProtocol,
+  snapshotBoundedContractInput,
+  type DeepReadonly,
+  type ExperimentProtocol,
+} from "./evidence.js";
+import {
   assertMeasurementMatrix,
   parseInferenceSpec,
   parseMeasurementSet,
@@ -358,4 +370,337 @@ export function replayPolicyForResolvedSpec(
     }
   }
   return rows;
+}
+
+const policyBundlePredicateSchema = z.object({
+  signalDefinitionId: contractSlugSchema,
+  operator: z.enum([
+    "less-than",
+    "less-than-or-equal",
+    "greater-than",
+    "greater-than-or-equal",
+  ]),
+  threshold: z.number().finite(),
+  routeToProfileId: contractSlugSchema,
+}).strict();
+
+const policyBundleSignerSchema = z.object({
+  keyId: contractSlugSchema,
+  signatureAlgorithm: z.literal("ed25519"),
+}).strict();
+
+const policyBundleBodySchema = z.object({
+  version: z.literal("tasc-policy-bundle-v2"),
+  compatibilityVersion: z.literal("tasc-policy-replay-v2"),
+  kind: z.enum(["expert-only", "fast-only", "cascade"]),
+  primaryProfileId: contractSlugSchema,
+  expertProfileId: contractSlugSchema,
+  predicates: z.array(policyBundlePredicateSchema).max(1),
+  fallbackProfileId: contractSlugSchema.nullable(),
+  protocolDigest: contractDigestSchema,
+  issuedAt: contractTimestampSchema,
+  expiresAt: contractTimestampSchema,
+  signer: policyBundleSignerSchema.nullable(),
+}).strict();
+
+const policyBundleSchema = policyBundleBodySchema.extend({
+  policyDigest: contractDigestSchema,
+}).strict();
+
+type MutablePolicyBundlePredicate = z.infer<
+  typeof policyBundlePredicateSchema
+>;
+type MutablePolicyBundleBody = z.infer<typeof policyBundleBodySchema>;
+type MutablePolicyBundle = z.infer<typeof policyBundleSchema>;
+
+export type PolicyBundlePredicate = DeepReadonly<
+  MutablePolicyBundlePredicate
+>;
+export type PolicyBundleBody = DeepReadonly<MutablePolicyBundleBody>;
+export type PolicyBundle = DeepReadonly<MutablePolicyBundle>;
+
+function assertPolicyBundleSemantics(
+  policy: MutablePolicyBundleBody,
+): void {
+  if (Date.parse(policy.expiresAt) <= Date.parse(policy.issuedAt)) {
+    throw new Error("policy expiry must be after issue time");
+  }
+  if (policy.kind === "cascade") {
+    if (policy.predicates.length !== 1) {
+      throw new Error("cascade policy requires exactly one routing predicate");
+    }
+    if (policy.fallbackProfileId !== policy.expertProfileId) {
+      throw new Error("cascade policy fallback must be its expert profile");
+    }
+    if (
+      policy.predicates[0].routeToProfileId !== policy.expertProfileId
+    ) {
+      throw new Error("cascade predicate must route to its expert profile");
+    }
+    return;
+  }
+  if (policy.predicates.length !== 0) {
+    throw new Error(`${policy.kind} policy cannot contain routing predicates`);
+  }
+  if (policy.fallbackProfileId !== null) {
+    throw new Error(`${policy.kind} policy cannot contain a fallback profile`);
+  }
+  if (
+    policy.kind === "expert-only"
+    && policy.primaryProfileId !== policy.expertProfileId
+  ) {
+    throw new Error("expert-only policy must select its expert profile");
+  }
+}
+
+function policyBodyWithoutDigest(
+  policy: MutablePolicyBundle,
+): MutablePolicyBundleBody {
+  const { policyDigest: _policyDigest, ...body } = policy;
+  return body;
+}
+
+function digestPolicyBundleBody(
+  policy: MutablePolicyBundleBody,
+): string {
+  return domainSeparatedDigest("tasc/policy-bundle/v2", policy);
+}
+
+/**
+ * Fingerprint a strict declarative v2 policy. A supplied self-digest is
+ * deliberately omitted from its own canonical preimage.
+ */
+export function fingerprintPolicyBundle(input: unknown): string {
+  const snapshot = snapshotBoundedContractInput(input);
+  const withDigest = policyBundleSchema.safeParse(snapshot);
+  const body = withDigest.success
+    ? policyBodyWithoutDigest(withDigest.data)
+    : policyBundleBodySchema.parse(snapshot);
+  assertPolicyBundleSemantics(body);
+  return digestPolicyBundleBody(body);
+}
+
+/** Validate a policy's self-digest and return a recursively immutable value. */
+export function parsePolicyBundleValue(input: unknown): PolicyBundle {
+  const snapshot = snapshotBoundedContractInput(input);
+  const policy = policyBundleSchema.parse(snapshot);
+  const body = policyBodyWithoutDigest(policy);
+  assertPolicyBundleSemantics(body);
+  if (policy.policyDigest !== digestPolicyBundleBody(body)) {
+    throw new Error("policy digest does not match canonical policy content");
+  }
+  return deepFreezeContract(policy);
+}
+
+/**
+ * Prove that a self-consistent bundle is one of the alternatives authorized by
+ * the exact frozen protocol. This validates one policy without expanding the
+ * development candidate space.
+ */
+export function assertPolicyBundleMatchesProtocol(
+  policyInput: PolicyBundle,
+  protocolInput: ExperimentProtocol,
+): void {
+  const policy = parsePolicyBundleValue(policyInput);
+  const protocol = normalizeExperimentProtocol(protocolInput);
+  if (policy.protocolDigest !== fingerprintNormalizedProtocol(protocol)) {
+    throw new Error("policy bundle protocol digest mismatch");
+  }
+  if (
+    policy.expertProfileId !== protocol.championProfileId
+    || policy.expiresAt !== protocol.expiresAt
+    || Date.parse(policy.issuedAt) < Date.parse(protocol.createdAt)
+    || Date.parse(policy.issuedAt) >= Date.parse(protocol.expiresAt)
+  ) {
+    throw new Error("policy bundle profile or validity does not match protocol");
+  }
+  if (policy.kind === "expert-only") {
+    if (policy.primaryProfileId !== protocol.championProfileId) {
+      throw new Error("expert policy is not authorized by protocol");
+    }
+    return;
+  }
+  if (!protocol.candidateProfileIds.includes(policy.primaryProfileId)) {
+    throw new Error("policy primary profile is not a protocol candidate");
+  }
+  if (policy.kind === "cascade") {
+    const predicate = canonicalJson(policy.predicates[0]);
+    if (!protocol.candidatePolicySpace.predicates.some(
+      (candidate) => canonicalJson(candidate) === predicate,
+    )) {
+      throw new Error("policy predicate is not declared by the protocol");
+    }
+  }
+}
+
+function makePolicyBundle(body: MutablePolicyBundleBody): PolicyBundle {
+  assertPolicyBundleSemantics(body);
+  return parsePolicyBundleValue({
+    ...body,
+    policyDigest: digestPolicyBundleBody(body),
+  });
+}
+
+export interface ProtocolPolicySpace {
+  readonly control: PolicyBundle;
+  readonly candidates: readonly PolicyBundle[];
+}
+
+function policyBundleBase(
+  protocol: ExperimentProtocol,
+  protocolDigest: string,
+  issuedAt: string,
+): Pick<
+  MutablePolicyBundleBody,
+  | "version"
+  | "compatibilityVersion"
+  | "expertProfileId"
+  | "protocolDigest"
+  | "issuedAt"
+  | "expiresAt"
+  | "signer"
+> {
+  return {
+    version: "tasc-policy-bundle-v2",
+    compatibilityVersion: "tasc-policy-replay-v2",
+    expertProfileId: protocol.championProfileId,
+    protocolDigest,
+    issuedAt,
+    expiresAt: protocol.expiresAt,
+    signer: null,
+  };
+}
+
+function normalizePolicyBundleInputs(
+  protocolInput: ExperimentProtocol,
+  protocolDigest: string,
+  issuedAt: string,
+): {
+  readonly protocol: ExperimentProtocol;
+  readonly protocolDigest: string;
+  readonly issuedAt: string;
+} {
+  const protocol = normalizeExperimentProtocol(protocolInput);
+  const normalizedProtocolDigest = contractDigestSchema.parse(
+    snapshotBoundedContractInput(protocolDigest),
+  );
+  if (normalizedProtocolDigest !== fingerprintNormalizedProtocol(protocol)) {
+    throw new Error("policy-space protocol digest does not match protocol content");
+  }
+  const normalizedIssuedAt = contractTimestampSchema.parse(
+    snapshotBoundedContractInput(issuedAt),
+  );
+  if (
+    Date.parse(normalizedIssuedAt) < Date.parse(protocol.createdAt)
+    || Date.parse(normalizedIssuedAt) >= Date.parse(protocol.expiresAt)
+  ) {
+    throw new Error(
+      "policy issue time must be within the protocol validity interval",
+    );
+  }
+  return {
+    protocol,
+    protocolDigest: normalizedProtocolDigest,
+    issuedAt: normalizedIssuedAt,
+  };
+}
+
+/** Build only the expert control without expanding the development space. */
+export function protocolControlPolicyBundle(
+  protocolInput: ExperimentProtocol,
+  protocolDigest: string,
+  issuedAt: string,
+): PolicyBundle {
+  const normalized = normalizePolicyBundleInputs(
+    protocolInput,
+    protocolDigest,
+    issuedAt,
+  );
+  const base = policyBundleBase(
+    normalized.protocol,
+    normalized.protocolDigest,
+    normalized.issuedAt,
+  );
+  return makePolicyBundle({
+    ...base,
+    kind: "expert-only",
+    primaryProfileId: normalized.protocol.championProfileId,
+    predicates: [],
+    fallbackProfileId: null,
+  });
+}
+
+/**
+ * Exact finite v2 mapping: one fast policy per candidate profile plus one
+ * single-predicate cascade for every candidate-profile/predicate pair. The
+ * expert control is separate and never consumes a candidate slot.
+ */
+export function enumerateProtocolPolicyBundles(
+  protocolInput: ExperimentProtocol,
+  protocolDigest: string,
+  issuedAt: string,
+): DeepReadonly<ProtocolPolicySpace> {
+  const normalized = normalizePolicyBundleInputs(
+    protocolInput,
+    protocolDigest,
+    issuedAt,
+  );
+  const protocol = normalized.protocol;
+  const candidateCount = protocol.candidateProfileIds.length
+    * (protocol.candidatePolicySpace.predicates.length + 1);
+  if (candidateCount > protocol.candidatePolicySpace.maxCandidates) {
+    throw new Error(
+      `declarative candidate count ${candidateCount} exceeds maxCandidates `
+      + protocol.candidatePolicySpace.maxCandidates,
+    );
+  }
+  const candidates = new Array<PolicyBundle>(candidateCount);
+  const base = policyBundleBase(
+    protocol,
+    normalized.protocolDigest,
+    normalized.issuedAt,
+  );
+  let index = 0;
+  for (
+    const primaryProfileId of [...protocol.candidateProfileIds]
+      .sort(compareCodeUnits)
+  ) {
+    candidates[index] = makePolicyBundle({
+      ...base,
+      kind: "fast-only",
+      primaryProfileId,
+      predicates: [],
+      fallbackProfileId: null,
+    });
+    index += 1;
+    for (
+      const predicate of [...protocol.candidatePolicySpace.predicates]
+        .sort((left, right) => {
+          const leftKey = canonicalJson(left);
+          const rightKey = canonicalJson(right);
+          return compareCodeUnits(leftKey, rightKey);
+        })
+    ) {
+      candidates[index] = makePolicyBundle({
+        ...base,
+        kind: "cascade",
+        primaryProfileId,
+        predicates: [{ ...predicate }],
+        fallbackProfileId: protocol.championProfileId,
+      });
+      index += 1;
+    }
+  }
+  if (index !== candidateCount) {
+    throw new Error("declarative policy enumeration cardinality drift");
+  }
+  candidates.sort((left, right) =>
+    compareCodeUnits(left.policyDigest, right.policyDigest)
+  );
+  const control = protocolControlPolicyBundle(
+    protocol,
+    normalized.protocolDigest,
+    normalized.issuedAt,
+  );
+  return deepFreezeContract({ control, candidates });
 }

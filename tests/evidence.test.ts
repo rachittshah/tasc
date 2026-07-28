@@ -61,6 +61,45 @@ describe("evidence v2 contracts", () => {
     expect(Object.isFrozen(evidence.outcome)).toBe(true);
   });
 
+  it("requires an explicit disabled or measured-window service-capacity gate", () => {
+    const disabled = validProtocolInput() as any;
+    disabled.gates.serviceCapacity = { kind: "disabled" };
+    expect(parseExperimentProtocol(disabled, TEST_WORK_BUDGET).gates.serviceCapacity)
+      .toEqual({ kind: "disabled" });
+
+    const required = validProtocolInput() as any;
+    required.gates.serviceCapacity = {
+      kind: "minimum-measured-window-throughput",
+      metric: "aggregate-output-tokens-per-second",
+      minimum: 125,
+    };
+    expect(parseExperimentProtocol(required, TEST_WORK_BUDGET).gates.serviceCapacity)
+      .toEqual(required.gates.serviceCapacity);
+
+    const missing = validProtocolInput() as any;
+    delete missing.gates.serviceCapacity;
+    expect(() => parseExperimentProtocol(missing, TEST_WORK_BUDGET))
+      .toThrow(/service.capacity|required/i);
+
+    for (const invalid of [
+      {
+        kind: "minimum-measured-window-throughput",
+        metric: "per-request-decode-tokens-per-second",
+        minimum: 125,
+      },
+      {
+        kind: "minimum-measured-window-throughput",
+        metric: "aggregate-output-tokens-per-second",
+        minimum: -1,
+      },
+      { kind: "disabled", minimum: 0 },
+    ]) {
+      const protocol = validProtocolInput() as any;
+      protocol.gates.serviceCapacity = invalid;
+      expect(() => parseExperimentProtocol(protocol, TEST_WORK_BUDGET)).toThrow();
+    }
+  });
+
   it("keeps route-signal provenance separate from evaluator provenance and scores", () => {
     const key = evaluatorKeyFixture();
     const trace = parseTraceEnvelope(validTraceInput(), TEST_WORK_BUDGET);
@@ -215,6 +254,15 @@ describe("evidence v2 contracts", () => {
     )).toThrow(/ordered|attempt/i);
   });
 
+  it("requires route observation before dispatch-intent issuance", () => {
+    expect(() => parseTraceEnvelope(
+      mutate(validTraceInput(), (trace) => {
+        trace.dispatchIntent.issuedAt = "2026-07-20T23:59:59.999Z";
+      }),
+      TEST_WORK_BUDGET,
+    )).toThrow(/route signal.*before.*dispatch/i);
+  });
+
   it("rejects inconsistent profile and terminal outcome references", () => {
     expect(() => parseTraceEnvelope(
       mutate(validTraceInput(), (trace) => { trace.observedRoute.selectedProfileId = "candidate"; }),
@@ -309,6 +357,7 @@ describe("evidence v2 contracts", () => {
       owner: protocol.owner,
       createdAt: protocol.createdAt,
       expiresAt: protocol.expiresAt,
+      dispatchAuthority: protocol.dispatchAuthority,
       splitMembership: protocol.splitMembership,
       onlineWindowMembership: protocol.onlineWindowMembership,
       championProfileId: protocol.championProfileId,
@@ -331,6 +380,12 @@ describe("evidence v2 contracts", () => {
   });
 
   it("rejects duplicate or inconsistent protocol references and split buckets", () => {
+    expect(() => parseExperimentProtocol(
+      mutate(validProtocolInput(), (protocol) => {
+        protocol.dispatchAuthority.publicKeySpki = "bm90LWEtc3BraQ";
+      }),
+      TEST_WORK_BUDGET,
+    )).toThrow(/dispatch authority.*Ed25519 SPKI/i);
     expect(() => parseExperimentProtocol(
       mutate(validProtocolInput(), (protocol) => {
         protocol.profiles[1].id = "champion";
@@ -361,6 +416,30 @@ describe("evidence v2 contracts", () => {
       }),
       TEST_WORK_BUDGET,
     )).toThrow(/predicate.*profile/i);
+    expect(() => parseExperimentProtocol(
+      mutate(validProtocolInput(), (protocol) => {
+        protocol.candidatePolicySpace.predicates[0].routeToProfileId = "candidate";
+      }),
+      TEST_WORK_BUDGET,
+    )).toThrow(/predicate.*champion|champion.*predicate/i);
+    expect(() => parseExperimentProtocol(
+      mutate(validProtocolInput(), (protocol) => {
+        protocol.candidatePolicySpace.maxCandidates = 1;
+      }),
+      TEST_WORK_BUDGET,
+    )).toThrow(/candidate count.*maxCandidates|maxCandidates.*candidate count/i);
+    expect(() => parseExperimentProtocol(
+      mutate(validProtocolInput(), (protocol) => {
+        const predicate = protocol.candidatePolicySpace.predicates[0];
+        protocol.candidatePolicySpace.predicates.push({
+          routeToProfileId: predicate.routeToProfileId,
+          threshold: predicate.threshold,
+          operator: predicate.operator,
+          signalDefinitionId: predicate.signalDefinitionId,
+        });
+      }),
+      TEST_WORK_BUDGET,
+    )).toThrow(/duplicate.*predicate/i);
     expect(() => parseExperimentProtocol(
       mutate(validProtocolInput(), (protocol) => {
         protocol.criticalSlices.push("payments");

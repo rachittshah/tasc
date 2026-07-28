@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, createPublicKey } from "node:crypto";
 import { z } from "zod";
 import { canonicalJsonBytes, compareCodeUnits } from "./determinism.js";
 import {
@@ -59,6 +59,11 @@ const boundedTextSchema = z.string()
 
 /** Rubric identities are shared verbatim by protocols, evidence, and operator authorization. */
 export const rubricIdentitySchema = boundedTextSchema;
+
+const canonicalBase64UrlSchema = z.string()
+  .min(1)
+  .max(512)
+  .regex(/^[A-Za-z0-9_-]+$/, "must be unpadded canonical base64url");
 
 // Narrow defense-in-depth for identity fields, not content scanning. Task 8
 // owns byte-level secret detection, redaction, and covert-channel policy.
@@ -185,6 +190,17 @@ const candidatePolicySpaceSchema = z.object({
   predicates: z.array(policyPredicateSchema).min(1).max(MAX_IDENTIFIERS),
 }).strict();
 
+const serviceCapacityGateSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("disabled"),
+  }).strict(),
+  z.object({
+    kind: z.literal("minimum-measured-window-throughput"),
+    metric: z.literal("aggregate-output-tokens-per-second"),
+    minimum: finiteNumberSchema.gt(0),
+  }).strict(),
+]);
+
 const gatesSchema = z.object({
   minimumMeanScore: probabilitySchema,
   nonInferiorityMargin: finiteNumberSchema.min(-1).max(0),
@@ -195,6 +211,7 @@ const gatesSchema = z.object({
   minimumEvidenceCoverage: probabilitySchema,
   minimumIndependentGroups: safePositiveIntegerSchema,
   minimumCriticalSliceGroups: safeNonNegativeIntegerSchema,
+  serviceCapacity: serviceCapacityGateSchema,
 }).strict();
 
 const bootstrapSchema = z.object({
@@ -229,6 +246,12 @@ const endpointRequirementSchema = z.object({
   transport: z.enum(["https", "loopback-http"]),
 }).strict();
 
+const dispatchAuthoritySchema = z.object({
+  keyId: contractSlugSchema,
+  algorithm: z.literal("ed25519"),
+  publicKeySpki: canonicalBase64UrlSchema,
+}).strict();
+
 export const experimentProtocolSchema = z.object({
   version: z.literal("tasc-experiment-protocol-v2"),
   studyId: contractSlugSchema,
@@ -236,6 +259,7 @@ export const experimentProtocolSchema = z.object({
   owner: boundedTextSchema,
   createdAt: contractTimestampSchema,
   expiresAt: contractTimestampSchema,
+  dispatchAuthority: dispatchAuthoritySchema,
   splitMembership: splitMembershipSchema,
   onlineWindowMembership: onlineWindowMembershipSchema,
   profiles: z.array(executionProfileSchema).min(2).max(MAX_PROFILES),
@@ -277,6 +301,38 @@ const routeSignalObservationSchema = z.object({
     sourceId: contractSlugSchema,
     observedAt: contractTimestampSchema,
   }).strict(),
+}).strict();
+
+const dispatchIntentUnsignedSchema = z.object({
+  version: z.literal("tasc-dispatch-intent-v1"),
+  issuedAt: contractTimestampSchema,
+  authorityKeyId: contractSlugSchema,
+  signatureAlgorithm: z.literal("ed25519"),
+}).strict();
+
+const dispatchIntentSchema = dispatchIntentUnsignedSchema.extend({
+  signature: canonicalBase64UrlSchema,
+}).strict();
+
+const dispatchIntentPayloadSchema = z.object({
+  studyId: contractSlugSchema,
+  protocolDigest: contractDigestSchema,
+  traceId: contractSlugSchema,
+  caseId: contractSlugSchema,
+  groupId: contractSlugSchema,
+  replicateId: contractSlugSchema,
+  split: z.enum(["dev", "holdout", "online"]),
+  collectionWindowId: contractSlugSchema.nullable(),
+  collectionWindowMembershipDigest: contractDigestSchema.nullable(),
+  sourceMode: z.enum(["imported", "observed", "shadow"]),
+  profileId: contractSlugSchema,
+  executionProfileDigest: contractDigestSchema,
+  policyDigest: contractDigestSchema,
+  observedRoute: observedRouteSchema,
+  workload: workloadSchema,
+  slices: z.array(contractSlugSchema).max(64),
+  routeSignal: routeSignalObservationSchema.nullable(),
+  dispatchIntent: dispatchIntentUnsignedSchema,
 }).strict();
 
 const observerTimingsSchema = z.object({
@@ -401,6 +457,7 @@ export const traceEnvelopeSchema = z.object({
   workload: workloadSchema,
   slices: z.array(contractSlugSchema).max(64),
   routeSignal: routeSignalObservationSchema.nullable(),
+  dispatchIntent: dispatchIntentSchema,
   attempts: z.array(attemptSchema).min(1).max(MAX_ATTEMPTS),
   terminalOutputId: keyedIdentitySchema.nullable(),
   collectorVersion: persistedTraceIdentityTextSchema,
@@ -408,6 +465,55 @@ export const traceEnvelopeSchema = z.object({
 
 type MutableTraceEnvelope = z.infer<typeof traceEnvelopeSchema>;
 export type TraceEnvelope = DeepReadonly<MutableTraceEnvelope>;
+
+/**
+ * Canonical pre-dispatch authorization bytes. The signature binds every
+ * caller-controlled routing/workload field that can affect replay or
+ * inference, while deliberately excluding attempts and outputs that do not
+ * exist yet when dispatch is authorized.
+ */
+export function dispatchIntentSigningBytes(input: unknown): Buffer {
+  const snapshot = snapshotBoundedContractInput(input);
+  if (snapshot === null || typeof snapshot !== "object") {
+    throw new Error("dispatch intent signing input must be a trace object");
+  }
+  const trace = snapshot as Record<string, unknown>;
+  const binding = trace.dispatchIntent;
+  if (binding === null || typeof binding !== "object") {
+    throw new Error("trace dispatch intent must be an object");
+  }
+  const intent = binding as Record<string, unknown>;
+  const payload = dispatchIntentPayloadSchema.parse({
+    studyId: trace.studyId,
+    protocolDigest: trace.protocolDigest,
+    traceId: trace.traceId,
+    caseId: trace.caseId,
+    groupId: trace.groupId,
+    replicateId: trace.replicateId,
+    split: trace.split,
+    collectionWindowId: trace.collectionWindowId,
+    collectionWindowMembershipDigest:
+      trace.collectionWindowMembershipDigest,
+    sourceMode: trace.sourceMode,
+    profileId: trace.profileId,
+    executionProfileDigest: trace.executionProfileDigest,
+    policyDigest: trace.policyDigest,
+    observedRoute: trace.observedRoute,
+    workload: trace.workload,
+    slices: trace.slices,
+    routeSignal: trace.routeSignal,
+    dispatchIntent: {
+      version: intent.version,
+      issuedAt: intent.issuedAt,
+      authorityKeyId: intent.authorityKeyId,
+      signatureAlgorithm: intent.signatureAlgorithm,
+    },
+  });
+  return canonicalJsonBytes({
+    domain: "tasc/dispatch-intent-signature/v1",
+    intent: payload,
+  });
+}
 
 const evaluatorProducerSchema = z.object({
   kind: z.enum(["human", "deterministic", "external-model"]),
@@ -466,11 +572,6 @@ const evaluatorSourceSchema = z.discriminatedUnion("kind", [
   controlledReferenceSchema,
 ]);
 
-const canonicalBase64UrlSchema = z.string()
-  .min(1)
-  .max(128)
-  .regex(/^[A-Za-z0-9_-]+$/, "must be unpadded canonical base64url");
-
 export const evaluatorEvidenceUnsignedSchema = z.object({
   version: z.literal("tasc-evaluator-evidence-v2"),
   studyId: contractSlugSchema,
@@ -520,6 +621,30 @@ function assertScoreRange(
 }
 
 function assertProtocolSemantics(protocol: MutableExperimentProtocol): void {
+  try {
+    const bytes = Buffer.from(
+      protocol.dispatchAuthority.publicKeySpki,
+      "base64url",
+    );
+    const key = createPublicKey({
+      key: bytes,
+      type: "spki",
+      format: "der",
+    });
+    const canonical = key.export({ type: "spki", format: "der" });
+    if (
+      protocol.dispatchAuthority.publicKeySpki !== bytes.toString("base64url")
+      || key.asymmetricKeyType !== "ed25519"
+      || !Buffer.isBuffer(canonical)
+      || !canonical.equals(bytes)
+    ) {
+      throw new Error("noncanonical or non-Ed25519 dispatch key");
+    }
+  } catch {
+    throw new Error(
+      "dispatch authority must contain canonical Ed25519 SPKI",
+    );
+  }
   if (Date.parse(protocol.expiresAt) <= Date.parse(protocol.createdAt)) {
     throw new Error("protocol expiry must be after creation");
   }
@@ -532,6 +657,15 @@ function assertProtocolSemantics(protocol: MutableExperimentProtocol): void {
   unique(protocol.evaluator.requiredTrustedKeyIds, "required trusted key id");
   unique(protocol.requiredCapabilities, "required capability");
   unique(protocol.criticalSlices, "critical slice");
+  unique(
+    protocol.candidatePolicySpace.predicates.map((predicate) =>
+      domainSeparatedDigest(
+        "tasc/declarative-policy-predicate/v1",
+        predicate,
+      )
+    ),
+    "candidate predicate",
+  );
   if (
     protocol.criticalSlices.length === 0
     && protocol.gates.minimumCriticalSliceGroups > 0
@@ -592,12 +726,25 @@ function assertProtocolSemantics(protocol: MutableExperimentProtocol): void {
     if (!profileIds.has(predicate.routeToProfileId)) {
       throw new Error(`predicate references missing profile "${predicate.routeToProfileId}"`);
     }
+    if (predicate.routeToProfileId !== protocol.championProfileId) {
+      throw new Error(
+        "v1 declarative policy predicates must route directly to the champion profile",
+      );
+    }
     if (
       predicate.threshold < protocol.routeSignal.minimum
       || predicate.threshold > protocol.routeSignal.maximum
     ) {
       throw new Error("predicate threshold is outside the route-signal range");
     }
+  }
+  const candidateCount = protocol.candidateProfileIds.length
+    * (protocol.candidatePolicySpace.predicates.length + 1);
+  if (candidateCount > protocol.candidatePolicySpace.maxCandidates) {
+    throw new Error(
+      `declarative candidate count ${candidateCount} exceeds maxCandidates `
+      + protocol.candidatePolicySpace.maxCandidates,
+    );
   }
 
   const runtimeNames = new Set(protocol.profiles.map(({ runtime }) => runtime.name));
@@ -682,6 +829,23 @@ function assertTraceSemantics(trace: MutableTraceEnvelope): void {
   }
   unique(trace.slices, "slice");
   unique(trace.attempts.map(({ attemptId }) => attemptId), "attempt id");
+  if (
+    Date.parse(trace.dispatchIntent.issuedAt)
+      > Date.parse(trace.attempts[0].observerTimings.startedAt)
+  ) {
+    throw new Error(
+      "dispatch intent must be issued no later than the first attempt starts",
+    );
+  }
+  if (
+    trace.routeSignal !== null
+    && Date.parse(trace.routeSignal.provenance.observedAt)
+      > Date.parse(trace.dispatchIntent.issuedAt)
+  ) {
+    throw new Error(
+      "route signal must be observed before dispatch intent issuance",
+    );
+  }
 
   let priorCompletion = Number.NEGATIVE_INFINITY;
   trace.attempts.forEach((attempt, index) => {
@@ -1004,6 +1168,15 @@ export function parseTraceEnvelope(
   workBudget: WorkBudget,
 ): TraceEnvelope {
   assertSingleRowBudget("trace", requireWorkBudget(workBudget));
+  return parseTraceEnvelopeValue(input);
+}
+
+/**
+ * Parse one bounded trace value with the complete semantic contract. Keeping
+ * this separate from work-budget admission lets internal public helpers reuse
+ * semantic validation instead of falling back to shape-only parsing.
+ */
+export function parseTraceEnvelopeValue(input: unknown): TraceEnvelope {
   const snapshot = snapshotBoundedContractInput(input);
   const trace = traceEnvelopeSchema.parse(snapshot);
   assertTraceSemantics(trace);

@@ -5,6 +5,7 @@ import {
 } from "node:crypto";
 import type { WorkBudget } from "../../src/work-budget.js";
 import {
+  dispatchIntentSigningBytes,
   evaluatorEvidenceSigningBytes,
   fingerprintExecutionProfile,
   fingerprintProtocol,
@@ -12,6 +13,44 @@ import {
   fingerprintEvaluatorTrustPolicy,
   type EvaluatorTrustSnapshot,
 } from "../../src/index.js";
+
+const dispatchAuthorityKeyPair = generateKeyPairSync("ed25519");
+
+function dispatchAuthorityPublicKeySpki(): string {
+  return dispatchAuthorityKeyPair.publicKey
+    .export({ type: "spki", format: "der" })
+    .toString("base64url");
+}
+
+export function signDispatchIntent<
+  Trace extends {
+    dispatchIntent: {
+      issuedAt: string;
+      signature: string;
+    };
+  },
+>(trace: Trace): Trace {
+  const source = trace as Trace & {
+    routeSignal: {
+      provenance: { observedAt: string };
+    } | null;
+    attempts: readonly {
+      observerTimings: { startedAt: string };
+    }[];
+  };
+  const firstAttemptStartedAt = source.attempts[0].observerTimings.startedAt;
+  const routeObservedAt = source.routeSignal?.provenance.observedAt;
+  trace.dispatchIntent.issuedAt = routeObservedAt !== undefined
+    && Date.parse(routeObservedAt) <= Date.parse(firstAttemptStartedAt)
+    ? routeObservedAt
+    : firstAttemptStartedAt;
+  trace.dispatchIntent.signature = sign(
+    null,
+    dispatchIntentSigningBytes(trace),
+    dispatchAuthorityKeyPair.privateKey,
+  ).toString("base64url");
+  return trace;
+}
 
 export const TEST_WORK_BUDGET: Readonly<WorkBudget> = Object.freeze({
   maxCandidates: 32,
@@ -74,6 +113,11 @@ export const validProtocolInput = () => {
     owner: "inference-platform",
     createdAt: "2026-07-20T00:00:00.000Z",
     expiresAt: "2026-08-20T00:00:00.000Z",
+    dispatchAuthority: {
+      keyId: "dispatch-authority-1",
+      algorithm: "ed25519" as const,
+      publicKeySpki: dispatchAuthorityPublicKeySpki(),
+    },
     splitMembership: {
       algorithm: "tasc-seeded-sha256-group-bucket-v1" as const,
       seed: "support-routing-split-2",
@@ -128,6 +172,9 @@ export const validProtocolInput = () => {
       minimumEvidenceCoverage: 0.98,
       minimumIndependentGroups: 10,
       minimumCriticalSliceGroups: 3,
+      serviceCapacity: {
+        kind: "disabled" as const,
+      },
     },
     criticalSlices: ["payments", "account-recovery"],
     bootstrap: {
@@ -161,7 +208,7 @@ export const validProtocolInput = () => {
 
 export const validTraceInput = () => {
   const protocol = validProtocolInput();
-  return {
+  const trace = {
     version: "tasc-trace-envelope-v2" as const,
     studyId: protocol.studyId,
     protocolDigest: fingerprintProtocol(protocol),
@@ -196,6 +243,13 @@ export const validTraceInput = () => {
         sourceId: "serving-router",
         observedAt: "2026-07-21T00:00:00.000Z",
       },
+    },
+    dispatchIntent: {
+      version: "tasc-dispatch-intent-v1" as const,
+      issuedAt: "2026-07-21T00:00:00.000Z",
+      authorityKeyId: protocol.dispatchAuthority.keyId,
+      signatureAlgorithm: "ed25519" as const,
+      signature: "pending",
     },
     attempts: [
       {
@@ -276,6 +330,7 @@ export const validTraceInput = () => {
     terminalOutputId: keyedIdentity("1"),
     collectorVersion: "collector-2.0.0",
   };
+  return signDispatchIntent(trace);
 };
 
 export const validTraceInputForProfile = (
@@ -297,7 +352,7 @@ export const validTraceInputForProfile = (
     source: "provider-reported",
   };
   trace.terminalOutputId = keyedIdentity("2");
-  return trace;
+  return signDispatchIntent(trace);
 };
 
 export interface EvaluatorKeyFixture {
