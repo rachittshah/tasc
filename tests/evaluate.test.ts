@@ -1352,6 +1352,24 @@ describe("TASC exact holdout confirmation", () => {
     expect(confirmation.status).toBe("DEMO_ONLY");
   });
 
+  it("matches legacy nominees against the canonical critical-slice order", () => {
+    const activeSpec = nominationSpec();
+    activeSpec.criticalSlices = ["safety", "payments"];
+    activeSpec.constraints.minimumCriticalSliceGroups = 1;
+    const development = measurements();
+    const holdout = measurements({ split: "holdout", groupPrefix: "holdout" });
+    for (const dataset of [development, holdout]) {
+      for (const measurementCase of dataset.cases) {
+        measurementCase.critical = true;
+        measurementCase.slices = ["safety", "payments"];
+      }
+    }
+    const nomination = nominatePolicy(activeSpec, development).nomination!;
+
+    expect(nomination.policy.criticalSlices).toEqual(["payments", "safety"]);
+    expect(confirmNomination(activeSpec, holdout, nomination).status).toBe("DEMO_ONLY");
+  });
+
   it.each(["__proto__", "constructor", "prototype"])(
     "round-trips the legal %s critical-slice record key",
     (criticalSlice) => {

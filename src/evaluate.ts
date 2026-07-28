@@ -1781,13 +1781,14 @@ function evaluatorMatches(
 }
 
 function isRegisteredLegacyCandidate(policy: InferencePolicy, spec: ResolvedInferenceSpec): boolean {
+  const criticalSlices = [...new Set(spec.criticalSlices)].sort(compareCodeUnits);
   if (
     policy.version !== "tasc-policy-v1"
     || policy.kind === "expert-only"
     || policy.primaryProfileId !== spec.primaryProfileId
     || policy.expertProfileId !== spec.championProfileId
-    || policy.criticalSlices.length !== spec.criticalSlices.length
-    || policy.criticalSlices.some((slice, index) => slice !== spec.criticalSlices[index])
+    || policy.criticalSlices.length !== criticalSlices.length
+    || policy.criticalSlices.some((slice, index) => slice !== criticalSlices[index])
   ) {
     return false;
   }

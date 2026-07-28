@@ -236,8 +236,8 @@ export TASC_ATTESTATION_KEY="<at least 32 UTF-8 bytes from your secret manager>"
 
 The secret does not turn a legacy v1 result into a production recommendation:
 real legacy v1 confirmation always returns `HOLD`. Plan to migrate to the v2
-controller assessment when Task 5 lands; this release does not include that
-production-recommendation command.
+controller workflow when its controller and CLI milestones ship; this release
+does not include that production-recommendation command.
 
 See the [operating guide](docs/operating-guide.md) for the measurement contract
 and the [design document](docs/design.md) for replay, statistics, selection, and
@@ -272,9 +272,9 @@ into one leaderboard score.
 | `HOLD` | Holdout failed, or legacy v1 processed real evidence. |
 
 Legacy v1 confirmation always returns `HOLD` for real evidence, even when its
-HMAC verifies. Plan to migrate to the v2 controller assessment when Task 5
-lands; this release does not include that production-recommendation command.
-No status changes production.
+HMAC verifies. Plan to migrate to the v2 controller workflow when its
+controller and CLI milestones ship; this release does not include that
+production-recommendation command. No status changes production.
 
 ## Small glossary
 
