@@ -335,3 +335,51 @@ export type {
   WindowMembershipRule,
 } from "./window.js";
 export * from "./work-budget.js";
+export {
+  createRayServeEndpointDescriptor,
+  createSkyPilotEndpointDescriptor,
+  fingerprintEndpointDescriptor,
+  parseEndpointDescriptor,
+} from "./runtime/orchestration.js";
+export {
+  RUNTIME_PROFILE_IDS,
+  RUNTIME_REGISTRY_VERSION,
+  fingerprintRuntimeWireProfile,
+  getRuntimeProfile,
+  listRuntimeProfiles,
+  parseRuntimeCapabilityProbeEvidence,
+  parseRuntimeInstanceIdentity,
+  resolveRuntimeCapabilities,
+} from "./runtime/profiles.js";
+export { RUNTIME_CAPABILITIES } from "./runtime/types.js";
+export type {
+  CapabilityState,
+  DocumentedCapabilityExpectation,
+  EndpointDescriptor,
+  EvidenceDimensionStatus,
+  OrchestrationKind,
+  RayServeEndpointDescriptorInput,
+  ResolvedRuntimeProfile,
+  RuntimeBuildIdentity,
+  RuntimeCapability,
+  RuntimeCapabilityEvidence,
+  RuntimeCapabilityEvidenceMap,
+  RuntimeCapabilityExpectations,
+  RuntimeCapabilityProbeEvidence,
+  RuntimeDocumentationSource,
+  RuntimeHealthRoute,
+  RuntimeInferenceRoute,
+  RuntimeInferenceWireProtocol,
+  RuntimeInstanceIdentity,
+  RuntimeLocality,
+  RuntimeMetricsRoute,
+  RuntimeModelRoute,
+  RuntimeProfileId,
+  RuntimeResponseFraming,
+  RuntimeSupportTier,
+  RuntimeVersionRoute,
+  RuntimeWireEndpoints,
+  RuntimeWireProfile,
+  SkyPilotEndpointDescriptorInput,
+  UnestablishedCapabilityExpectation,
+} from "./runtime/types.js";
