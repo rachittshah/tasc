@@ -206,6 +206,7 @@ describe("bounded runtime HTTP lifecycle", () => {
       expect(request.method).toBe("POST");
       expect(request.url).toBe(REQUEST_PATH);
       expect(request.headers.authorization).toBe("Bearer test-runtime-key");
+      expect(request.headers.accept).toBe("application/json");
       expect(request.headers["accept-encoding"]).toBe("identity");
       expect(request.headers["x-not-authorized"]).toBeUndefined();
       response.statusCode = 200;
@@ -230,6 +231,7 @@ describe("bounded runtime HTTP lifecycle", () => {
       const result = await withBoundedHttpResponse(
         pin,
         {
+          accept: "application/json",
           body: requestBody,
           secretHeaderFactory: (reference, signal) => {
             expect(reference).toBe("runtime-test");

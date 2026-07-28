@@ -142,7 +142,17 @@ export type RuntimeSecretHeaderFactory = (
   signal: AbortSignal,
 ) => RuntimeSecretHeaders | Promise<RuntimeSecretHeaders>;
 
+export const RUNTIME_HTTP_ACCEPT_VALUES = Object.freeze([
+  "application/json",
+  "text/event-stream",
+  "application/x-ndjson",
+  "text/plain; version=0.0.4",
+] as const);
+export type RuntimeHttpAccept =
+  typeof RUNTIME_HTTP_ACCEPT_VALUES[number];
+
 export interface RuntimeHttpRequest {
+  readonly accept?: RuntimeHttpAccept;
   readonly body?: Uint8Array;
   readonly limits?: Partial<RuntimeHttpLimits>;
   readonly signal?: AbortSignal;
@@ -560,6 +570,7 @@ function clampLimitsToPinnedDeadline(
 }
 
 const REQUEST_KEYS = Object.freeze([
+  "accept",
   "body",
   "limits",
   "signal",
@@ -567,6 +578,7 @@ const REQUEST_KEYS = Object.freeze([
 ] as const);
 
 interface RuntimeHttpRequestSnapshot {
+  readonly accept?: RuntimeHttpAccept;
   readonly body?: Uint8Array;
   readonly limits?: unknown;
   readonly signal?: AbortSignal;
@@ -586,6 +598,13 @@ function snapshotRequest(
   const signal = snapshot.signal;
   const secretHeaderFactory = snapshot.secretHeaderFactory;
   if (
+    (snapshot.accept !== undefined &&
+      (
+        typeof snapshot.accept !== "string" ||
+        !RUNTIME_HTTP_ACCEPT_VALUES.includes(
+          snapshot.accept as RuntimeHttpAccept,
+        )
+      )) ||
     (signal !== undefined &&
       (typeof signal !== "object" ||
         signal === null ||
@@ -605,6 +624,9 @@ function snapshotRequest(
     );
   }
   return Object.freeze({
+    ...(snapshot.accept === undefined
+      ? {}
+      : { accept: snapshot.accept as RuntimeHttpAccept }),
     ...(snapshot.body === undefined
       ? {}
       : { body: snapshot.body as Uint8Array }),
@@ -1290,8 +1312,8 @@ export async function withBoundedHttpResponse<T>(
     );
 
     const headers: Record<string, string> = {
-      accept:
-        "application/json, text/event-stream, application/x-ndjson",
+      accept: safeRequest.accept
+        ?? "application/json, text/event-stream, application/x-ndjson",
       "accept-encoding": "identity",
       ...secretHeaders,
     };

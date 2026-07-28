@@ -122,6 +122,12 @@ describe("standalone public API", () => {
       authorizeCollectorRequest: expect.any(Function),
       pinAuthorizedCollectorRequest: expect.any(Function),
       withBoundedHttpResponse: expect.any(Function),
+      RUNTIME_HTTP_ACCEPT_VALUES: expect.arrayContaining([
+        "application/json",
+        "text/event-stream",
+        "application/x-ndjson",
+        "text/plain; version=0.0.4",
+      ]),
       RuntimeWireError: expect.any(Function),
       RuntimeCodecError: expect.any(Function),
       parseBoundedSse: expect.any(Function),

@@ -409,6 +409,7 @@ export type {
 } from "./runtime/network-policy.js";
 export {
   DEFAULT_RUNTIME_HTTP_LIMITS,
+  RUNTIME_HTTP_ACCEPT_VALUES,
   RuntimeWireError,
   withBoundedHttpResponse,
 } from "./runtime/http.js";
@@ -416,6 +417,7 @@ export type {
   BoundedRuntimeHttpResponse,
   BoundedRuntimeHttpResult,
   RuntimeHttpLimits,
+  RuntimeHttpAccept,
   RuntimeHttpRequest,
   RuntimeSecretHeaderFactory,
   RuntimeSecretHeaderName,
