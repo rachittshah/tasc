@@ -1,4 +1,10 @@
-import { createHash, createPublicKey } from "node:crypto";
+import {
+  createHash,
+  createPublicKey,
+  verify as verifySignature,
+  type KeyObject,
+} from "node:crypto";
+import { isProxy } from "node:util/types";
 import { z } from "zod";
 import {
   parseBoundedJson,
@@ -365,11 +371,18 @@ const requestedModelSchema = z.object({
   revision: persistedTraceIdentityTextSchema,
 }).strict();
 
-const resolvedModelSchema = z.object({
-  id: persistedTraceIdentityTextSchema,
-  revision: persistedTraceIdentityTextSchema,
-  source: z.literal("provider-reported"),
-}).strict();
+const resolvedModelSchema = z.discriminatedUnion("source", [
+  z.object({
+    id: persistedTraceIdentityTextSchema,
+    revision: persistedTraceIdentityTextSchema,
+    source: z.literal("provider-reported"),
+  }).strict(),
+  z.object({
+    id: persistedTraceIdentityTextSchema,
+    revision: z.null(),
+    source: z.literal("provider-id-only"),
+  }).strict(),
+]);
 
 const tokenUsageValueSchema = z.object({
   value: safeNonNegativeIntegerSchema,
@@ -532,6 +545,88 @@ export function dispatchIntentSigningBytes(input: unknown): Buffer {
   });
 }
 
+/**
+ * Verify one signed dispatch intent against the exact frozen protocol.
+ *
+ * Inputs are independently snapshotted and parsed before any ordinary
+ * property access. The returned trace is the verified immutable snapshot;
+ * caller-owned objects, accessors, proxies, and diagnostic text never cross
+ * this trust boundary.
+ */
+export function verifyTraceDispatchIntent(
+  traceInput: unknown,
+  protocolInput: unknown,
+): TraceEnvelope {
+  let protocol: ExperimentProtocol;
+  try {
+    const snapshot = snapshotProxyFreeContractInput(protocolInput);
+    const parsed = experimentProtocolSchema.parse(snapshot);
+    assertProtocolSemantics(parsed);
+    protocol = deepFreezeContract(parsed);
+  } catch {
+    throw new Error("Dispatch-intent protocol is invalid.");
+  }
+
+  let trace: TraceEnvelope;
+  try {
+    const snapshot = snapshotProxyFreeContractInput(traceInput);
+    const parsed = traceEnvelopeSchema.parse(snapshot);
+    assertTraceSemantics(parsed);
+    trace = deepFreezeContract(parsed);
+  } catch {
+    throw new Error("Dispatch-intent trace is invalid.");
+  }
+
+  if (
+    trace.studyId !== protocol.studyId
+    || trace.protocolDigest !== fingerprintNormalizedProtocol(protocol)
+  ) {
+    throw new Error("Dispatch intent conflicts with the protocol.");
+  }
+  if (
+    trace.dispatchIntent.authorityKeyId
+      !== protocol.dispatchAuthority.keyId
+    || trace.dispatchIntent.signatureAlgorithm
+      !== protocol.dispatchAuthority.algorithm
+  ) {
+    throw new Error("Dispatch intent conflicts with the protocol authority.");
+  }
+
+  const issuedAt = Date.parse(trace.dispatchIntent.issuedAt);
+  if (
+    issuedAt < Date.parse(protocol.createdAt)
+    || issuedAt >= Date.parse(protocol.expiresAt)
+  ) {
+    throw new Error(
+      "Dispatch intent is outside the protocol validity interval.",
+    );
+  }
+
+  const signature = Buffer.from(
+    trace.dispatchIntent.signature,
+    "base64url",
+  );
+  let authentic = false;
+  try {
+    authentic =
+      signature.toString("base64url") === trace.dispatchIntent.signature
+      && verifySignature(
+        null,
+        dispatchIntentSigningBytes(trace),
+        importCanonicalDispatchAuthorityKey(
+          protocol.dispatchAuthority.publicKeySpki,
+        ),
+        signature,
+      );
+  } catch {
+    authentic = false;
+  }
+  if (!authentic) {
+    throw new Error("Invalid dispatch-intent signature.");
+  }
+  return trace;
+}
+
 const evaluatorProducerSchema = z.object({
   kind: z.enum(["human", "deterministic", "external-model"]),
   producerId: contractSlugSchema,
@@ -637,12 +732,9 @@ function assertScoreRange(
   }
 }
 
-function assertProtocolSemantics(protocol: MutableExperimentProtocol): void {
+function importCanonicalDispatchAuthorityKey(encoded: string): KeyObject {
   try {
-    const bytes = Buffer.from(
-      protocol.dispatchAuthority.publicKeySpki,
-      "base64url",
-    );
+    const bytes = Buffer.from(encoded, "base64url");
     const key = createPublicKey({
       key: bytes,
       type: "spki",
@@ -650,18 +742,25 @@ function assertProtocolSemantics(protocol: MutableExperimentProtocol): void {
     });
     const canonical = key.export({ type: "spki", format: "der" });
     if (
-      protocol.dispatchAuthority.publicKeySpki !== bytes.toString("base64url")
+      encoded !== bytes.toString("base64url")
       || key.asymmetricKeyType !== "ed25519"
       || !Buffer.isBuffer(canonical)
       || !canonical.equals(bytes)
     ) {
       throw new Error("noncanonical or non-Ed25519 dispatch key");
     }
+    return key;
   } catch {
     throw new Error(
       "dispatch authority must contain canonical Ed25519 SPKI",
     );
   }
+}
+
+function assertProtocolSemantics(protocol: MutableExperimentProtocol): void {
+  importCanonicalDispatchAuthorityKey(
+    protocol.dispatchAuthority.publicKeySpki,
+  );
   if (Date.parse(protocol.expiresAt) <= Date.parse(protocol.createdAt)) {
     throw new Error("protocol expiry must be after creation");
   }
@@ -917,6 +1016,7 @@ function requireWorkBudget(budget: WorkBudget | undefined): WorkBudget {
 interface SnapshotState {
   nodes: number;
   readonly ancestors: Set<object>;
+  readonly rejectProxies: boolean;
 }
 
 function hasWellFormedUnicode(value: string): boolean {
@@ -952,6 +1052,9 @@ function snapshotContractValue(
     throw new Error("bounded contract input string exceeds the coarse length limit");
   }
   if (value === null || typeof value !== "object") return value;
+  if (state.rejectProxies && isProxy(value)) {
+    throw new Error("bounded contract input cannot be a proxy");
+  }
   if (state.ancestors.has(value)) {
     throw new Error("bounded contract input must be an acyclic I-JSON value");
   }
@@ -1056,6 +1159,17 @@ export function snapshotBoundedContractInput(input: unknown): unknown {
   const snapshot = snapshotContractValue(input, 0, {
     nodes: 0,
     ancestors: new Set<object>(),
+    rejectProxies: false,
+  });
+  canonicalJsonBytes(snapshot);
+  return deepFreezeContract(snapshot);
+}
+
+function snapshotProxyFreeContractInput(input: unknown): unknown {
+  const snapshot = snapshotContractValue(input, 0, {
+    nodes: 0,
+    ancestors: new Set<object>(),
+    rejectProxies: true,
   });
   canonicalJsonBytes(snapshot);
   return deepFreezeContract(snapshot);

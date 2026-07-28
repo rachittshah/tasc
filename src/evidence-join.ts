@@ -1,20 +1,15 @@
 import { Buffer } from "node:buffer";
-import {
-  createPublicKey,
-  verify as verifySignature,
-  type KeyObject,
-} from "node:crypto";
 import { canonicalJson, compareCodeUnits } from "./determinism.js";
 import {
   compareEvidenceIdentities,
   contractSlugSchema,
   deepFreezeContract,
-  dispatchIntentSigningBytes,
   domainSeparatedDigest,
   fingerprintExecutionProfile,
   fingerprintNormalizedProtocol,
   normalizeExperimentProtocol,
   parseTraceEnvelope,
+  verifyTraceDispatchIntent,
   type DeepReadonly,
   type EvaluatorEvidence,
   type ExperimentProtocol,
@@ -677,9 +672,6 @@ function normalizeTraces(
       },
     ]),
   );
-  const dispatchAuthorityKey = importCanonicalEd25519PublicKey(
-    protocol.dispatchAuthority.publicKeySpki,
-  );
   const splitsByGroup = new Map<string, ResolvedGroupSplit>();
   for (const trace of traces) {
     if (trace.studyId !== protocol.studyId) {
@@ -688,11 +680,7 @@ function normalizeTraces(
     if (trace.protocolDigest !== protocolDigest) {
       throw new Error(`trace "${trace.traceId}" protocol digest conflicts with protocol`);
     }
-    assertAuthenticDispatchIntent(
-      trace,
-      protocol,
-      dispatchAuthorityKey,
-    );
+    verifyTraceDispatchIntent(trace, protocol);
     const firstAttemptStartedAt = Date.parse(
       trace.attempts[0].observerTimings.startedAt,
     );
@@ -743,8 +731,11 @@ function normalizeTraces(
         attempt.resolvedModel !== null
         && (
           attempt.resolvedModel.id !== expectedProfile.profile.model.id
-          || attempt.resolvedModel.revision
-            !== expectedProfile.profile.model.revision
+          || (
+            attempt.resolvedModel.source === "provider-reported"
+            && attempt.resolvedModel.revision
+              !== expectedProfile.profile.model.revision
+          )
         )
       ) {
         throw new Error(
@@ -1196,73 +1187,6 @@ function terminalCompletion(trace: TraceEnvelope): number {
   return Date.parse(
     trace.attempts[trace.attempts.length - 1].observerTimings.completedAt,
   );
-}
-
-function importCanonicalEd25519PublicKey(encoded: string): KeyObject {
-  let bytes: Buffer;
-  try {
-    bytes = Buffer.from(encoded, "base64url");
-  } catch {
-    throw new Error("dispatch authority public key is not valid base64url");
-  }
-  if (bytes.toString("base64url") !== encoded) {
-    throw new Error("dispatch authority public key is not canonical base64url");
-  }
-  let key: KeyObject;
-  try {
-    key = createPublicKey({ key: bytes, type: "spki", format: "der" });
-  } catch {
-    throw new Error("dispatch authority public key is not valid SPKI");
-  }
-  const canonical = key.export({ type: "spki", format: "der" });
-  if (
-    key.asymmetricKeyType !== "ed25519"
-    || !Buffer.isBuffer(canonical)
-    || !canonical.equals(bytes)
-  ) {
-    throw new Error("dispatch authority must use canonical Ed25519 SPKI");
-  }
-  return key;
-}
-
-function assertAuthenticDispatchIntent(
-  trace: TraceEnvelope,
-  protocol: ExperimentProtocol,
-  publicKey: KeyObject,
-): void {
-  if (
-    trace.dispatchIntent.authorityKeyId !== protocol.dispatchAuthority.keyId
-    || trace.dispatchIntent.signatureAlgorithm
-      !== protocol.dispatchAuthority.algorithm
-  ) {
-    throw new Error(
-      `trace "${trace.traceId}" dispatch authority conflicts with protocol`,
-    );
-  }
-  if (
-    Date.parse(trace.dispatchIntent.issuedAt) < Date.parse(protocol.createdAt)
-  ) {
-    throw new Error(
-      `trace "${trace.traceId}" dispatch intent predates the protocol`,
-    );
-  }
-  const signature = Buffer.from(
-    trace.dispatchIntent.signature,
-    "base64url",
-  );
-  if (
-    signature.toString("base64url") !== trace.dispatchIntent.signature
-    || !verifySignature(
-      null,
-      dispatchIntentSigningBytes(trace),
-      publicKey,
-      signature,
-    )
-  ) {
-    throw new Error(
-      `trace "${trace.traceId}" has an invalid dispatch-intent signature`,
-    );
-  }
 }
 
 function traceLineageMatches(

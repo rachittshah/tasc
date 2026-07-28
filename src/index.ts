@@ -157,6 +157,7 @@ export {
   parseExperimentProtocolJson,
   parseTraceEnvelope,
   parseTraceEnvelopeJson,
+  verifyTraceDispatchIntent,
 } from "./evidence.js";
 export type {
   EvaluatorEvidence,

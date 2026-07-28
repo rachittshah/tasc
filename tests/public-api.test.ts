@@ -96,6 +96,7 @@ describe("standalone public API", () => {
       parseExperimentProtocolJson: expect.any(Function),
       parseTraceEnvelope: expect.any(Function),
       parseTraceEnvelopeJson: expect.any(Function),
+      verifyTraceDispatchIntent: expect.any(Function),
       parseEvaluatorEvidence: expect.any(Function),
       parseEvaluatorEvidenceJson: expect.any(Function),
       verifyEvaluatorEvidence: expect.any(Function),

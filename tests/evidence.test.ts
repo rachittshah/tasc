@@ -8,6 +8,7 @@ import {
   parseExperimentProtocolJson,
   parseTraceEnvelope,
   parseTraceEnvelopeJson,
+  verifyTraceDispatchIntent,
 } from "../src/evidence.js";
 import type { BoundedJsonLimits } from "../src/bounded-input.js";
 import {
@@ -15,6 +16,7 @@ import {
   digest,
   evaluatorKeyFixture,
   mutate,
+  signDispatchIntent,
   validEvaluatorEvidenceInput,
   validExecutionProfile,
   validProtocolInput,
@@ -356,6 +358,159 @@ describe("evidence v2 contracts", () => {
       mutate(online, (trace) => { trace.collectionWindowMembershipDigest = null; }),
       TEST_WORK_BUDGET,
     )).toThrow(/window.*membership digest/i);
+  });
+
+  it("records provider-resolved model IDs without fabricating a revision", () => {
+    const idOnly = validTraceInput() as any;
+    idOnly.attempts[0].resolvedModel = {
+      id: idOnly.attempts[0].requestedModel.id,
+      revision: null,
+      source: "provider-id-only",
+    };
+
+    expect(
+      parseTraceEnvelope(idOnly, TEST_WORK_BUDGET)
+        .attempts[0].resolvedModel,
+    ).toEqual({
+      id: "champion-model",
+      revision: null,
+      source: "provider-id-only",
+    });
+
+    const invalidResolvedModels = [
+      {
+        id: "champion-model",
+        revision: null,
+        source: "provider-reported",
+      },
+      {
+        id: "champion-model",
+        revision: "refs-pr-42",
+        source: "provider-id-only",
+      },
+      {
+        id: "champion-model",
+        revision: null,
+        source: "operator-asserted",
+      },
+      {
+        id: "champion-model",
+        revision: null,
+        source: "provider-id-only",
+        verification: "forged",
+      },
+    ];
+    for (const resolvedModel of invalidResolvedModels) {
+      expect(() => parseTraceEnvelope(
+        mutate(validTraceInput(), (trace: any) => {
+          trace.attempts[0].resolvedModel = resolvedModel;
+        }),
+        TEST_WORK_BUDGET,
+      )).toThrow();
+    }
+  });
+
+  it("verifies a dispatch intent against the exact protocol authority and validity interval", () => {
+    const protocol = validProtocolInput();
+    const trace = validTraceInput();
+    const verified = verifyTraceDispatchIntent(trace, protocol);
+
+    expect(verified).toEqual(
+      parseTraceEnvelope(trace, TEST_WORK_BUDGET),
+    );
+    expect(verified).not.toBe(trace);
+    expect(Object.isFrozen(verified)).toBe(true);
+
+    const wrongAuthority = mutate(trace, (value) => {
+      value.dispatchIntent.authorityKeyId = "other-dispatch-authority";
+    });
+    signDispatchIntent(wrongAuthority);
+    expect(() => verifyTraceDispatchIntent(wrongAuthority, protocol))
+      .toThrow(/dispatch intent.*authority|authority.*dispatch intent/i);
+
+    const wrongProtocol = mutate(trace, (value) => {
+      value.protocolDigest = digest("f");
+    });
+    signDispatchIntent(wrongProtocol);
+    expect(() => verifyTraceDispatchIntent(wrongProtocol, protocol))
+      .toThrow(/dispatch intent.*protocol|protocol.*dispatch intent/i);
+
+    const atExpiry = mutate(trace, (value) => {
+      value.routeSignal!.provenance.observedAt = protocol.expiresAt;
+      for (const field of [
+        "startedAt",
+        "headersAt",
+        "firstByteAt",
+        "firstMeaningfulTokenAt",
+        "completedAt",
+      ] as const) {
+        value.attempts[0].observerTimings[field] = protocol.expiresAt;
+      }
+    });
+    signDispatchIntent(atExpiry);
+    expect(() => verifyTraceDispatchIntent(atExpiry, protocol))
+      .toThrow(/validity interval/i);
+
+    const invalidSignature = mutate(trace, (value) => {
+      const signature = value.dispatchIntent.signature;
+      value.dispatchIntent.signature =
+        `${signature.slice(0, -1)}${signature.endsWith("A") ? "B" : "A"}`;
+    });
+    expect(() => verifyTraceDispatchIntent(invalidSignature, protocol))
+      .toThrow(/invalid dispatch-intent signature/i);
+  });
+
+  it("rejects accessor and proxy dispatch inputs without reflecting or reading them", () => {
+    const protocol = validProtocolInput();
+    const planted = "planted-dispatch-secret";
+    let accessorReads = 0;
+    const accessorTrace = validTraceInput() as any;
+    Object.defineProperty(accessorTrace, "dispatchIntent", {
+      enumerable: true,
+      configurable: true,
+      get() {
+        accessorReads += 1;
+        throw new Error(planted);
+      },
+    });
+
+    let accessorError = "";
+    try {
+      verifyTraceDispatchIntent(accessorTrace, protocol);
+    } catch (error) {
+      accessorError = String((error as Error).message);
+    }
+    expect(accessorReads).toBe(0);
+    expect(accessorError).toMatch(/dispatch-intent trace is invalid/i);
+    expect(accessorError).not.toContain(planted);
+
+    let proxyReads = 0;
+    const proxyProtocol = new Proxy(protocol, {
+      get() {
+        proxyReads += 1;
+        throw new Error(planted);
+      },
+    });
+    let proxyError = "";
+    try {
+      verifyTraceDispatchIntent(validTraceInput(), proxyProtocol);
+    } catch (error) {
+      proxyError = String((error as Error).message);
+    }
+    expect(proxyReads).toBe(0);
+    expect(proxyError).toMatch(/dispatch-intent protocol is invalid/i);
+    expect(proxyError).not.toContain(planted);
+
+    const plantedTrace = validTraceInput();
+    plantedTrace.traceId = planted;
+    let signatureError = "";
+    try {
+      verifyTraceDispatchIntent(plantedTrace, protocol);
+    } catch (error) {
+      signatureError = String((error as Error).message);
+    }
+    expect(signatureError).toMatch(/invalid dispatch-intent signature/i);
+    expect(signatureError).not.toContain(planted);
   });
 
   it("requires keyed or controlled payload identities, distinct observer/provider timing, and classified cost", () => {

@@ -366,6 +366,36 @@ describe("deterministic assessment evidence join", () => {
     },
   );
 
+  it("accepts provider ID-only resolution while still requiring the exact profile model ID", () => {
+    const key = evaluatorKeyFixture();
+    const champion = validTraceInputForProfile("champion");
+    const candidate = validTraceInputForProfile("candidate");
+    for (const trace of [champion, candidate]) {
+      const resolvedModel = trace.attempts[0].resolvedModel!;
+      (resolvedModel as any).revision = null;
+      (resolvedModel as any).source = "provider-id-only";
+    }
+    const evidence = [
+      verificationFor(champion, key),
+      verificationFor(candidate, key),
+    ];
+
+    expect(joinAssessmentEvidence(
+      parseProtocol(),
+      [parseTrace(champion), parseTrace(candidate)],
+      evidence,
+      TEST_WORK_BUDGET,
+    ).admissibility.valid).toBe(true);
+
+    champion.attempts[0].resolvedModel!.id = "attacker-model";
+    expect(() => joinAssessmentEvidence(
+      parseProtocol(),
+      [parseTrace(champion), parseTrace(candidate)],
+      evidence,
+      TEST_WORK_BUDGET,
+    )).toThrow(/resolved model.*profile|profile.*resolved model/i);
+  });
+
   it.each([
     [
       "requested model",
