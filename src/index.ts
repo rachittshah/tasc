@@ -130,6 +130,10 @@ export {
   parseControllerEvent,
   parseControllerSnapshot,
 } from "./controller-events.js";
+export type {
+  ControllerEventBody,
+  ControllerSnapshotBody,
+} from "./controller-events.js";
 export {
   fingerprintEvaluatorRevocations,
   fingerprintEvaluatorTrustPolicy,

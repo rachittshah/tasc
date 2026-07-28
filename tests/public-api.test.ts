@@ -9,6 +9,8 @@ import type {
   ControlledReference,
   ControlledReferenceRegistry,
   ControlledReferenceStore,
+  ControllerEventBody,
+  ControllerSnapshotBody,
   KeyedPayloadIdentity,
   PersistedError,
   PersistedErrorCategory,
@@ -29,6 +31,13 @@ type TaskEightPublicTypes = [
 ];
 
 const taskEightPublicTypeCount: TaskEightPublicTypes["length"] = 11;
+
+type ControllerPublicTypes = [
+  ControllerEventBody,
+  ControllerSnapshotBody,
+];
+
+const controllerPublicTypeCount: ControllerPublicTypes["length"] = 2;
 
 describe("standalone public API", () => {
   it("exports the complete policy-lab surface from one package entry point", () => {
@@ -83,6 +92,7 @@ describe("standalone public API", () => {
       createStudyPayloadIdentity: expect.any(Function),
     });
     expect(taskEightPublicTypeCount).toBe(11);
+    expect(controllerPublicTypeCount).toBe(2);
   });
 
   it("keeps deterministic identities independent of object insertion order", () => {

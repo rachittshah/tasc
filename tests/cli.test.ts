@@ -79,13 +79,13 @@ describe("TASC CLI synthetic end-to-end example", () => {
     expect(firstNomination.status, firstNomination.stderr).toBe(0);
     expect(firstNomination.stdout).toContain("NOMINATED");
     expect(firstNomination.stdout).toContain(devOne);
-    expect(await readdir(devOne)).toEqual([
+    expect((await readdir(devOne)).sort()).toEqual([
       "development-report.json",
       ARTIFACT_MANIFEST_FILENAME,
       "next-experiment.json",
       "nomination.json",
       "report.md",
-    ]);
+    ].sort());
     await expect(verifyArtifactPacket(dirname(devOne), basename(devOne)))
       .resolves.toMatchObject({ path: devOne });
 
@@ -146,11 +146,11 @@ describe("TASC CLI synthetic end-to-end example", () => {
     expect(firstConfirmation.status, firstConfirmation.stderr).toBe(0);
     expect(firstConfirmation.stdout).toContain("DEMO_ONLY");
     expect(firstConfirmation.stdout).toContain(holdoutOne);
-    expect(await readdir(holdoutOne)).toEqual([
+    expect((await readdir(holdoutOne)).sort()).toEqual([
       "confirmation.json",
       ARTIFACT_MANIFEST_FILENAME,
       "report.md",
-    ]);
+    ].sort());
     await expect(verifyArtifactPacket(
       dirname(holdoutOne),
       basename(holdoutOne),
@@ -293,12 +293,12 @@ describe("TASC CLI synthetic end-to-end example", () => {
 
     expect(run.status, run.stderr).toBe(0);
     expect(run.stdout).toContain("NO_CANDIDATE");
-    expect(await readdir(out)).toEqual([
+    expect((await readdir(out)).sort()).toEqual([
       "development-report.json",
       ARTIFACT_MANIFEST_FILENAME,
       "next-experiment.json",
       "report.md",
-    ]);
+    ].sort());
     expect((await json(resolve(out, "development-report.json"))).status).toBe("NO_CANDIDATE");
     const report = await readFile(resolve(out, "report.md"), "utf8");
     expect(report).toContain("SYNTHETIC / DEMO ONLY");

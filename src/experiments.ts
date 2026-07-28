@@ -567,6 +567,19 @@ const decisionSchema = z.discriminatedUnion("status", [
 type MutableProposalBody = z.infer<typeof proposalBodySchema>;
 type MutableHoldBody = z.infer<typeof holdBodySchema>;
 type MutableDecisionBody = z.infer<typeof decisionBodySchema>;
+type ExperimentIntentSource = Pick<
+  MutableProposalBody,
+  | "parentAssessmentDigest"
+  | "parentProtocolDigest"
+  | "budget"
+  | "diagnosis"
+  | "hypothesis"
+  | "changedVariable"
+  | "frozenControls"
+  | "evidenceRequirements"
+  | "stopCondition"
+  | "expectedDecision"
+>;
 
 function sortedUnique<T>(values: readonly T[]): T[] {
   const sorted = [...values].sort(compareCanonical);
@@ -595,7 +608,7 @@ function assertCanonicalArray(
   }
 }
 
-function experimentIntentBody(proposal: MutableProposalBody): {
+function experimentIntentBody(proposal: ExperimentIntentSource): {
   readonly version: "tasc-experiment-intent-v2";
   readonly parentAssessmentDigest: string;
   readonly parentProtocolDigest: string;
@@ -1257,19 +1270,7 @@ function proposalBody(
     ...base,
     experimentIntentDigest: domainSeparatedDigest(
       INTENT_DOMAIN,
-      {
-        version: "tasc-experiment-intent-v2",
-        parentAssessmentDigest,
-        parentProtocolDigest,
-        budgetDigest: budget.budgetDigest,
-        diagnosis: base.diagnosis,
-        hypothesis: base.hypothesis,
-        changedVariable: base.changedVariable,
-        frozenControls: base.frozenControls,
-        evidenceRequirements: base.evidenceRequirements,
-        stopCondition: base.stopCondition,
-        expectedDecision: base.expectedDecision,
-      },
+      experimentIntentBody(base),
     ),
   });
 }
