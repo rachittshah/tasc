@@ -1,6 +1,7 @@
 node_modules/
 dist/
 coverage/
+release-candidate/
 .env
 .env.*
 !.env.example
