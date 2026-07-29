@@ -8,7 +8,12 @@
   "dispatchAuthority": {
     "keyId": "synthetic-dispatch-key-1",
     "algorithm": "ed25519",
-    "publicKeySpki": "MCowBQYDK2VwAyEAGqxD0C2HqrJVSzqQApQscj2BZIiiE9Fio8BLc7h1niU"
+    "publicKeySpki": "MCowBQYDK2VwAyEAbtitmkw3TCsfKzwcmE7NDkNOx0TNWJC_BFljR0gVDGk"
+  },
+  "collectorAuthority": {
+    "keyId": "synthetic-collector-key-1",
+    "algorithm": "ed25519",
+    "publicKeySpki": "MCowBQYDK2VwAyEAtjUiYSJ20UJQP1JSA-nTVCfc-fXDz-XXUuSP5xp63n8"
   },
   "splitMembership": {
     "algorithm": "tasc-seeded-sha256-group-bucket-v1",
@@ -73,7 +78,7 @@
       "id": "candidate-tensorrt-skypilot",
       "runtime": {
         "name": "tensorrt-llm",
-        "build": "1.1.0rc6"
+        "build": "1.2.1"
       },
       "backend": {
         "name": "cuda",
@@ -167,7 +172,7 @@
   "shadowCollection": {
     "maximumLogicalExecutions": 16,
     "maximumConcurrency": 2,
-    "attemptTimeoutMs": 30000,
+    "attemptTimeoutMs": 10000,
     "maximumAttempts": 1,
     "payloadPolicy": "keyed-identities-only"
   },
@@ -188,9 +193,5 @@
       "transport": "https"
     }
   ],
-  "requiredCapabilities": [
-    "chat-completions",
-    "streaming",
-    "final-usage"
-  ]
+  "requiredCapabilities": []
 }

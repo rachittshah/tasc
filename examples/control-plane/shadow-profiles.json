@@ -1,0 +1,63 @@
+{
+  "schemaVersion": "tasc-cli-shadow-profiles-v2",
+  "targets": [
+    {
+      "profileId": "candidate-tensorrt-skypilot",
+      "endpoint": {
+        "schemaVersion": "tasc-cli-runtime-endpoint-v1",
+        "endpointAlias": "approved-candidate"
+      },
+      "instance": {
+        "endpointDescriptorDigest": "sha256:4e9cd79236b5afec3e43791c83c4a2c4bb07393b2ee97aa160e309c7bd7f80c7",
+        "runtime": {
+          "profileId": "tensorrt-llm",
+          "build": "1.2.1"
+        },
+        "backend": {
+          "name": "cuda",
+          "build": "13.0"
+        },
+        "model": {
+          "id": "synthetic-candidate-model",
+          "revision": "fixture-revision-1"
+        },
+        "configurationDigest": "sha256:8f5c0c333b174f2fd3eb0ba487851a175baf08d46aa89ae98fdedcf1ce0e3cc6"
+      },
+      "route": "completions",
+      "httpLimits": {
+        "maxRequestBytes": 1048576,
+        "maxResponseBytes": 8388608,
+        "deadlineMs": 10000
+      }
+    },
+    {
+      "profileId": "champion-vllm-ray",
+      "endpoint": {
+        "schemaVersion": "tasc-cli-runtime-endpoint-v1",
+        "endpointAlias": "approved-champion"
+      },
+      "instance": {
+        "endpointDescriptorDigest": "sha256:e57f144dd45851cd319ce8f26aa490ad749c115c496d7ed60e2337f918eaf342",
+        "runtime": {
+          "profileId": "vllm",
+          "build": "0.26.0"
+        },
+        "backend": {
+          "name": "cuda",
+          "build": "13.0"
+        },
+        "model": {
+          "id": "synthetic-champion-model",
+          "revision": "fixture-revision-1"
+        },
+        "configurationDigest": "sha256:a4d1a347d0b44477d1aa91d907d1ff217eb5c305360158c2cf5b63d5a3f7ec99"
+      },
+      "route": "completions",
+      "httpLimits": {
+        "maxRequestBytes": 1048576,
+        "maxResponseBytes": 8388608,
+        "deadlineMs": 10000
+      }
+    }
+  ]
+}

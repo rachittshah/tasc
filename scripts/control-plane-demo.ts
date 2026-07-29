@@ -11,9 +11,11 @@ import {
   joinAssessmentEvidence,
   nominateDevelopment,
   parseAssessmentContext,
+  parseControllerSnapshot,
   parseEvaluatorEvidence,
   parseEvaluatorTrustSnapshot,
   parseExperimentProtocol,
+  parseShadowRunPlan,
   parseTraceEnvelope,
   parseWindowManifest,
   proposeExperiment,
@@ -33,6 +35,15 @@ import {
   type TraceEnvelope,
   type WorkBudget,
 } from "../src/index.js";
+import {
+  authorizeCollectorRequest,
+  fingerprintCollectorEndpointBinding,
+  fingerprintRuntimeWireProfile,
+  getRuntimeProfile,
+  parseCollectorTrustPolicy,
+  parseRuntimeInstanceIdentity,
+  type RuntimeInstanceIdentity,
+} from "../src/runtime/index.js";
 
 const repositoryRoot = resolve(import.meta.dirname, "..");
 const fixtureRoot = resolve(repositoryRoot, "examples/control-plane");
@@ -60,6 +71,122 @@ const WORK_BUDGET_FIELDS = [
   "maxIndependentGroups",
   "maxTraceRows",
 ] as const satisfies readonly (keyof WorkBudget)[];
+
+interface AdmissionEndpoint {
+  readonly schemaVersion: "tasc-cli-runtime-endpoint-v1";
+  readonly endpointAlias: string;
+}
+
+interface AdmissionTarget {
+  readonly profileId: string;
+  readonly endpoint: AdmissionEndpoint;
+  readonly instance: RuntimeInstanceIdentity;
+  readonly route: "completions";
+  readonly httpLimits: {
+    readonly deadlineMs: number;
+    readonly maxRequestBytes: number;
+    readonly maxResponseBytes: number;
+  };
+}
+
+function strictRecord(
+  input: unknown,
+  label: string,
+): Record<string, unknown> {
+  if (
+    input === null
+    || typeof input !== "object"
+    || Array.isArray(input)
+    || Object.getPrototypeOf(input) !== Object.prototype
+  ) {
+    throw new Error(`${label} must be a plain object`);
+  }
+  return input as Record<string, unknown>;
+}
+
+function exactKeys(
+  record: Record<string, unknown>,
+  keys: readonly string[],
+  label: string,
+): void {
+  const actual = Object.keys(record).sort();
+  const expected = [...keys].sort();
+  if (
+    actual.length !== expected.length
+    || actual.some((key, index) => key !== expected[index])
+  ) {
+    throw new Error(`${label} has unexpected fields`);
+  }
+}
+
+function parseAdmissionTargets(input: unknown): readonly AdmissionTarget[] {
+  const root = strictRecord(input, "shadow profiles");
+  exactKeys(root, ["schemaVersion", "targets"], "shadow profiles");
+  if (
+    root.schemaVersion !== "tasc-cli-shadow-profiles-v2"
+    || !Array.isArray(root.targets)
+    || root.targets.length < 2
+    || root.targets.length > 16
+  ) {
+    throw new Error("shadow profiles fixture is invalid");
+  }
+  const targets = root.targets.map((inputTarget) => {
+    const target = strictRecord(inputTarget, "shadow target");
+    exactKeys(
+      target,
+      ["endpoint", "httpLimits", "instance", "profileId", "route"],
+      "shadow target",
+    );
+    const endpoint = strictRecord(target.endpoint, "shadow endpoint");
+    exactKeys(
+      endpoint,
+      ["endpointAlias", "schemaVersion"],
+      "shadow endpoint",
+    );
+    if (
+      typeof target.profileId !== "string"
+      || target.route !== "completions"
+      || endpoint.schemaVersion !== "tasc-cli-runtime-endpoint-v1"
+      || typeof endpoint.endpointAlias !== "string"
+    ) {
+      throw new Error("shadow target identity is invalid");
+    }
+    const limits = strictRecord(target.httpLimits, "shadow HTTP limits");
+    exactKeys(
+      limits,
+      ["deadlineMs", "maxRequestBytes", "maxResponseBytes"],
+      "shadow HTTP limits",
+    );
+    if (
+      limits.deadlineMs !== 10_000
+      || limits.maxRequestBytes !== 1_048_576
+      || limits.maxResponseBytes !== 8_388_608
+    ) {
+      throw new Error("shadow target limits drifted from the P0 budget");
+    }
+    return Object.freeze({
+      profileId: target.profileId,
+      endpoint: Object.freeze({
+        schemaVersion: endpoint.schemaVersion,
+        endpointAlias: endpoint.endpointAlias,
+      }),
+      instance: parseRuntimeInstanceIdentity(target.instance),
+      route: target.route,
+      httpLimits: Object.freeze({
+        deadlineMs: limits.deadlineMs,
+        maxRequestBytes: limits.maxRequestBytes,
+        maxResponseBytes: limits.maxResponseBytes,
+      }),
+    });
+  });
+  if (
+    new Set(targets.map(({ profileId }) => profileId)).size
+      !== targets.length
+  ) {
+    throw new Error("shadow profiles contain duplicate targets");
+  }
+  return Object.freeze(targets);
+}
 
 function parseWorkBudget(input: unknown): WorkBudget {
   if (
@@ -175,6 +302,10 @@ const [
   historyInput,
   experimentBudgetInput,
   windowManifestInput,
+  controllerSnapshotInput,
+  shadowRunPlanInput,
+  collectorTrustInput,
+  shadowProfilesInput,
 ] = await Promise.all([
   readFixtureJson("protocol.json"),
   readFixtureJson("trust-snapshot.json"),
@@ -184,6 +315,10 @@ const [
   readFixtureJson("experiment-history.json"),
   readFixtureJson("experiment-budget.json"),
   readFixtureJson("window-manifest.json"),
+  readFixtureJson("controller-snapshot.json"),
+  readFixtureJson("shadow-run-plan.json"),
+  readFixtureJson("collector-trust.json"),
+  readFixtureJson("shadow-profiles.json"),
 ]);
 
 const workBudget = parseWorkBudget(workBudgetInput);
@@ -192,6 +327,112 @@ const trustSnapshot = parseEvaluatorTrustSnapshot(trustInput);
 const developmentContext = parseAssessmentContext(developmentContextInput);
 const onlineContext = parseAssessmentContext(onlineContextInput);
 const windowManifest = parseWindowManifest(windowManifestInput);
+const controllerSnapshot = parseControllerSnapshot(
+  controllerSnapshotInput,
+);
+const shadowRunPlan = parseShadowRunPlan(shadowRunPlanInput);
+const collectorTrust = parseCollectorTrustPolicy(collectorTrustInput);
+const admissionTargets = parseAdmissionTargets(shadowProfilesInput);
+if (
+  canonicalJson(shadowRunPlan.controllerSnapshot)
+    !== canonicalJson(controllerSnapshot)
+  || controllerSnapshot.state !== "SHADOW_ASSESSING"
+  || shadowRunPlan.controllerSnapshotDigest
+    !== controllerSnapshot.snapshotDigest
+  || shadowRunPlan.protocolDigest !== windowManifest.protocolDigest
+  || canonicalJson(shadowRunPlan.protocol) !== canonicalJson(protocol)
+  || shadowRunPlan.window.windowId !== windowManifest.windowId
+  || shadowRunPlan.window.membershipDigest
+    !== windowManifest.membershipDigest
+  || shadowRunPlan.window.eventTimeStartInclusive
+    !== windowManifest.eventTimeStartInclusive
+  || shadowRunPlan.window.eventTimeEndExclusive
+    !== windowManifest.eventTimeEndExclusive
+) {
+  throw new Error(
+    "P0 shadow plan does not match its committed controller/protocol/window",
+  );
+}
+
+const admissionTargetByProfile = new Map(
+  admissionTargets.map((target) => [target.profileId, target]),
+);
+let admittedTargetCount = 0;
+for (const planTarget of shadowRunPlan.collectionTargets) {
+  const target = admissionTargetByProfile.get(planTarget.profileId);
+  const executionProfile = protocol.profiles.find(
+    ({ id }) => id === planTarget.profileId,
+  );
+  if (
+    target === undefined
+    || executionProfile === undefined
+    || target.route !== "completions"
+    || planTarget.route !== "completions"
+    || target.endpoint.endpointAlias !== planTarget.endpointAlias
+    || target.instance.endpointDescriptorDigest
+      !== planTarget.endpointBindingDigest
+    || planTarget.authenticationReference !== null
+    || target.instance.runtime.profileId !== planTarget.runtimeName
+    || target.instance.runtime.build !== executionProfile.runtime.build
+    || target.instance.backend.name !== executionProfile.backend.name
+    || target.instance.backend.build !== executionProfile.backend.build
+    || target.instance.model.id !== executionProfile.model.id
+    || target.instance.model.revision !== executionProfile.model.revision
+    || target.instance.configurationDigest
+      !== executionProfile.deploymentConfigurationDigest
+  ) {
+    throw new Error(
+      "P1 runtime metadata does not match its exact plan/protocol target",
+    );
+  }
+  const registry = getRuntimeProfile(target.instance.runtime.profileId);
+  const route = registry.endpoints.inference.completions;
+  const trustedEndpoint = collectorTrust.endpoints.find(
+    ({ alias }) => alias === target.endpoint.endpointAlias,
+  );
+  if (
+    target.instance.runtime.build !== registry.runtime.build
+    || executionProfile.runtime.name !== registry.id
+    || route === undefined
+    || route.method !== "POST"
+    || route.capability !== "completions"
+    || registry.capabilities.completions.state !== "supported"
+    || trustedEndpoint?.runtime.profileId !== registry.id
+    || trustedEndpoint.runtime.build !== registry.runtime.build
+    || new URL(trustedEndpoint.origin).protocol !== "https:"
+    || fingerprintCollectorEndpointBinding(
+      collectorTrust,
+      target.endpoint.endpointAlias,
+    ) !== planTarget.endpointBindingDigest
+    || !/^sha256:[a-f0-9]{64}$/u.test(
+      fingerprintRuntimeWireProfile(registry),
+    )
+  ) {
+    throw new Error(
+      "P1 runtime target is not admitted by its pinned public metadata",
+    );
+  }
+  authorizeCollectorRequest(collectorTrust, {
+    endpointAlias: target.endpoint.endpointAlias,
+    runtime: target.instance.runtime,
+    method: route.method,
+    path: route.path,
+  });
+  admittedTargetCount += 1;
+}
+if (
+  admissionTargetByProfile.size !== shadowRunPlan.collectionTargets.length
+  || admittedTargetCount !== shadowRunPlan.collectionTargets.length
+  || protocol.requiredCapabilities.length !== 0
+  || shadowRunPlan.collectionTargets.some(
+    ({ capabilityReceiptDigests }) =>
+      capabilityReceiptDigests.length !== 0,
+  )
+) {
+  throw new Error(
+    "P0 work/capability budget is not honestly executable by P1 admission",
+  );
+}
 
 const [
   developmentTraces,
@@ -215,6 +456,49 @@ const [
   ),
 ]);
 
+const planTargets = new Map(
+  shadowRunPlan.collectionTargets.map((target) => [
+    target.profileId,
+    target,
+  ]),
+);
+const observedPlanTargets = new Set<string>();
+for (const trace of onlineTraces) {
+  const target = planTargets.get(trace.profileId);
+  const binding = trace.collectionBinding;
+  if (
+    target === undefined
+    || binding === null
+    || binding.shadowPlanDigest !== shadowRunPlan.planDigest
+    || binding.endpointAlias !== target.endpointAlias
+    || binding.endpointBindingDigest !== target.endpointBindingDigest
+    || binding.route !== target.route
+    || binding.authenticationReference !== target.authenticationReference
+    || canonicalJson(binding.capabilityReceiptDigests)
+      !== canonicalJson(target.capabilityReceiptDigests)
+    || trace.policyDigest !== shadowRunPlan.frozenPolicyDigest
+    || trace.collectionWindowId !== shadowRunPlan.window.windowId
+    || trace.collectionWindowMembershipDigest
+      !== shadowRunPlan.window.membershipDigest
+  ) {
+    throw new Error(
+      "online trace is not bound to its exact P0 shadow-plan target",
+    );
+  }
+  observedPlanTargets.add(trace.profileId);
+}
+if (
+  onlineTraces.length > shadowRunPlan.workBudget.maxLogicalExecutions
+  || observedPlanTargets.size !== planTargets.size
+  || [...planTargets.keys()].some(
+    (profileId) => !observedPlanTargets.has(profileId),
+  )
+) {
+  throw new Error(
+    "online trace set does not cover the bounded P0 target set",
+  );
+}
+
 const developmentDataset = requireAssessmentDatasetSplit(
   joinAssessmentEvidence(
     protocol,
@@ -234,6 +518,30 @@ if (!isDevelopmentNomination(developmentDecision)) {
   throw new Error(
     `synthetic development fixture did not nominate: `
     + developmentDecision.status,
+  );
+}
+const controllerDevelopment = controllerSnapshot.assessments.find(
+  ({ phase }) => phase === "development",
+);
+if (
+  controllerSnapshot.developmentEvidence === null
+  || controllerSnapshot.selectedPolicy === null
+  || controllerDevelopment === undefined
+  || controllerSnapshot.developmentEvidence.datasetDigest
+    !== developmentDataset.datasetDigest
+  || controllerSnapshot.developmentEvidence.traceSetDigest
+    !== developmentDataset.traceSetDigest
+  || controllerSnapshot.developmentEvidence.evaluatorSetDigest
+    !== developmentDataset.evaluatorSetDigest
+  || controllerDevelopment.decisionDigest
+    !== developmentDecision.decisionDigest
+  || controllerDevelopment.assessmentContextDigest
+    !== developmentContext.contextDigest
+  || canonicalJson(shadowRunPlan.frozenPolicy)
+    !== canonicalJson(developmentDecision.selectedPolicy)
+) {
+  throw new Error(
+    "P0 controller snapshot does not match development nomination evidence",
   );
 }
 
@@ -425,6 +733,14 @@ process.stdout.write(
   + "mode: OFFLINE_FIXTURE_REPLAY\n"
   + "network calls: 0\n"
   + "model calls: 0\n"
+  + "controller snapshot: SHADOW_ASSESSING verified\n"
+  + `P1 static admission: ${admittedTargetCount}/${
+    shadowRunPlan.collectionTargets.length
+  } registry-pinned completions targets authorized\n`
+  + `P0 -> P1 lineage: ${onlineTraces.length}/${onlineTraces.length} `
+  + `online traces bound to ${observedPlanTargets.size}/${
+    planTargets.size
+  } plan targets\n`
   + `dispatch intents: ${
     developmentTraces.length + onlineTraces.length
   }/${developmentTraces.length + onlineTraces.length} verified\n`

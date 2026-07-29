@@ -1,7 +1,7 @@
 {
   "version": "tasc-assessment-context-v2",
   "asOf": "2026-07-24T00:00:00.000Z",
-  "operatorTrustPolicySnapshotDigest": "sha256:3fa65a252d8114fdede234a085cb85711d5281fec4637ee834f075503190db7d",
+  "operatorTrustPolicySnapshotDigest": "sha256:fcadb1d8c3c2003bb6ba25325ca6c367a3433e578c0e7425c88e4b240a213106",
   "evaluatorRevocationSnapshotDigest": "sha256:9c54e61fa77d0cc6a803ab89c89ecdbc5597411132d847077952e5995193cb07",
-  "contextDigest": "sha256:b4b758f0e2927b488793ffd3e1b0dfe5f4354574e0b26b0ea7df10a46a4ad2f2"
+  "contextDigest": "sha256:8c89ac014a4c1d6aad833b164c36c08814c74ee3ffd0037f8eba0f5b465cd748"
 }
