@@ -28,6 +28,7 @@ import {
   signEvaluatorEvidence,
   unsignedEvaluatorEvidence,
   validAssessmentContextInput,
+  validCollectionBinding,
   validProtocolInput,
   validTraceInputForProfile,
 } from "./evidence.js";
@@ -52,11 +53,15 @@ type RawTraceInput<
   BaseRawTraceInput,
   | "split"
   | "sourceMode"
+  | "collectionBinding"
   | "collectionWindowId"
   | "collectionWindowMembershipDigest"
 > & {
   split: Split;
   sourceMode: "imported" | "observed" | "shadow";
+  collectionBinding:
+    | ReturnType<typeof validCollectionBinding>
+    | null;
   collectionWindowId: string | null;
   collectionWindowMembershipDigest: string | null;
 };
@@ -226,6 +231,7 @@ function onlineRows(
     trace.collectionWindowId = CLI_V2_WINDOW_ID;
     trace.collectionWindowMembershipDigest = membershipDigest;
     trace.sourceMode = "shadow";
+    trace.collectionBinding = validCollectionBinding();
     trace.policyDigest = frozenPolicy.policyDigest;
     trace.slices = ["routine"];
     trace.routeSignal!.value = 0.9;

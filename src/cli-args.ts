@@ -8,6 +8,7 @@ export type CliArgumentErrorCode =
   | "unknown-option"
   | "duplicate-option"
   | "missing-option-value"
+  | "invalid-option-value"
   | "missing-required-option";
 
 const CLI_ARGUMENT_ERROR_MESSAGES: Readonly<Record<CliArgumentErrorCode, string>> =
@@ -21,6 +22,7 @@ const CLI_ARGUMENT_ERROR_MESSAGES: Readonly<Record<CliArgumentErrorCode, string>
     "unknown-option": "an unsupported option was provided",
     "duplicate-option": "an option was provided more than once",
     "missing-option-value": "an option requires a non-empty value",
+    "invalid-option-value": "an option value is invalid",
     "missing-required-option": "a required option is missing",
   });
 
@@ -108,6 +110,44 @@ export interface ExperimentNextCommand {
   readonly out: string;
 }
 
+export type RuntimeProbeCapability =
+  | "modelDiscovery"
+  | "liveness"
+  | "readiness"
+  | "prometheusMetrics"
+  | "jsonMetrics"
+  | "chatCompletions"
+  | "completions"
+  | "responses"
+  | "nativeChat"
+  | "nativeGenerate";
+
+export type RuntimeProbeObservationEffect =
+  | "non-mutating"
+  | "inference-canary"
+  | "consumptive";
+
+export interface RuntimeProbeCommand {
+  readonly kind: "runtime-probe";
+  readonly endpoint: string;
+  readonly runtime: string;
+  readonly trust: string;
+  readonly capability: RuntimeProbeCapability;
+  readonly observationEffect: RuntimeProbeObservationEffect;
+  readonly deadlineMs: number;
+}
+
+export interface ShadowRunCommand {
+  readonly kind: "shadow-run";
+  readonly plan: string;
+  readonly expectedPlanDigest: string;
+  readonly cases: string;
+  readonly profiles: string;
+  readonly trust: string;
+  readonly identity: string;
+  readonly out: string;
+}
+
 export interface LegacyNominateCommand {
   readonly kind: "legacy-nominate";
   readonly spec: string;
@@ -139,6 +179,8 @@ export type ParsedCliCommand =
   | AssessHoldoutCommand
   | AssessWindowCommand
   | ExperimentNextCommand
+  | RuntimeProbeCommand
+  | ShadowRunCommand
   | LegacyNominateCommand
   | LegacyConfirmCommand
   | HelpCommand
@@ -211,6 +253,25 @@ const EXPERIMENT_OPTIONS = Object.freeze([
   "--out",
 ]);
 
+const RUNTIME_PROBE_OPTIONS = Object.freeze([
+  "--endpoint",
+  "--runtime",
+  "--trust",
+  "--capability",
+  "--effect",
+  "--deadline-ms",
+]);
+
+const SHADOW_RUN_OPTIONS = Object.freeze([
+  "--plan",
+  "--plan-digest",
+  "--cases",
+  "--profiles",
+  "--trust",
+  "--identity",
+  "--out",
+]);
+
 const PROTOCOL_VALIDATION_OPTIONS = Object.freeze([
   "--work-budget",
 ]);
@@ -275,6 +336,16 @@ export const CLI_COMMANDS: readonly CliCommandMetadata[] = Object.freeze([
     EXPERIMENT_OPTIONS,
   ),
   commandMetadata(
+    "runtime-probe",
+    "tasc runtime probe --endpoint <path> --runtime <path> --trust <path> --capability <name> --effect <non-mutating|inference-canary|consumptive> --deadline-ms <integer>",
+    RUNTIME_PROBE_OPTIONS,
+  ),
+  commandMetadata(
+    "shadow-run",
+    "tasc shadow run --plan <path> --plan-digest <sha256:digest> --cases <path> --profiles <path> --trust <path> --identity <path> --out <directory>",
+    SHADOW_RUN_OPTIONS,
+  ),
+  commandMetadata(
     "legacy-nominate",
     "tasc nominate --spec <path> --measurements <path> --out <directory>",
     LEGACY_NOMINATE_OPTIONS,
@@ -294,7 +365,7 @@ export const CLI_USAGE = [
   "",
   "Exit codes:",
   "  0 completed decision or validation (including HOLD/STALE)",
-  "  1 unexpected internal failure",
+  "  1 bounded runtime operation or unexpected internal failure",
   "  2 invalid command usage",
   "  3 unreadable, malformed, untrusted, or context-mismatched input",
   "  4 output freshness, custody, or publication failure",
@@ -346,6 +417,44 @@ function requiredOption(options: ParsedOptions, option: string): string {
   if (value === undefined) {
     // This is unreachable after parseOptions checks the command's fixed schema.
     throw new Error("CLI option parser invariant violated");
+  }
+  return value;
+}
+
+const RUNTIME_PROBE_CAPABILITIES: ReadonlySet<string> = new Set([
+  "modelDiscovery",
+  "liveness",
+  "readiness",
+  "prometheusMetrics",
+  "jsonMetrics",
+  "chatCompletions",
+  "completions",
+  "responses",
+  "nativeChat",
+  "nativeGenerate",
+]);
+
+const RUNTIME_PROBE_EFFECTS: ReadonlySet<string> = new Set([
+  "non-mutating",
+  "inference-canary",
+  "consumptive",
+]);
+
+function boundedPositiveDecimal(
+  value: string,
+  maximum: number,
+): number {
+  if (!/^[1-9][0-9]*$/.test(value)) fail("invalid-option-value");
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed > maximum) {
+    fail("invalid-option-value");
+  }
+  return parsed;
+}
+
+function canonicalSha256Digest(value: string): string {
+  if (!/^sha256:[0-9a-f]{64}$/u.test(value)) {
+    fail("invalid-option-value");
   }
   return value;
 }
@@ -462,6 +571,53 @@ function parseExperimentCommand(argv: readonly string[]): ExperimentNextCommand 
   });
 }
 
+function parseRuntimeCommand(argv: readonly string[]): RuntimeProbeCommand {
+  const action = argv[1];
+  if (action === undefined) fail("missing-action");
+  if (action !== "probe") fail("unknown-action");
+  const options = parseOptions(argv, 2, RUNTIME_PROBE_OPTIONS);
+  const capability = requiredOption(options, "--capability");
+  const observationEffect = requiredOption(options, "--effect");
+  if (!RUNTIME_PROBE_CAPABILITIES.has(capability)) {
+    fail("invalid-option-value");
+  }
+  if (!RUNTIME_PROBE_EFFECTS.has(observationEffect)) {
+    fail("invalid-option-value");
+  }
+  return Object.freeze({
+    kind: "runtime-probe",
+    endpoint: requiredOption(options, "--endpoint"),
+    runtime: requiredOption(options, "--runtime"),
+    trust: requiredOption(options, "--trust"),
+    capability: capability as RuntimeProbeCapability,
+    observationEffect:
+      observationEffect as RuntimeProbeObservationEffect,
+    deadlineMs: boundedPositiveDecimal(
+      requiredOption(options, "--deadline-ms"),
+      300_000,
+    ),
+  });
+}
+
+function parseShadowCommand(argv: readonly string[]): ShadowRunCommand {
+  const action = argv[1];
+  if (action === undefined) fail("missing-action");
+  if (action !== "run") fail("unknown-action");
+  const options = parseOptions(argv, 2, SHADOW_RUN_OPTIONS);
+  return Object.freeze({
+    kind: "shadow-run",
+    plan: requiredOption(options, "--plan"),
+    expectedPlanDigest: canonicalSha256Digest(
+      requiredOption(options, "--plan-digest"),
+    ),
+    cases: requiredOption(options, "--cases"),
+    profiles: requiredOption(options, "--profiles"),
+    trust: requiredOption(options, "--trust"),
+    identity: requiredOption(options, "--identity"),
+    out: requiredOption(options, "--out"),
+  });
+}
+
 function parseLegacyNominateCommand(
   argv: readonly string[],
 ): LegacyNominateCommand {
@@ -513,6 +669,10 @@ export function parseCliArguments(argv: readonly string[]): ParsedCliCommand {
       return parseAssessCommand(argv);
     case "experiment":
       return parseExperimentCommand(argv);
+    case "runtime":
+      return parseRuntimeCommand(argv);
+    case "shadow":
+      return parseShadowCommand(argv);
     case "nominate":
       return parseLegacyNominateCommand(argv);
     case "confirm":

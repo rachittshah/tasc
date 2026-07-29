@@ -120,8 +120,8 @@ describe("production trace-control-plane CLI", () => {
     expect(helpIo.output().stderr).toBe("");
     expect(helpIo.output().stdout).toContain("tasc assess development");
     expect(helpIo.output().stdout).toContain("tasc experiment next");
-    expect(helpIo.output().stdout).not.toContain("runtime probe");
-    expect(helpIo.output().stdout).not.toContain("shadow run");
+    expect(helpIo.output().stdout).toContain("tasc runtime probe");
+    expect(helpIo.output().stdout).toContain("tasc shadow run");
 
     const versionIo = captureIo();
     await expect(runCli(["--version"], {}, versionIo)).resolves.toBe(0);
@@ -131,7 +131,7 @@ describe("production trace-control-plane CLI", () => {
     });
   });
 
-  it("rejects unknown or premature runtime commands without reflecting input", async () => {
+  it("rejects malformed runtime commands without reflecting input", async () => {
     const secret = "planted-unknown-command-secret";
     const io = captureIo();
     await expect(runCli(["runtime", "probe", `--${secret}`], {}, io))

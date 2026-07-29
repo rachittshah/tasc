@@ -19,7 +19,9 @@ import {
 import {
   CliInputError,
   CliOutputError,
+  CliRuntimeError,
   executeCliV2,
+  type CliV2ExecutionContext,
 } from "./cli-v2.js";
 import { canonicalJson } from "./determinism.js";
 import {
@@ -323,13 +325,14 @@ function legacyFailure(
 /**
  * Execute one CLI invocation without importing ambient process state.
  *
- * V2 commands ignore `environment`; only the legacy attestation seam may read
- * `TASC_ATTESTATION_KEY`.
+ * V2 runtime commands receive only a named, descriptor-safe secret lookup;
+ * pure argument and file parsers never import ambient process state.
  */
 export async function runCli(
   argv: readonly string[],
   environment: Readonly<NodeJS.ProcessEnv>,
   io: CliIo,
+  signal?: AbortSignal,
 ): Promise<CliExitCode> {
   let command: ParsedCliCommand;
   try {
@@ -361,7 +364,25 @@ export async function runCli(
       return 0;
     }
 
-    const result = await executeCliV2(command);
+    const executionContext: CliV2ExecutionContext = Object.freeze({
+      readSecretEnvironmentVariable: (name: string) => {
+        try {
+          const descriptor = Reflect.getOwnPropertyDescriptor(
+            environment,
+            name,
+          );
+          return descriptor !== undefined
+              && Object.hasOwn(descriptor, "value")
+              && typeof descriptor.value === "string"
+            ? descriptor.value
+            : undefined;
+        } catch {
+          return undefined;
+        }
+      },
+      ...(signal === undefined ? {} : { signal }),
+    });
+    const result = await executeCliV2(command, executionContext);
     writeJsonLine(io.stdout, result);
     return 0;
   } catch (error) {
@@ -383,6 +404,17 @@ export async function runCli(
         message: "Artifact publication failed.",
       });
       return 4;
+    }
+    if (error instanceof CliRuntimeError) {
+      writeJsonLine(io.stderr, {
+        version: "tasc-cli-diagnostic-v1",
+        code: "RUNTIME_FAILURE",
+        message: "Runtime operation failed.",
+        operation: error.operation,
+        detail: error.detail,
+        dispatchState: error.dispatchState,
+      });
+      return 1;
     }
     if (isLegacyCommand(command)) {
       const failure = legacyFailure(error);
@@ -415,10 +447,22 @@ function isDirectExecution(argvEntry: string | undefined): boolean {
 }
 
 if (isDirectExecution(process.argv[1])) {
+  const directArguments = process.argv.slice(2);
+  const effectfulRuntimeCommand =
+    directArguments[0] === "runtime" || directArguments[0] === "shadow";
+  const controller = effectfulRuntimeCommand
+    ? new AbortController()
+    : undefined;
+  const abort = (): void => controller?.abort();
+  if (controller !== undefined) {
+    process.once("SIGINT", abort);
+    process.once("SIGTERM", abort);
+  }
   runCli(
-    process.argv.slice(2),
+    directArguments,
     process.env,
     { stdout: process.stdout, stderr: process.stderr },
+    controller?.signal,
   ).then(
     (code) => {
       process.exitCode = code;
@@ -426,5 +470,10 @@ if (isDirectExecution(process.argv[1])) {
     () => {
       process.exitCode = 1;
     },
-  );
+  ).finally(() => {
+    if (controller !== undefined) {
+      process.off("SIGINT", abort);
+      process.off("SIGTERM", abort);
+    }
+  });
 }
