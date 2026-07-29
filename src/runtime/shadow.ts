@@ -40,11 +40,11 @@ import {
   type TraceEnvelope,
 } from "../evidence.js";
 import {
-  isShadowRunPlanMember,
   parseShadowRunPlan,
   type ShadowRunPlan,
   type ShadowRunPlanCollectionTarget,
 } from "../shadow-plan.js";
+import { isWindowMembershipSelected } from "../window.js";
 import {
   createStudyPayloadIdentity,
   type KeyedPayloadIdentity,
@@ -1876,8 +1876,8 @@ function buildJobSeeds(input: {
         ).slice("sha256:".length)
       }`;
       if (
-        !isShadowRunPlanMember(
-          input.plan,
+        !isWindowMembershipSelected(
+          input.plan.window.membershipRule,
           caseInput.caseId,
           replicateId,
         )
