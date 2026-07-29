@@ -1647,10 +1647,17 @@ describe("shadow runner", () => {
     expect(result.status).toBe("cancelled");
     expect(result.networkCalls).toBeLessThanOrEqual(1);
     expect(dispatch).toHaveBeenCalledTimes(result.networkCalls);
+    expect(result.traces.length + result.pendingTraceIds.length).toBe(2);
     if (result.networkCalls === 0) {
-      expect(result.pendingTraceIds).toHaveLength(2);
       expect(result.sentUnknown).toBe(0);
-      expect(result.traces).toHaveLength(0);
+      expect(result.traces.every(({ attempts }) =>
+        attempts.length === 1
+        && attempts[0]?.dispatchState === "not_sent"
+        && (
+          attempts[0].failureCategory === "timeout"
+          || attempts[0].failureCategory === "cancelled"
+        )
+      )).toBe(true);
     } else {
       expect(result.pendingTraceIds).toHaveLength(1);
       expect(result.sentUnknown).toBe(1);
