@@ -9,8 +9,8 @@ export default defineConfig({
       reporter: ["text", "json-summary", "lcov"],
       reportsDirectory: "coverage",
       clean: true,
-      // Initial floor measured on the complete 657-test suite on 2026-07-28:
-      // 85.79% statements, 79.91% branches, 96.62% functions, 87.44% lines.
+      // Floor measured on the complete 788-test suite on 2026-07-29:
+      // 85.64% statements, 80.04% branches, 96.98% functions, 87.14% lines.
       // Integer floors preserve a small runtime/instrumentation margin while
       // preventing unreviewed coverage regression across all production src.
       thresholds: {
