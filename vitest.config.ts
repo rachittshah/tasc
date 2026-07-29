@@ -10,7 +10,7 @@ export default defineConfig({
       reportsDirectory: "coverage",
       clean: true,
       // Floor measured on the complete 788-test suite on 2026-07-29:
-      // 85.64% statements, 80.04% branches, 96.98% functions, 87.14% lines.
+      // 85.65% statements, 80.06% branches, 96.98% functions, 87.15% lines.
       // Integer floors preserve a small runtime/instrumentation margin while
       // preventing unreviewed coverage regression across all production src.
       thresholds: {
