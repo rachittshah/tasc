@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
-import { createSecretKey } from "node:crypto";
+import { createSecretKey, randomBytes } from "node:crypto";
 import {
   createServer,
   type IncomingMessage,
@@ -19,7 +19,17 @@ import {
   type RuntimeInstanceIdentity,
   type RuntimeInvocationRoute,
   type RuntimeProfileId,
-} from "../src/index.js";
+} from "../src/runtime/index.js";
+import {
+  OPERATOR_LIVE_SMOKE_DEADLINE_MS,
+  OPERATOR_LIVE_SMOKE_MAX_REQUEST_BYTES,
+  OPERATOR_LIVE_SMOKE_MAX_RESPONSE_BYTES,
+  OPERATOR_LIVE_SMOKE_MAX_TOKENS,
+  buildOperatorLiveSmokeResult,
+  parseLiveSmokeEnvironment,
+  type OperatorLiveSmokeConfiguration,
+  type OperatorLiveSmokeResult,
+} from "./live-smoke-config.js";
 
 const OVERALL_DEADLINE_MS = 10_000;
 const OPERATION_DEADLINE_MS = 2_000;
@@ -30,6 +40,7 @@ const MODEL = Object.freeze({
 });
 const CONFIGURATION_DIGEST = `sha256:${"7".repeat(64)}`;
 const PAYLOAD_KEY = createSecretKey(Buffer.alloc(32, 0x73));
+const OPERATOR_PROMPT_PREFIX = "TASC operator live smoke";
 
 interface ObservedRequest {
   readonly method: string;
@@ -359,7 +370,7 @@ async function exerciseRuntime(
   });
 }
 
-async function main(): Promise<void> {
+async function runLoopbackSmoke(): Promise<void> {
   const abortController = new AbortController();
   const timer = setTimeout(
     () => abortController.abort(new Error("live smoke deadline exceeded")),
@@ -427,10 +438,187 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((error: unknown) => {
-  const message = error instanceof Error
-    ? error.message
-    : "live runtime smoke failed unexpectedly";
-  process.stderr.write(`live runtime smoke failed: ${message}\n`);
+function operatorGeneration(
+  configuration: OperatorLiveSmokeConfiguration,
+  prompt: string,
+): RuntimeGenerationRequest {
+  const chatRoute =
+    configuration.route === "chatCompletions"
+    || configuration.route === "nativeChat";
+  return Object.freeze({
+    model: configuration.instance.model,
+    stream: false,
+    n: 1,
+    ...(chatRoute
+      ? {
+        messages: Object.freeze([
+          Object.freeze({
+            role: "user" as const,
+            content: prompt,
+          }),
+        ]),
+      }
+      : { prompt }),
+    maxTokens: OPERATOR_LIVE_SMOKE_MAX_TOKENS,
+    temperature: 0,
+  });
+}
+
+function readOperatorAuthentication(
+  configuration: OperatorLiveSmokeConfiguration,
+): {
+  readonly secret: string | undefined;
+  readonly authenticationReference?: string;
+  readonly secretHeaderFactory?: (
+    reference: string,
+  ) => readonly (readonly ["authorization" | "x-api-key", string])[];
+} {
+  const authentication = configuration.authentication;
+  if (authentication === undefined) {
+    return Object.freeze({ secret: undefined });
+  }
+  const secret = process.env[authentication.environmentVariable];
+  if (
+    typeof secret !== "string"
+    || secret.length < 1
+    || secret.length > 8 * 1024
+    || Buffer.byteLength(secret, "utf8") > 8 * 1024
+    || !/^[\x20-\x7e]+$/u.test(secret)
+  ) {
+    throw new Error("operator live smoke authentication is unavailable");
+  }
+  const headers = Object.freeze([
+    Object.freeze([authentication.header, secret] as const),
+  ]);
+  return Object.freeze({
+    secret,
+    authenticationReference: authentication.reference,
+    secretHeaderFactory: (reference: string) => {
+      if (reference !== authentication.reference) {
+        throw new Error("operator live smoke authentication was rejected");
+      }
+      return headers;
+    },
+  });
+}
+
+function assertNoRawOperatorMaterial(
+  result: OperatorLiveSmokeResult,
+  prompt: string,
+  output: string | undefined,
+  secret: string | undefined,
+): void {
+  const forbiddenKeys = new Set([
+    "authentication",
+    "environmentVariable",
+    "messages",
+    "output",
+    "prompt",
+    "secret",
+    "text",
+  ]);
+  const pending: unknown[] = [result];
+  while (pending.length > 0) {
+    const value = pending.pop();
+    if (value === null || typeof value !== "object") continue;
+    for (const [key, descriptor] of Object.entries(
+      Object.getOwnPropertyDescriptors(value),
+    )) {
+      assert.equal(forbiddenKeys.has(key), false);
+      if (Object.hasOwn(descriptor, "value")) {
+        pending.push(descriptor.value);
+      }
+    }
+  }
+  const serialized = JSON.stringify(result);
+  assert.equal(serialized.includes(prompt), false);
+  if (secret !== undefined) {
+    assert.equal(serialized.includes(secret), false);
+  }
+  if (output !== undefined && output.length >= 16) {
+    assert.equal(serialized.includes(JSON.stringify(output)), false);
+  }
+}
+
+async function runOperatorLiveSmoke(
+  configuration: OperatorLiveSmokeConfiguration,
+): Promise<void> {
+  const prompt =
+    `${OPERATOR_PROMPT_PREFIX} ${randomBytes(16).toString("hex")}. `
+    + "Reply with a short acknowledgement.";
+  const authentication = readOperatorAuthentication(configuration);
+  const abortController = new AbortController();
+  const timer = setTimeout(
+    () => abortController.abort(
+      new Error("operator live smoke deadline exceeded"),
+    ),
+    OPERATOR_LIVE_SMOKE_DEADLINE_MS,
+  );
+  timer.unref();
+  try {
+    // Deliberately no probe or canary: this is the sole direct inference call.
+    const outcome = await invokeRuntime({
+      policy: configuration.policy,
+      endpointAlias: configuration.endpointAlias,
+      instance: configuration.instance,
+      route: configuration.route,
+      generation: operatorGeneration(configuration, prompt),
+      identity: {
+        studyId: "operator-live-smoke",
+        keyId: "operator-live-smoke-ephemeral",
+        key: createSecretKey(randomBytes(32)),
+      },
+      totalDeadlineMs: OPERATOR_LIVE_SMOKE_DEADLINE_MS,
+      signal: abortController.signal,
+      httpLimits: {
+        maxRequestBytes: OPERATOR_LIVE_SMOKE_MAX_REQUEST_BYTES,
+        maxResponseHeaderBytes: 16 * 1024,
+        maxResponseHeaders: 64,
+        maxResponseBytes: OPERATOR_LIVE_SMOKE_MAX_RESPONSE_BYTES,
+        maxResponseChunks: 4_096,
+        maxSecretHeaderBytes: 8 * 1024,
+        connectTimeoutMs: 3_000,
+        headersTimeoutMs: 5_000,
+        bodyTimeoutMs: 5_000,
+        deadlineMs: OPERATOR_LIVE_SMOKE_DEADLINE_MS,
+      },
+      ...(authentication.authenticationReference === undefined
+        ? {}
+        : {
+          authenticationReference:
+            authentication.authenticationReference,
+          secretHeaderFactory: authentication.secretHeaderFactory,
+        }),
+    });
+    const result = buildOperatorLiveSmokeResult(
+      configuration,
+      outcome.persistence,
+    );
+    assert.equal(Object.hasOwn(outcome.persistence, "output"), false);
+    assertNoRawOperatorMaterial(
+      result,
+      prompt,
+      outcome.output?.text,
+      authentication.secret,
+    );
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+    assert.equal(outcome.status, "completed");
+  } finally {
+    clearTimeout(timer);
+    abortController.abort();
+  }
+}
+
+async function main(): Promise<void> {
+  const configuration = parseLiveSmokeEnvironment(process.env);
+  if (configuration.mode === "loopback") {
+    await runLoopbackSmoke();
+    return;
+  }
+  await runOperatorLiveSmoke(configuration);
+}
+
+main().catch(() => {
+  process.stderr.write("live runtime smoke failed.\n");
   process.exitCode = 1;
 });
