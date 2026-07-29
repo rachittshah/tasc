@@ -329,8 +329,8 @@ P0 with `buildShadowRunPlan`. The builder requires:
 - a self-consistent controller snapshot in `SHADOW_ASSESSING`;
 - the exact normalized protocol and the controller-selected `PolicyBundle`;
 - an inclusive event-time start and exclusive end;
-- one endpoint/profile/route/auth-reference target binding for every protocol
-  profile;
+- one endpoint/profile/route/auth-reference/HTTP-limit-digest target binding
+  for every protocol profile;
 - the aggregate shadow work budget; and
 - issue/expiry times consistent with controller, protocol, and frozen-policy
   authority.
@@ -354,7 +354,10 @@ operator custody as the controller checkpoint. P1 binds `planDigest` into both
 the dispatch signature and the final collector signature. Each target also
 pins `authenticationReference` as a nullable non-secret identifier. Changing
 the credential/tenant reference requires a new P0 plan; rotating the secret
-behind one stable reference does not.
+behind one stable reference does not. Use the P0-safe
+`fingerprintRuntimeInvocationHttpLimits` helper to bind the complete
+normalized/defaulted `httpLimits` object. Any limit change requires a new plan
+and changes the signed collection binding and trace identity.
 
 The v1 plan is content-addressed, not independently signed, and its embedded
 controller snapshot explicitly remains `unattested`. Its digest detects drift;
@@ -443,10 +446,12 @@ Optional `httpLimits` may contain one or more exact
 Every target must exactly match both the P0 plan and its embedded protocol:
 profile digest, endpoint requirement, alias, transport, endpoint binding,
 runtime/backend/model/configuration identity, route, and nullable
-authentication reference. That reference is P0-pinned non-secret provenance:
-it names an authorized secret lookup but never contains or grants the secret
-value. Shadow v1 accepts only a build-pinned route whose registered capability
-state is `supported`.
+authentication reference, plus the P0-pinned normalized HTTP-limit digest.
+That reference is P0-pinned non-secret provenance: it names an authorized
+secret lookup but never contains or grants the secret value. P1 rejects either
+provenance drift before signer, filesystem, or network contact. Shadow v1
+accepts only a build-pinned route whose registered capability state is
+`supported`.
 The full execution-profile digest remains P0-planned metadata. P1 separately
 checks the instance fields it can honestly assert—runtime, backend, model, and
 deployment-configuration digest. Tokenizer, hardware, quantization, chat

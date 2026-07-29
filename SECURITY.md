@@ -84,6 +84,9 @@ operator-owned `CollectorTrustPolicy`.
 - Cloud metadata, private, link-local, CGNAT, ULA, unspecified, unapproved
   loopback, redirects, and path escapes are rejected.
 - Inference-canary and consumptive probes require the matching explicit effect.
+- Shadow inference requires the profiles configuration to match the P0-pinned
+  normalized HTTP-limit digest before signer, filesystem, journal, or network
+  effects.
 - Set provider quotas as well as TASC work/deadline/concurrency budgets.
 - Treat `sent_unknown` as unresolved; do not retry it or assume no charge.
 

@@ -36,7 +36,7 @@ The implemented release sharpens that boundary:
 - P0 emits one content-addressed `tasc-shadow-run-plan-v1` only from a
   `SHADOW_ASSESSING` controller snapshot. The plan embeds the exact protocol,
   frozen policy, deterministic window membership, endpoint/profile bindings,
-  validity, and aggregate work budget.
+  normalized HTTP-limit digests, validity, and aggregate work budget.
 - P1 consumes that plan and excludes nonmembers before effects. It cannot
   replace policy/window digests or silently run a conditional-capability
   canary.
@@ -452,7 +452,8 @@ The shadow runner:
 - records durable dispatch intent before sending and preserves
   `not_sent | sent_unknown | completed`;
 - binds the P0-selected non-secret authentication reference into the plan and
-  signed trace, and HMAC-authenticates resume-authoritative journal records;
+  signed trace, binds the normalized/defaulted HTTP limits into both plan and
+  trace identity, and HMAC-authenticates resume-authoritative journal records;
 - retries only an explicitly retry-safe runtime outcome; ambiguous requests are
   retained and fail coverage rather than being assumed deduplicated;
 - aborts outstanding requests on cancellation;

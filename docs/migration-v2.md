@@ -92,7 +92,10 @@ controller to `SHADOW_ASSESSING` and build one self-contained
 window, endpoint/profile bindings, and aggregate work budget. Pin the expected
 plan digest at the operator job boundary. Pin each nullable non-secret
 authentication reference in the corresponding P0 collection target; changing
-that reference creates new collection authority and trace lineage.
+that reference creates new collection authority and trace lineage. Fingerprint
+each target's complete normalized/defaulted inference HTTP limits as well;
+changing a timeout or byte ceiling requires a new plan and distinct trace
+lineage.
 
 Prepare the matching v2 shadow target configuration and collector trust policy.
 Keep the per-study payload HMAC, dispatch private key, collector-attestation
@@ -233,8 +236,8 @@ not promote the policy.
 - [ ] Original v1 artifacts are immutable and retained.
 - [ ] V2 protocol was declared before holdout/window evidence was inspected.
 - [ ] Every execution profile and runtime configuration is pinned.
-- [ ] Fresh collection uses a pinned P0 plan, exact target bindings, and
-      distinct dispatch/collector authorities.
+- [ ] Fresh collection uses a pinned P0 plan, exact target and HTTP-limit
+      bindings, and distinct dispatch/collector authorities.
 - [ ] Historical fields were migrated only when supported by raw evidence.
 - [ ] Fresh paired traces were collected where v1 provenance was insufficient.
 - [ ] Failures and `sent_unknown` attempts remain visible.

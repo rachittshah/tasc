@@ -51,8 +51,9 @@ P1 owns:
 
 P1 cannot select or grade a policy. For paired collection it consumes one
 self-contained P0 plan binding the controller snapshot, protocol, frozen
-policy, window membership, endpoint/profile targets, validity, and aggregate
-work budget. Runtime secrets remain separate references. P1 returns traces.
+policy, window membership, endpoint/profile targets, normalized HTTP-limit
+digests, validity, and aggregate work budget. Runtime secrets remain separate
+references. P1 returns traces.
 
 ```text
 controller snapshot + protocol + frozen policy
@@ -107,8 +108,8 @@ identities rather than payload bytes, plus:
 
 - study/protocol/case/group/replicate/split/window lineage;
 - the P0 shadow-plan, endpoint-binding, route, nullable non-secret
-  authentication reference, and capability-receipt lineage for shadow
-  observations;
+  authentication reference, normalized HTTP-limit digest, and
+  capability-receipt lineage for shadow observations;
 - exact profile and policy digests;
 - route-time signal and provenance;
 - workload shape and traffic weight;
@@ -286,6 +287,7 @@ Before contact, P1 validates:
 - request/generation/media bounds;
 - the P0-pinned authentication reference as non-secret provenance (never the
   credential value);
+- the exact normalized/defaulted HTTP-limit digest before any effect;
 - authorization TTL and whole-operation deadline; and
 - caller-owned aggregate work limits.
 

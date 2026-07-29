@@ -272,12 +272,16 @@ key on resume.
 Endpoint JSON binds an alias, optional orchestration descriptor, and optional
 auth reference. P0 pins that reference into the collection target and signed
 trace provenance; it is a non-secret identifier, never the credential itself.
+P0 also fingerprints the complete normalized/defaulted invocation limits with
+`fingerprintRuntimeInvocationHttpLimits`; P1 requires the profiles file to
+match that target digest before signer, filesystem, or network contact.
 Secret values come only from `TASC_RUNTIME_AUTH_*`. Shadow identity JSON names
 one `TASC_SHADOW_HMAC_*` key plus distinct
 `TASC_SHADOW_SIGNING_*` dispatch and collector private keys; it never contains
 their values. Every shadow target must exactly match the P0 plan, protocol
 endpoint requirement, and execution profile. Per-target HTTP limits may lower
-defaults; they cannot widen the plan budget. Conditional routes are not
+defaults; they cannot widen the plan budget, and changing them requires a new
+P0 plan and produces distinct trace lineage. Conditional routes are not
 auto-probed inside a shadow run: use the explicit runtime-probe command to
 observe them, or select a build-pinned route with established support. Full
 schemas and runbooks are in the

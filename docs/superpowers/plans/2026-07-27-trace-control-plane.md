@@ -36,8 +36,8 @@ primitives, Python `unittest` for the optional MLX runner, GitHub Actions.
   MUST NOT infect the deterministic core.
 - Paired P1 collection MUST consume one self-contained P0 run plan binding the
   controller snapshot, frozen policy, window membership, endpoint targets,
-  validity, and aggregate work budget. Loose caller-authored policy/window
-  digests are not authority.
+  normalized HTTP-limit digests, validity, and aggregate work budget. Loose
+  caller-authored policy/window/limit digests are not authority.
 - Pre-dispatch and final operational facts MUST use distinct Ed25519 dispatch
   and collector authorities. Accepted traces require both signatures.
 - Automatic conditional-capability canaries MUST NOT escape shadow admission;
@@ -934,7 +934,9 @@ Test stable champion/candidate order counterbalancing, replicate and attempt
 IDs, bounded concurrency, per-attempt and whole-run deadlines, failure
 retention, response-size limits, cancellation, checkpointing, restart/resume,
 duplicate prevention, partial checkpoint recovery, SIGINT-style abort, and exact
-work-budget preflight.
+work-budget preflight. Prove that changing P1 HTTP limits under one plan fails
+before signer, filesystem, or network effects, and that a newly authorized
+limits digest produces distinct trace identity.
 
 Inject crashes before durable dispatch intent, after intent/before send, after
 send, before envelope checkpoint, and after checkpoint. Preserve

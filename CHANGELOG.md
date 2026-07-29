@@ -114,8 +114,13 @@ The project follows semantic versioning once a stable public API is declared.
   deployment identity in collected traces.
 - Prevented P1 authentication-reference changes from colliding with or
   deduplicating a different P0-approved credential/tenant lineage.
+- Prevented P1 timeout and byte-limit changes from reusing a P0 plan, accepted
+  journal, or trace identity by binding normalized limits into the target and
+  signed collection provenance.
 - Prevented forged local admission, lease, outcome, intent, or completion
   journal packets from being promoted into collector-signed trace evidence.
+- Made signed control-plane fixture regeneration byte-for-byte stable with
+  explicitly public, domain-separated fixture-only key derivation.
 - Rejected declared case/replicate/profile products before deterministic job
   expansion, closing a pre-admission CPU and memory amplification path.
 - Classified SGLang `/health` conservatively as an inference canary because

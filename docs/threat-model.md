@@ -108,6 +108,9 @@ Controls:
   method, path prefix, duration ceiling, and optional authentication reference;
 - the P0 plan and signed trace `collectionBinding` pin that non-secret
   reference, while the corresponding credential remains process-local;
+- the same plan/binding pins the complete normalized/defaulted inference HTTP
+  limits, so a looser P1 timeout or byte ceiling cannot reuse an accepted
+  journal or trace identity;
 - remote endpoints require HTTPS and public literal/DNS results;
 - local endpoints require an exact literal-loopback origin plus explicit local
   mode;

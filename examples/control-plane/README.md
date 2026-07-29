@@ -26,7 +26,8 @@ The files deliberately keep inference traces and evaluation evidence separate:
   `/v1/completions` routes, HTTPS-only synthetic `.invalid` origins, and exact
   endpoint-binding digests. Their P0-pinned `authenticationReference` is
   explicitly `null` because this credential-free replay has no secret lookup
-  provenance. No request is made to either origin.
+  provenance. The plan and each signed online trace also pin the exact
+  normalized/defaulted HTTP-limit digest. No request is made to either origin.
 - `development-evidence.ndjson` and `online-evidence.ndjson` contain separately
   signed `EvaluatorEvidence` records from the frozen deterministic evaluator.
 - `trust-snapshot.json`, the two assessment contexts, and
@@ -38,10 +39,12 @@ The files deliberately keep inference traces and evaluation evidence separate:
 - the experiment history and budget authorize only a bounded next-experiment
   proposal.
 
-Fresh, distinct Ed25519 dispatch, collector, and evaluator private keys—and a
-fresh payload-identity key—were held only in memory while these contracts were
-generated, then discarded. Only public keys, signatures, and keyed identities
-are committed.
+Distinct Ed25519 dispatch, collector, and evaluator keys—and the
+payload-identity key—are deterministically derived from public,
+domain-separated fixture labels. This makes regeneration byte-for-byte
+reproducible. The derived private material is never serialized, but it is
+intentionally public and provides no real authority or secrecy; never reuse
+these fixture keys for a real study.
 
 The committed plan authorized effects only inside its sealed historical
 90-second window and is now replay-only. Its aggregate budgets were admitted
@@ -57,10 +60,10 @@ Maintainers can regenerate the complete signed packet with:
 node --import tsx scripts/regenerate-control-plane-fixtures.mjs
 ```
 
-The script creates all secret keys in memory, writes only public/signed
-artifacts, and prints the new plan digest. It intentionally does not update the
-independent test pin; reviewing and pinning that value is a separate custody
-action.
+The script derives fixture-only keys in memory, writes only public/signed
+artifacts, and prints the stable plan digest. It intentionally does not update
+the independent test pin; reviewing and pinning that value is a separate
+custody action.
 
 Run the full replay:
 
