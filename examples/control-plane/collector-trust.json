@@ -1,0 +1,40 @@
+{
+  "schemaVersion": "tasc-collector-trust-policy-v1",
+  "localMode": "disabled",
+  "maximumRequestDurationMs": 10000,
+  "endpoints": [
+    {
+      "alias": "approved-candidate",
+      "origin": "https://candidate.inference.example.invalid",
+      "runtime": {
+        "profileId": "tensorrt-llm",
+        "build": "1.2.1"
+      },
+      "routes": [
+        {
+          "method": "POST",
+          "pathPrefix": "/v1/completions",
+          "authenticationReferences": []
+        }
+      ]
+    },
+    {
+      "alias": "approved-champion",
+      "origin": "https://champion.inference.example.invalid",
+      "runtime": {
+        "profileId": "vllm",
+        "build": "0.26.0"
+      },
+      "routes": [
+        {
+          "method": "POST",
+          "pathPrefix": "/v1/completions",
+          "authenticationReferences": []
+        }
+      ]
+    }
+  ],
+  "secretReferences": [],
+  "evaluatorKeyIds": [],
+  "storeRoots": []
+}

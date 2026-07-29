@@ -40,20 +40,53 @@ Exact revisions, release sources, and workloads are frozen in
 Requirements:
 
 - Apple Silicon with Metal support;
-- macOS;
-- Python 3.12; and
+- macOS 14 or newer;
+- Python 3.13; and
 - [`uv`](https://docs.astral.sh/uv/) or another environment manager.
 
 Create an isolated environment:
 
 ```bash
-uv venv --python 3.12 .venv-mlx
-uv pip install --python .venv-mlx/bin/python -r benchmarks/mlx/requirements.txt
+uv venv --python 3.13 .venv-mlx
+uv pip install --python .venv-mlx/bin/python \
+  --require-hashes \
+  -r benchmarks/mlx/build-requirements.lock
+uv pip install --python .venv-mlx/bin/python \
+  --require-hashes \
+  --no-build-isolation \
+  -r benchmarks/mlx/requirements.lock
 ```
 
-The version pins matter. Do not compare a new result with the committed
-snapshot as though the runtime were controlled if MLX, `mlx-lm`, the task
-implementation, tokenizer stack, or model revision changed.
+`requirements.txt` is the small direct-constraint input used to regenerate the
+fully resolved, hash-pinned `requirements.lock`. The lock is the reproducible
+runtime install surface. Three transitive packages are available only as source
+distributions, so their PEP 517 bootstrap is separately closed by
+`build-requirements.lock`; `--no-build-isolation` is required so an installer
+cannot fetch an unpinned build backend. Do not compare a new result with the
+committed snapshot as though the runtime were controlled if MLX, `mlx-lm`, the
+task implementation, tokenizer stack, transitive dependencies, build
+bootstrap, or model revision changed.
+
+Regenerate both locks deliberately:
+
+```bash
+MACOSX_DEPLOYMENT_TARGET=14.0 uv pip compile \
+  benchmarks/mlx/build-requirements.txt \
+  --python-version 3.13 \
+  --python-platform aarch64-apple-darwin \
+  --generate-hashes \
+  --output-file benchmarks/mlx/build-requirements.lock
+
+MACOSX_DEPLOYMENT_TARGET=14.0 uv pip compile \
+  benchmarks/mlx/requirements.txt \
+  --python-version 3.13 \
+  --python-platform aarch64-apple-darwin \
+  --generate-hashes \
+  --output-file benchmarks/mlx/requirements.lock
+```
+
+Review every version change and rerun the parser/safety tests before committing
+regenerated locks.
 
 ## Run the benchmark suite
 
@@ -61,6 +94,9 @@ implementation, tokenizer stack, or model revision changed.
 .venv-mlx/bin/python benchmarks/mlx/run_benchmarks.py \
   --benchmark-command .venv-mlx/bin/mlx_lm.benchmark \
   --evaluate-command .venv-mlx/bin/mlx_lm.evaluate \
+  --download-timeout-seconds 3600 \
+  --benchmark-timeout-seconds 3600 \
+  --evaluate-timeout-seconds 21600 \
   --output /tmp/tasc-mlx-$(date +%Y%m%d-%H%M%S)
 ```
 
@@ -74,6 +110,20 @@ The runner:
 - runs the full configured quality task for each pinned model; and
 - records only sanitized machine, OS, device, package, power-source, and
   thermal-warning metadata.
+
+The runner treats its config, child processes, and result files as trust
+boundaries. It requires full 40-hex model revisions and safe unique keys,
+rejects oversized or duplicate-key JSON, caps the total trial matrix, launches
+downloads and MLX commands without a shell under hard time and output limits,
+and passes only an allowlisted environment (never inherited tokens) to child
+processes. The output directory is claimed exclusively, files are created with
+mode `0600` under a `0700` directory, result reads are bounded and symlink-safe,
+and a failed run clears partial contents only through the exact directory
+descriptor it created. It intentionally retains that empty root reservation:
+macOS has no atomic “remove this pathname only if it still names this inode,”
+so path removal would risk deleting a concurrent replacement. A pre-existing
+or replacement output is never traversed or overwritten; inspect and remove an
+empty failed-run reservation explicitly before reusing its name.
 
 The three workloads are:
 

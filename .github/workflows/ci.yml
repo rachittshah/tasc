@@ -5,6 +5,7 @@ on:
     branches:
       - main
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -14,35 +15,247 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  validate:
-    name: Node ${{ matrix.node }}
+  typecheck:
+    name: Typecheck
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node.js 22
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: Pin npm
+        run: npm install --global npm@11.6.1
+      - name: Install exact dependencies
+        run: npm ci --ignore-scripts
+      - name: Typecheck all source, scripts, and tests
+        run: npm run typecheck
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node.js 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+      - name: Pin npm
+        run: npm install --global npm@11.6.1
+      - name: Install exact dependencies
+        run: npm ci --ignore-scripts
+      - name: Build the distributable
+        run: npm run build
+
+  test:
+    name: Test (${{ matrix.os }}, Node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-14
+        node:
+          - 22
+          - 24
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node.js ${{ matrix.node }}
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - name: Pin npm
+        run: npm install --global npm@11.6.1
+      - name: Install exact dependencies
+        run: npm ci --ignore-scripts
+      - name: Run the complete test suite
+        env:
+          # TASC artifact custody deliberately rejects symlinked roots. macOS
+          # exposes /var as a symlink, so exercise the canonical temp root.
+          TMPDIR: ${{ runner.os == 'macOS' && '/private/tmp' || '/tmp' }}
+        run: npm test
+
+  package-smoke:
+    name: Package smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Node.js 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Pin npm
+        run: npm install --global npm@11.6.1
+      - name: Build and consume the exact git-archive package
+        run: node scripts/package-smoke.mjs --git-archive
+
+  demo:
+    name: Synthetic controller demo
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node.js 22
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: Pin npm
+        run: npm install --global npm@11.6.1
+      - name: Install exact dependencies
+        run: npm ci --ignore-scripts
+      - name: Run the end-to-end synthetic decision flow
+        run: |
+          npm run demo
+          npm run demo:control-plane
+
+  live-smoke:
+    name: Loopback runtime smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node.js 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+      - name: Pin npm
+        run: npm install --global npm@11.6.1
+      - name: Install exact dependencies
+        run: npm ci --ignore-scripts
+      - name: Exercise real probes and calls against loopback fixtures
+        run: npx --no-install tsx scripts/live-smoke.ts
+
+  coverage:
+    name: Coverage gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node.js 22
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: Pin npm
+        run: npm install --global npm@11.6.1
+      - name: Install exact dependencies
+        run: npm ci --ignore-scripts
+      - name: Enforce repository coverage floors
+        run: npm run coverage
+      - name: Upload the coverage report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-node-22
+          path: coverage/
+          if-no-files-found: error
+          retention-days: 14
+
+  audit:
+    name: npm audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node.js 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Pin npm
+        run: npm install --global npm@11.6.1
+      - name: Reject high-severity dependency advisories
+        run: npm audit --package-lock-only --audit-level=high
+
+  mlx-parser-security:
+    name: MLX parser safety (${{ matrix.os }}, Python 3.13)
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
-        node:
-          - 22
-          - 24
-
+        os:
+          - ubuntu-latest
+          - macos-14
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          node-version: ${{ matrix.node }}
-          cache: npm
+          persist-credentials: false
+      - name: Set up Python 3.13
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.13"
+      - name: Compile the benchmark boundary
+        run: python -m py_compile benchmarks/mlx/run_benchmarks.py
+      - name: Run parser and process-containment tests without MLX
+        run: python -m unittest benchmarks/mlx/test_run_benchmarks.py
 
-      - name: Pin npm
-        run: npm install --global npm@11.6.1
+  dependency-review:
+    name: Dependency review
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Review dependency changes
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: high
+          comment-summary-in-pr: never
 
-      - name: Install exact dependencies
-        run: npm ci
-
-      - name: Validate package
-        run: npm run check
-
-      - name: Run synthetic decision flow
-        run: npm run demo
+  gitleaks:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Check out full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Scan committed history for secrets
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITLEAKS_ENABLE_COMMENTS: "false"
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"

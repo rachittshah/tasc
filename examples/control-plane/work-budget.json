@@ -1,0 +1,8 @@
+{
+  "maxCandidates": 8,
+  "maxTraceRows": 64,
+  "maxEvidenceRows": 64,
+  "maxBootstrapDraws": 10000,
+  "maxIndependentGroups": 32,
+  "maxAssessmentWork": 2000000000
+}

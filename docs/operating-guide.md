@@ -1,327 +1,604 @@
 # TASC operating guide
 
-TASC (Trace-Aware Serving Controller) is an offline decision tool for one
-inference-engineering question:
+This guide covers the implemented v2 assessment, live probe, and resumable
+shadow workflows. TASC is an out-of-band evidence controller. It may call an
+approved inference endpoint to collect traces, but it never runs an evaluator,
+routes a production request synchronously, changes serving configuration, or
+deploys a policy.
 
-> Can a measured fast serving profile handle routine requests while a measured
-> expert profile handles difficult requests, lowering cost without violating
-> quality, tail-latency, throughput, or reliability constraints?
+Every result is evidence-only and carries
+`evidence-only-no-deployment-authority`.
 
-It combines deterministic inference-policy replay with development/holdout eval
-discipline. It does not call a model provider, predict unmeasured GPU
-performance, change an endpoint, or deploy anything.
+## Install and verify
 
-## Try the synthetic example
-
-The bundled data is fictional and always remains demo-only:
+Use Node.js 22 or newer:
 
 ```bash
-TASC_RUN_ROOT=$(mktemp -d)
-
-npm run tasc -- nominate \
-  --spec examples/synthetic/spec.json \
-  --measurements examples/synthetic/dev.json \
-  --out "$TASC_RUN_ROOT/dev"
-
-npm run tasc -- confirm \
-  --spec examples/synthetic/spec.json \
-  --measurements examples/synthetic/holdout.json \
-  --nomination "$TASC_RUN_ROOT/dev/nomination.json" \
-  --out "$TASC_RUN_ROOT/holdout"
-```
-
-Both `--out` paths must be new, nonexistent directories. TASC refuses to reuse
-one so stale nominations and confirmations cannot be mixed, and it never
-deletes or overwrites an existing artifact directory.
-
-The example nominates a fast-to-expert cascade on development data and
-confirms that exact policy on holdout as `DEMO_ONLY`. Its numbers demonstrate
-the workflow, not expected performance for any real model or GPU.
-
-## The two-command contract
-
-`nominate` is the only selection step:
-
-1. Parse a versioned spec and development measurement set.
-2. Require a complete, paired observation matrix.
-3. Generate candidates from preregistered thresholds.
-4. Replay every candidate and the expert-only champion.
-5. Apply independent hard gates.
-6. Build a Pareto frontier and nominate one deterministic winner.
-
-`confirm` is confirmation, not another search:
-
-1. Parse a holdout measurement set.
-2. Validate the saved nomination and current spec.
-3. Reject evaluator drift and any development/holdout `groupId` overlap.
-4. Regenerate and locate the exact nominated policy.
-5. Evaluate only that frozen nominee and the champion.
-
-There is no holdout API that picks a better alternative. If the nominee fails,
-the result is `HOLD`.
-
-## Inputs
-
-### Inference spec
-
-`tasc-inference-spec-v1` declares:
-
-- the expert champion and fast primary serving profiles;
-- model, runtime, and hardware provenance for each profile;
-- confidence and input-token thresholds used to enumerate candidates;
-- slice labels that always escalate;
-- absolute quality, critical-slice, P95 TTFT, P95 end-to-end latency, P10
-  perceived TPS, P50 total TPS, error-rate, and cost ceilings/floors;
-- a paired quality non-inferiority margin;
-- the minimum development cost improvement over the champion;
-- a deterministic bootstrap seed and iteration count.
-
-TASC evaluates the Cartesian product of the declared confidence and input-token
-thresholds. The optional fast-only candidate supplies a useful low-cost
-boundary. Candidate generation and tie-breaking are deterministic.
-
-### Measurement sets
-
-Development and holdout use separate `tasc-measurements-v1` files. Each file
-contains dataset provenance, evaluator identity, and cases. A case records:
-
-- stable `id` and cross-split `groupId`;
-- input/output shape, repeated-prefix tokens, concurrency, and mode;
-- strictly positive traffic weight and slice labels;
-- one or more observations for every declared serving profile.
-
-Split related examples by `groupId`, not just case ID. No holdout group may
-appear in the development nomination.
-
-Every profile must have the same replicate count within a case. A successful
-observation records task score, optional routing confidence, TTFT, end-to-end
-latency, output tokens, perceived TPS, total service TPS, measured request
-cost, and optional cache-hit state.
-
-Successful timing rows must be physically coherent: end-to-end latency cannot
-precede TTFT, multi-token output needs a positive perceived TPS, and the token
-count/rate must fit inside end-to-end latency. Validation permits a bounded
-rounding/sampling tolerance, but rejects impossible trace exports.
-
-A timeout, provider error, OOM, or other failed attempt is still an observation.
-Record it with `status: "failure"`, a failure code, elapsed time, and cost.
-Failures receive task score and throughput zero, retain latency and cost, and
-count toward error rate. Omitting failed attempts biases every downstream gate
-and is rejected as an incomplete matrix.
-
-The case-level `critical` boolean is trace metadata. Escalation and
-critical-slice quality gates are driven by case `slices` matching the spec's
-`criticalSlices`.
-
-## Replay semantics
-
-TASC selects from recorded observations; it never estimates how a profile would
-have behaved.
-
-- Expert-only selects the expert observation.
-- Fast-only selects the fast observation.
-- A cascade escalates when the fast attempt fails, confidence is missing or
-  below threshold, input length reaches the threshold, or a critical slice
-  matches.
-- An escalated success uses expert quality and output metrics.
-- Escalated cost is fast cost plus expert cost.
-- Escalated TTFT is fast elapsed time plus expert TTFT.
-- Escalated end-to-end latency is both attempts' elapsed time.
-- If the expert attempt also fails, the composite row remains a failure.
-
-This is deliberately conservative serial-fallback accounting. Even a routing
-rule knowable before execution retains the recorded fast-attempt cost and
-latency; TASC does not model an unmeasured direct-to-expert shortcut.
-
-## Metrics, gates, and selection
-
-Operational metrics are traffic-weighted while each case's traffic mass is
-divided across its replicates. TASC reports:
-
-- mean task score, success rate, and error rate;
-- P50/P95 TTFT and P50/P95/P99 end-to-end latency;
-- P10 perceived tokens per second;
-- P50 total service tokens per second;
-- cost per request and per 1,000 requests;
-- escalation rate and configured critical-slice quality.
-
-Quality non-inferiority uses the median score per case for the candidate and
-champion, then bootstraps the paired case deltas with the preregistered seed.
-At least three paired cases are required. Larger, representative datasets are
-strongly preferred; three is an implementation floor, not a claim of adequate
-statistical power.
-
-Every gate is independent. Better cost cannot compensate for a quality failure,
-and better average latency cannot compensate for a P95 breach. Development also
-requires the configured cost improvement over the champion. Passing candidates
-enter a Pareto frontier across quality, reliability, latency, throughput, and
-cost. The lowest-cost member wins, followed by lower P95 end-to-end latency and
-stable policy ID as tie-breakers.
-
-## Outputs and statuses
-
-`nominate` always writes:
-
-- `development-report.json` — all candidate metrics, gates, and frontier;
-- `next-experiment.json` — one measured follow-up hypothesis;
-- `report.md` — reviewer-oriented decision report.
-
-It writes `nomination.json` only when a candidate is nominated.
-
-`confirm` writes:
-
-- `confirmation.json` — the exact-policy holdout result;
-- `report.md` — reviewer-oriented confirmation report.
-
-Statuses mean:
-
-| Status | Meaning |
-| --- | --- |
-| `NOMINATED` | A development candidate passed all gates and won deterministic selection. |
-| `NO_CANDIDATE` | No development candidate passed every gate; no nomination exists. |
-| `DEMO_ONLY` | Holdout gates passed, but development or holdout evidence is synthetic. |
-| `HOLD` | Holdout gates failed, or real evidence passed without verified nomination attestation. |
-| `READY_FOR_MANUAL_PRODUCTION` | Real development and holdout evidence passed and the nomination HMAC verified; a human rollout decision is still required. |
-
-No status causes a serving change.
-
-## Collecting local MLX measurements
-
-The optional [`benchmarks/mlx/`](../benchmarks/mlx/) workflow is a reference
-collector for Apple Silicon. It pins current-year sub-7B model revisions and
-records:
-
-- random-token prefill and decode throughput from `mlx_lm.benchmark`;
-- peak MLX allocator memory for each workload;
-- a full standardized quality task through `mlx_lm.evaluate`; and
-- sanitized hardware, OS, runtime, power-source, and thermal-warning metadata.
-
-The committed [2026-07-26 M4 Pro snapshot](../benchmarks/results/2026-07-26-m4-pro/)
-is deliberately not shaped like `tasc-measurements-v1`. Runtime throughput and
-aggregate ARC-Challenge accuracy were measured in separate programs. Joining
-them would create per-request relationships, latency, confidence, and cost that
-were never observed.
-
-Use the snapshot to screen model/runtime candidates and design the paired
-experiment. To collect TASC-ready MLX evidence:
-
-1. Freeze public task cases, evaluator code, model commits, quantization,
-   generation settings, MLX versions, and group-disjoint split assignments.
-2. Run both profiles on every same case and replicate. Randomize execution order
-   so drift and thermal state are not confounded with one profile.
-3. Synchronize pending Metal work before stopping each clock. Measure request
-   start, first streamed output token, and final output token directly; do not
-   derive TTFT from aggregate prefill TPS.
-4. Retain failures and their elapsed time. Keep batch aggregate throughput
-   separate from single-request perceived TPS.
-5. Score each case with a frozen deterministic or validated evaluator.
-6. Supply a genuine route-time confidence. For multiple choice this can be a
-   calibrated normalized option likelihood, fitted on development data and then
-   frozen. It cannot be copied from the final task score.
-7. Measure energy and define reviewable hardware-amortization assumptions if
-   local request cost is a selection objective. Zero expert cost makes relative
-   cost improvement undefined by design.
-8. Preserve raw records and the sanitized environment beside the exported
-   TASC inputs.
-
-MLX uses the Metal GPU for model kernels, but tokenization and host orchestration
-still use the CPU and unified memory. Describe results as “MLX/Metal on Apple
-Silicon,” not as a GPU-only end-to-end measurement.
-
-## Replacing the fixtures with real measurements
-
-1. Define the task and latency/cost budget before benchmarking.
-2. Freeze the profile identities, candidate thresholds, critical slices, gates,
-   evaluator version, bootstrap settings, and split assignment.
-3. Create group-disjoint development and holdout cases representative of the
-   production traffic mix, including difficult slices and failures.
-4. Run both profiles on the same cases and paired replicates under comparable
-   arrival patterns, concurrency, cache state, and network boundaries. Do not
-   combine unrelated fast and expert traces as if they were paired.
-5. Export measured—not inferred—latency, throughput, cost, and failure rows.
-   Shadow or controlled dual execution is usually needed to obtain both
-   counterfactual outcomes.
-6. Set `synthetic: false` only when the evidence and provenance are real.
-7. Run `nominate` once on development, preserve the artifact, then run
-   `confirm` once on the sealed holdout.
-
-Measure end-to-end latency as users experience it as well as runtime metrics.
-Keep perceived TPS distinct from total service TPS: the first is user-facing
-decode speed, while the second is system throughput.
-
-## Evaluator calibration
-
-Task scores must be bounded from 0 to 1 and mean the same thing across profiles
-and splits. Prefer deterministic checks or blinded human labels where possible.
-
-Before using an LLM judge:
-
-1. Build a representative, human-labeled calibration set.
-2. Measure agreement and slice-specific false-positive/false-negative behavior.
-3. Freeze the prompt/model/rubric as a versioned evaluator.
-4. Use the same evaluator identity, version, kind, and validation state on both
-   splits.
-5. Keep routing confidence separate from evaluator score.
-
-TASC trusts the supplied `evaluator.validated` metadata; it does not run judge
-calibration itself. The validation evidence belongs beside the TASC artifacts
-in a real review packet.
-
-## Attestation and trust boundary
-
-Public hashes such as `selfDigest` are deterministic content and corruption
-checks. Anyone who edits an artifact can recompute a public hash, so hashes are
-not authenticity.
-
-For real-data readiness, load the same secret into the environment for both
-commands:
-
-```bash
-export TASC_ATTESTATION_KEY="<at least 32 UTF-8 bytes from your secret manager>"
-```
-
-There is intentionally no CLI key flag. Never place the key in shell history,
-source control, an artifact, or a log. The nomination stores only its
-`hmac-sha256` digest. Confirmation with the trusted key rejects coherently
-edited nominations; passing real evidence without verified attestation returns
-`HOLD`.
-
-The HMAC authenticates nomination continuity, not truth. It does not prove that
-the raw benchmark is honest, the evaluator is good, `synthetic` is labeled
-correctly, or the holdout was operationally sealed. A production reviewer
-should rerun confirmation with trusted inputs and the secret rather than trust
-a copied JSON status. Dataset custody, evaluator validation, access control,
-and audit logging remain external responsibilities.
-
-## The self-improvement loop
-
-Rejected candidates and failed gates stay visible. `next-experiment.json`
-turns the dominant observed shortfall into a falsifiable follow-up:
-
-- repeated-prefix TTFT → benchmark prefix caching/cache-aware routing;
-- long-input TTFT → benchmark chunked prefill;
-- low perceived TPS → benchmark speculative decoding;
-- low total TPS → benchmark batching/concurrency settings;
-- cost pressure → add a measured quantized profile behind unchanged gates;
-- tail latency or failures → instrument queues, cold starts, autoscaling, and
-  routing.
-
-When a candidate wins, the next step is disjoint shadow-trace replication, not
-automatic rollout. These are hypotheses with required measurements; they are
-never reported as achieved gains.
-
-## Verify the implementation
-
-```bash
-npx vitest run \
-  tests/schema.test.ts \
-  tests/policy.test.ts \
-  tests/evaluate.test.ts \
-  tests/cli.test.ts
-
+npm ci
 npm run typecheck
+npm test
+npm run build
 ```
 
-The implementation and design rationale live in
-the [`src/`](../src/) library and
-[`docs/design.md`](design.md).
+For a zero-network production-shaped replay:
+
+```bash
+npm run demo:control-plane
+```
+
+The committed fixture contains public keys and precomputed synthetic
+signatures, not private keys. It uses separate trace and evaluator-evidence
+NDJSON. The demo verifies trust, assesses development and a sealed window,
+publishes four immutable packets, and rereads every payload digest.
+
+## Before a study
+
+Assign explicit owners for:
+
+- protocol and gate approval;
+- route-signal definition and calibration;
+- evaluator/rubric/calibration validation;
+- trusted evaluator and dispatch keys;
+- group split and holdout custody;
+- endpoint/trust policy and secret references;
+- model/runtime/backend/configuration identity;
+- work and spend limits;
+- shadow window sealing;
+- artifact storage and review; and
+- the separate deployment decision.
+
+Do not let the same mutable file stand in for both an operator trust decision
+and producer evidence. Record all review inputs by digest.
+
+### Preregister the protocol
+
+Freeze the v2 protocol before collection. In particular, review:
+
+- champion and candidate profile identities;
+- finite routing predicate space;
+- route-signal definition/version/range/direction/calibration;
+- evaluator identity, rubric, calibration, producer, and required key IDs;
+- seeded group development/holdout partition;
+- seeded online sample and intended traffic fraction;
+- absolute quality, slice, reliability, tail-latency, cost, evidence, group,
+  and capacity gates;
+- bootstrap seed, iterations, and alpha;
+- shadow logical/concurrency/attempt/time ceilings;
+- endpoint requirements and transport;
+- required runtime capabilities; and
+- protocol creation/expiry times.
+
+Validate it with a caller-owned assessment budget:
+
+```bash
+tasc protocol validate protocol.json --work-budget assessment-budget.json
+```
+
+Protocol validation is structural and semantic. It does not prove that an
+endpoint exists, a model is loaded, an evaluator is good, or traffic is
+representative.
+
+### Establish trust and assessment time
+
+An evaluator trust snapshot contains canonical Ed25519 public keys, purpose,
+evaluator/producer authorization, allowed rubric and calibration identities,
+key validity, freshness limits, and revocations.
+
+An assessment context contains:
+
+- an explicit `asOf` timestamp;
+- the fingerprint of the operator trust-policy portion; and
+- the fingerprint of the revocation view.
+
+Recreate the context when keys, revocations, freshness policy, or assessment
+time changes. Never substitute process wall clock silently. Validate evidence
+before joining:
+
+```bash
+tasc evidence validate evaluator-evidence.ndjson \
+  --trust evaluator-trust.json \
+  --context assessment-context.json \
+  --work-budget assessment-budget.json
+```
+
+This verifies signatures and local trust only. Protocol pinning, trace lineage,
+and terminal-output matching happen at the join/assessment boundary.
+
+## Offline assessment
+
+### Inputs
+
+Keep these as distinct review objects:
+
+- protocol JSON;
+- pre-dispatch-authorized and final-collector-attested trace NDJSON;
+- evaluator-signed evidence NDJSON;
+- evaluator trust snapshot;
+- assessment context; and
+- assessment work budget.
+
+Trace payloads should be represented by study-scoped HMAC identities. A
+successful trace must bind evaluator evidence to its exact terminal output
+identity. Failed or aborted executions do not receive fabricated scores.
+Ambiguous sends remain ambiguous.
+
+Split related cases by `groupId`. TASC recomputes group membership from the
+protocol and rejects a trace-declared development/holdout split that disagrees.
+Do not reveal or use holdout evidence while choosing candidates.
+
+### Development nomination
+
+```bash
+RUN_ROOT=$(realpath "$(mktemp -d)")
+
+tasc assess development \
+  --protocol protocol.json \
+  --traces development-traces.ndjson \
+  --evidence development-evidence.ndjson \
+  --context development-context.json \
+  --trust evaluator-trust.json \
+  --work-budget assessment-budget.json \
+  --out "$RUN_ROOT/development"
+```
+
+The final `--out` target must not exist; its parent must exist. The packet
+contains `assessment.json`, and contains `policy.json` only when a policy was
+selected. Preserve the manifest digest alongside the review record.
+
+Artifact roots and every existing path component must be canonical directories,
+not symlinks. On macOS, `tmpdir()` may report `/var/...` even though `/var`
+resolves through `/private/var`; use `realpath` and pass the canonical
+`/private/var/...` path, or use a canonical private directory under `$HOME`.
+
+Review:
+
+- status and stale/insufficiency reasons;
+- control and every candidate, including rejected policies;
+- independent group and critical-slice group coverage;
+- missing, invalid, abstained, orphan, duplicate, and conflicting evidence;
+- paired bootstrap method/interval/effective traffic mass;
+- evidence class on every metric;
+- failed and ambiguous attempts;
+- route-signal/profile/evaluator identity;
+- selected policy and policy digest; and
+- deferred service-capacity warning.
+
+`NOMINATED` freezes a candidate. It is not permission to deploy or to expose the
+holdout.
+
+### Holdout confirmation
+
+Holdout revalidates a persisted nomination by rerunning development from source
+evidence, then assesses one policy:
+
+```bash
+tasc assess holdout \
+  --protocol protocol.json \
+  --traces holdout-traces.ndjson \
+  --evidence holdout-evidence.ndjson \
+  --context holdout-context.json \
+  --nomination "$RUN_ROOT/development/assessment.json" \
+  --development-traces development-traces.ndjson \
+  --development-evidence development-evidence.ndjson \
+  --development-context development-context.json \
+  --development-trust evaluator-trust.json \
+  --trust evaluator-trust.json \
+  --work-budget assessment-budget.json \
+  --out "$RUN_ROOT/holdout"
+```
+
+Use the development `assessment.json`, not just `policy.json`, as the
+nomination. The output includes nomination-lineage metadata. `PASS` means only
+that the exact frozen policy passed this bounded holdout evidence contract.
+Never search a second holdout candidate after a failure.
+
+## Sealed shadow-online assessment
+
+### Collect and seal
+
+Define the window ID, event-time start/end, ingestion watermark, deterministic
+sampling rule, and frozen policy before collecting. After collection:
+
+1. stop admitting events for the revision;
+2. wait until the declared ingestion watermark;
+3. compute exact trace- and evaluator-set digests;
+4. record the membership digest;
+5. record capacity as trusted measured evidence, or explicitly unavailable;
+6. set revision/predecessor and closure reason; and
+7. compute and persist the manifest self-digest.
+
+Late evidence belongs in a new linked revision. Do not rewrite revision 1.
+
+Assess the sealed window:
+
+```bash
+tasc assess window \
+  --protocol protocol.json \
+  --traces online-traces.ndjson \
+  --evidence online-evidence.ndjson \
+  --context online-context.json \
+  --policy "$RUN_ROOT/development/policy.json" \
+  --window window-manifest.json \
+  --trust evaluator-trust.json \
+  --work-budget assessment-budget.json \
+  --out "$RUN_ROOT/window"
+```
+
+TASC recomputes trace membership, event-time eligibility, watermark
+eligibility, source-set digests, policy identity, and evaluator trust. It does
+not enumerate candidates.
+
+An operator-reported throughput number is retained as reported, not promoted
+to measured capacity. A required capacity gate remains unavailable until the
+assessment can consume a locally verified exact-policy measurement receipt.
+
+### Propose the next experiment
+
+```bash
+tasc experiment next \
+  --assessment "$RUN_ROOT/window/assessment.json" \
+  --history experiment-history.json \
+  --budget experiment-budget.json \
+  --out "$RUN_ROOT/next-experiment"
+```
+
+The proposal is pure and bounded. Review its diagnosis, one changed variable,
+frozen controls, evidence requirements, stop condition, prior-history checks,
+and budget. `operator-registration-required` means an operator must create and
+approve a new protocol before any collection. Never execute a proposal merely
+because it was emitted.
+
+## Runtime probe operation
+
+`runtime probe` can perform passive, consumptive, or inference-canary
+observations:
+
+```bash
+tasc runtime probe \
+  --endpoint endpoint.json \
+  --runtime runtime-instance.json \
+  --trust collector-trust.json \
+  --capability liveness \
+  --effect non-mutating \
+  --deadline-ms 5000
+```
+
+An endpoint wrapper has this exact top-level shape:
+
+```json
+{
+  "schemaVersion": "tasc-cli-runtime-endpoint-v1",
+  "endpointAlias": "approved-vllm",
+  "authentication": {
+    "reference": "runtime-bearer",
+    "header": "authorization",
+    "environmentVariable": "TASC_RUNTIME_AUTH_VLLM"
+  }
+}
+```
+
+`endpointDescriptor` and `authentication` are optional. When present,
+`endpointDescriptor` must be a valid public orchestration descriptor and its
+authentication reference must match. Authentication header is exactly
+`authorization` or `x-api-key`; the environment name must begin
+`TASC_RUNTIME_AUTH_`. The environment contains the header value. JSON and argv
+never do.
+
+Orchestration locators are mode-specific: Ray Serve requires
+`applicationName` and `deploymentName`, plain SkyPilot requires `clusterName`,
+and SkyServe requires `serviceName`. The parser rejects a plain-SkyPilot
+descriptor carrying `serviceName`; regenerate it from authoritative cluster
+metadata instead of renaming a field in signed or fingerprinted evidence.
+
+`runtime-instance.json` is exact:
+
+```json
+{
+  "endpointDescriptorDigest": "sha256:<64 lowercase hex>",
+  "runtime": { "profileId": "vllm", "build": "0.26.0" },
+  "backend": { "name": "cuda", "build": "13.0" },
+  "model": { "id": "model-id", "revision": "immutable-revision" },
+  "configurationDigest": "sha256:<64 lowercase hex>"
+}
+```
+
+The collector trust policy must allow the exact endpoint alias, origin, runtime
+build, HTTP method, path prefix, duration, local/remote mode, and authentication
+reference. Remote origins require HTTPS and public addresses. Local HTTP is
+limited to literal `127.0.0.1` or `[::1]` under explicit local mode. Redirects
+are disabled.
+
+Treat effects differently:
+
+| Effect | Meaning |
+| --- | --- |
+| `non-mutating` | Passive liveness, model list, version, or metrics read. |
+| `inference-canary` | Real potentially billable generation in an explicit standalone probe; never hidden inside shadow collection. |
+| `consumptive` | Observation documented to consume/drain server state. |
+
+All three are no-deployment operations.
+
+## Resumable shadow collection
+
+### P0 shadow-run plan
+
+P1 accepts one `tasc-shadow-run-plan-v1`; it does not accept loose policy,
+window-membership, protocol, or work-budget identities. Construct the plan in
+P0 with `buildShadowRunPlan`. The builder requires:
+
+- a self-consistent controller snapshot in `SHADOW_ASSESSING`;
+- the exact normalized protocol and the controller-selected `PolicyBundle`;
+- an inclusive event-time start and exclusive end;
+- one endpoint/profile/route/auth-reference/HTTP-limit-digest target binding
+  for every protocol profile;
+- the aggregate shadow work budget; and
+- issue/expiry times consistent with controller, protocol, and frozen-policy
+  authority.
+
+The event window begins no earlier than plan issue and ends no later than plan
+expiry. At P1 admission, the run deadline is the earliest of protocol expiry,
+plan expiry, event-window end, and the admitted wall-clock ceiling; the
+wall-clock budget must fit both the plan-validity and event-window durations.
+
+The persisted plan contains the full snapshot, protocol, and frozen policy plus
+their re-derived digests; the protocol membership rule and window membership
+digest; sorted target bindings; the budget; validity; the authority string
+`out-of-band-controller-only-no-deployment-authority`; and its canonical
+`planDigest`. `parseShadowRunPlan` recomputes every redundant identity and
+recursively freezes the result.
+
+P0 must obtain each `endpointBindingDigest` from the exact approved collector
+trust policy and endpoint descriptor. It must never copy a digest from an
+untrusted target file. Store the completed plan under the same immutable
+operator custody as the controller checkpoint. P1 binds `planDigest` into both
+the dispatch signature and the final collector signature. Each target also
+pins `authenticationReference` as a nullable non-secret identifier. Changing
+the credential/tenant reference requires a new P0 plan; rotating the secret
+behind one stable reference does not. Use the P0-safe
+`fingerprintRuntimeInvocationHttpLimits` helper to bind the complete
+normalized/defaulted `httpLimits` object. Any limit change requires a new plan
+and changes the signed collection binding and trace identity.
+
+The v1 plan is content-addressed, not independently signed, and its embedded
+controller snapshot explicitly remains `unattested`. Its digest detects drift;
+it does not authenticate origin. Pin the expected plan digest in the
+operator-controlled job/configuration boundary and never accept a plan from a
+model server, evaluator, or payload source.
+
+### Cases
+
+`cases.ndjson` is sensitive ephemeral input. Each line has exact fields:
+
+```json
+{
+  "caseId": "case-one",
+  "groupId": "conversation-one",
+  "replicates": 1,
+  "generation": {
+    "stream": false,
+    "n": 1,
+    "messages": [{ "role": "user", "content": "<sensitive input>" }],
+    "maxTokens": 32,
+    "temperature": 0
+  },
+  "workload": {
+    "mode": "chat",
+    "declaredTrafficWeight": 1,
+    "inputTokenEstimate": 128
+  },
+  "slices": ["english"],
+  "routeSignal": {
+    "value": 0.82,
+    "sourceId": "router-observer",
+    "observedAt": "2026-07-28T00:00:00.000Z"
+  }
+}
+```
+
+`generation` accepts the bounded runtime generation fields `stream`, `n`,
+`messages` or `prompt`, `maxTokens`, `temperature`, `topP`, `seed`, and `stop`.
+It must not contain a model; each target's frozen profile supplies it.
+`routeSignal` may be null only when the protocol/replay semantics permit
+missing signal. Protect this input file separately; prompt bytes are HMACed and
+used for inference but are not copied to durable shadow records.
+
+### Target profiles
+
+The following shows the exact shape of one target entry. It is a fragment, not
+a complete valid `shadow-profiles.json`; the real `targets` array must contain
+at least two distinct protocol targets:
+
+```json
+{
+  "schemaVersion": "tasc-cli-shadow-profiles-v2",
+  "targets": [
+    {
+      "profileId": "candidate-profile",
+      "endpoint": {
+        "schemaVersion": "tasc-cli-runtime-endpoint-v1",
+        "endpointAlias": "approved-candidate"
+      },
+      "instance": {
+        "endpointDescriptorDigest": "sha256:<64 lowercase hex>",
+        "runtime": { "profileId": "vllm", "build": "0.26.0" },
+        "backend": { "name": "cuda", "build": "13.0" },
+        "model": { "id": "model-id", "revision": "immutable-revision" },
+        "configurationDigest": "sha256:<64 lowercase hex>"
+      },
+      "route": "chatCompletions",
+      "httpLimits": { "maxResponseBytes": 1048576 }
+    }
+  ]
+}
+```
+
+At least two targets are required. Routes are `chatCompletions`,
+`completions`, `responses`, `nativeChat`, or `nativeGenerate`, subject to the
+registered runtime profile.
+
+Optional `httpLimits` may contain one or more exact
+`RuntimeHttpLimits` names:
+
+`maxRequestBytes`, `maxResponseHeaderBytes`, `maxResponseHeaders`,
+`maxResponseBytes`, `maxResponseChunks`, `maxSecretHeaderBytes`,
+`connectTimeoutMs`, `headersTimeoutMs`, `bodyTimeoutMs`, and `deadlineMs`.
+
+Every target must exactly match both the P0 plan and its embedded protocol:
+profile digest, endpoint requirement, alias, transport, endpoint binding,
+runtime/backend/model/configuration identity, route, and nullable
+authentication reference, plus the P0-pinned normalized HTTP-limit digest.
+That reference is P0-pinned non-secret provenance: it names an authorized
+secret lookup but never contains or grants the secret value. P1 rejects either
+provenance drift before signer, filesystem, or network contact. Shadow v1
+accepts only a build-pinned route whose registered capability state is
+`supported`.
+The full execution-profile digest remains P0-planned metadata. P1 separately
+checks the instance fields it can honestly assert—runtime, backend, model, and
+deployment-configuration digest. Tokenizer, hardware, quantization, chat
+template, and orchestration fields are not mislabeled as live-observed proof;
+stronger per-dimension attestation is future work.
+Conditional routes are rejected before filesystem or network effects. Observe
+one explicitly with `tasc runtime probe --effect inference-canary`, or issue a
+plan for a statically established route; a standalone probe does not silently
+grant a later shadow run authority.
+
+### Identity and secrets
+
+`shadow-identity.json` contains only references:
+
+```json
+{
+  "schemaVersion": "tasc-cli-shadow-identity-v2",
+  "studyId": "study-one",
+  "keyId": "shadow-payload-key",
+  "hmacKeyEnvironmentVariable": "TASC_SHADOW_HMAC_STUDY",
+  "dispatchPrivateKeyEnvironmentVariable": "TASC_SHADOW_SIGNING_DISPATCH",
+  "collectorPrivateKeyEnvironmentVariable": "TASC_SHADOW_SIGNING_COLLECTOR"
+}
+```
+
+- `TASC_SHADOW_HMAC_*` must contain exactly 32 bytes as unpadded canonical
+  base64url.
+- Each `TASC_SHADOW_SIGNING_*` value must contain canonical Ed25519 PKCS8 DER
+  as unpadded base64url. The public keys must match the plan protocol's
+  respective dispatch and collector authorities. The two key IDs and SPKIs
+  must be distinct.
+- Runtime auth references are P0-pinned into the target and resulting
+  `collectionBinding`; auth values remain only in `TASC_RUNTIME_AUTH_*`.
+
+Load these from a secret manager into the process environment. Never write
+their values to JSON, argv, logs, fixtures, artifacts, crash reports, or shell
+history. Rotate by registering new key IDs/protocols rather than editing old
+evidence.
+
+### Plan work budget and execution
+
+The P0 plan embeds a shadow budget with every field:
+
+```json
+{
+  "maxCases": 100,
+  "maxProfiles": 4,
+  "maxReplicates": 3,
+  "maxLogicalExecutions": 1200,
+  "maxAttempts": 1200,
+  "maxNetworkCalls": 1200,
+  "maxDurableRecords": 6000,
+  "maxRequestBytes": 104857600,
+  "maxResponseBytes": 536870912,
+  "maxWallClockMs": 3600000,
+  "maxConcurrency": 8
+}
+```
+
+Set the ceilings from an independently calculated worst case. The plan builder
+refuses ceilings wider than the protocol or plan validity, and P1 admits the
+actual selected membership against every field before effects.
+
+Create the output root itself as a private, absolute, existing directory:
+
+```bash
+install -d -m 700 /var/lib/tasc/study-window
+
+tasc shadow run \
+  --plan shadow-run-plan.json \
+  --plan-digest "$TASC_APPROVED_SHADOW_PLAN_DIGEST" \
+  --cases cases.ndjson \
+  --profiles shadow-profiles.json \
+  --trust collector-trust.json \
+  --identity shadow-identity.json \
+  --out /var/lib/tasc/study-window
+```
+
+Unlike assessment packet output, shadow `--out` is the existing durable root.
+Obtain `--plan-digest` from operator custody or the out-of-band P0 approval
+channel; never copy the value out of the plan at execution time. The independent
+pin is the substitution boundary, while the plan's own digest is only its
+self-integrity check.
+The complete zero-contact preflight verifies the plan, keys, target bindings,
+membership, exact request descriptions, and aggregate work before any
+filesystem write or model call.
+
+On crash, rerun the identical command with identical frozen inputs and secret
+identities. Resume verifies immutable packets, rebuilds outcome-without-
+acceptance, deduplicates accepted traces, and converts an expired lease without
+outcome to `sent_unknown`. Never delete a lease to force a retry. Only
+`not_sent` is retryable. Before any journal record can influence resume, its
+canonical body, plan/run identity, record kind, and exact target are verified
+with a distinct-domain per-study HMAC using the identity key. Intent additionally
+contains the dispatch signature; accepted traces carry both dispatch and
+collector signatures. Only an authenticated immutable race winner is
+authoritative.
+
+Keep the output root on a supported local filesystem with cooperative,
+same-UID custody and mode `0700`. Journal authentication prevents forged
+outcomes from being promoted into signed evidence; it cannot prevent a process
+that can delete or indefinitely squat in the namespace from causing denial of
+service.
+
+## Review and decision runbook
+
+For any `PASS`, `HOLD`, or `INSUFFICIENT_EVIDENCE` packet:
+
+1. pin and verify the artifact manifest digest;
+2. rerun source parsing, signature verification, join, and assessment in a
+   clean environment;
+3. compare protocol, context, dataset, trace-set, evaluator-set, window, policy,
+   decision, packet, and manifest identities;
+4. inspect every unavailable evidence class and failed gate;
+5. confirm independent group and critical-slice coverage;
+6. confirm no holdout/window tuning;
+7. inspect failed, partial, cancelled, and ambiguous attempts;
+8. verify endpoint/profile/evaluator identity and key/revocation snapshots;
+9. verify cost semantics and exact-policy capacity provenance;
+10. review durability and namespace limitations;
+11. record reviewer names and the separate deployment-system change; and
+12. require a human-controlled rollback/canary plan outside TASC.
+
+Do not automate deployment from status text. TASC intentionally exposes no
+deployment token or mutation adapter.
+
+## Common failure modes
+
+| Symptom | Action |
+| --- | --- |
+| `INPUT_INVALID` | Treat the named file as untrusted; repair at the producer and rerun. |
+| `STALE` | Freeze a new context/protocol/profile/window revision; never rewrite old evidence. |
+| untrusted evidence | Check key, revocation, validity, freshness, rubric, calibration, and producer authorization. |
+| missing evaluator coverage | Restore the external evaluator pipeline; do not invoke a hidden fallback judge. |
+| `sent_unknown` | Retain it as ambiguous and include it in coverage/failure review; do not resend. |
+| capacity unavailable | Collect a trusted exact-policy sealed-window capacity receipt. |
+| capability conditional | Run an explicit standalone inference-canary probe for observation, or use a route with build-pinned supported capability; shadow does not auto-probe. |
+| artifact target exists | Verify identical content or choose a new target; never overwrite. |
+| output durability degraded | Preserve the declared limitation and move review artifacts to an appropriate filesystem. |
+
+## Legacy v1
+
+`nominate` and `confirm` remain for compatibility with
+`tasc-inference-spec-v1` and measurement matrices. Real legacy confirmation is
+always capped at `HOLD`; its optional `TASC_ATTESTATION_KEY` authenticates
+continuity only. New studies should use v2. See [migration-v2.md](migration-v2.md).
+
+For security controls and residual risk, use
+[threat-model.md](threat-model.md), [SECURITY.md](../SECURITY.md), and
+[runtime-support.md](runtime-support.md).

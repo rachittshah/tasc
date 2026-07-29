@@ -1,5 +1,6 @@
-# MLX and the evaluation stack used for the 2026-07-26 M4 Pro snapshot.
-# Use Python 3.12 on Apple Silicon; MLX does not support non-Apple platforms.
+# Direct constraints for regenerating requirements.lock. Follow README.md's
+# two-stage hash-locked install; do not install this input file directly.
+# Use Python 3.13 on Apple Silicon; MLX does not support non-Apple platforms.
 mlx==0.31.1
 mlx-metal==0.31.1
 mlx-lm[evaluate]==0.31.1

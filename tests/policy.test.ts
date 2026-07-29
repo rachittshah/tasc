@@ -29,8 +29,10 @@ const spec = () => parseInferenceSpec({
     maxCostPerThousandRequests: 100,
     nonInferiorityMargin: -0.02,
     minimumCostImprovement: 0.1,
+    minimumIndependentGroups: 3,
+    minimumCriticalSliceGroups: 1,
   },
-  bootstrap: { seed: 2, iterations: 100 },
+  bootstrap: { seed: 2, iterations: 100, alpha: 0.05 },
 });
 
 const success = (overrides: Record<string, unknown> = {}) => ({
@@ -136,7 +138,37 @@ describe("TASC empirical policy replay", () => {
       ttftMs: 100,
       endToEndLatencyMs: 500,
       costUsd: 0.01,
+      serviceThroughput: {
+        kind: "unavailable",
+        reason: "legacy cascade has no exact-policy window service-capacity observation",
+      },
     });
+  });
+
+  it("snapshots and validates a caller policy exactly once before replay", () => {
+    const activePolicy = { ...policy("cascade") };
+    let kindReads = 0;
+    Object.defineProperty(activePolicy, "kind", {
+      enumerable: true,
+      get() {
+        kindReads += 1;
+        return kindReads === 1 ? "cascade" : "fast-only";
+      },
+    });
+
+    expect(() => replayPolicy(activePolicy, spec(), measurements())).toThrow(
+      /policy.*kind.*accessor|accessor.*policy.*kind/i,
+    );
+    expect(kindReads).toBe(0);
+  });
+
+  it("treats explicit undefined optional thresholds as omission for non-cascade policies", () => {
+    const expert = championPolicy(spec());
+    expert.confidenceThreshold = undefined;
+    expert.inputTokenThreshold = undefined;
+
+    expect(replayPolicy(expert, spec(), measurements()))
+      .toEqual(replayPolicy(championPolicy(spec()), spec(), measurements()));
   });
 
   it("does not escalate an unconfigured critical case", () => {
@@ -157,6 +189,20 @@ describe("TASC empirical policy replay", () => {
       endToEndLatencyMs: 1_200,
     });
     expect(row.costUsd).toBeCloseTo(0.052, 12);
+    expect(row.serviceThroughput).toEqual({
+      kind: "unavailable",
+      reason: "legacy cascade has no exact-policy window service-capacity observation",
+    });
+    expect((row as any).totalTokensPerSecond).toBeUndefined();
+  });
+
+  it("retains measured service throughput for a single-profile replay", () => {
+    const expert = replayPolicy(championPolicy(spec()), spec(), measurements())
+      .find((row) => row.caseId === "routine")!;
+    expect(expert.serviceThroughput).toEqual({
+      kind: "measured",
+      tokensPerSecond: 70,
+    });
   });
 
   it("keeps an expert failure after escalation as an explicit failed row", () => {

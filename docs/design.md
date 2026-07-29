@@ -1,297 +1,404 @@
-# TASC — Trace-Aware Serving Controller
+# TASC architecture
 
-- Date: 2026-07-24
-- Status: Implemented proof of concept
-- Scope: Private standalone repository. The synthetic path needs no credentials, while real-data readiness uses an optional environment-only attestation key.
+- Status: implemented
+- Architecture: out-of-band trace-control plane with bounded inference effects
+- Authority: evidence and recommendation only; no deployment authority
 
-## Outcome
+## Design objective
 
-TASC is an eval-gated inference policy lab. It turns measured per-request outcomes from two serving profiles into a reproducible recommendation for an application-level inference cascade.
+TASC answers a narrow inference R&D question:
 
-The proof of concept must answer one useful question:
+> Given paired outcomes from exact inference profiles and independently
+> verified evaluator evidence, which preregistered routing policy can be frozen
+> on development and survive a disjoint holdout or sealed online window?
 
-> Can a fast serving profile handle routine requests while an expert profile handles difficult requests, reducing cost without violating task quality, latency, throughput, or reliability constraints?
+It does not answer this with a blended benchmark score or another judge-model
+wrapper. The system preserves the lineage between dispatch intent, inference
+outcome, external evaluator evidence, policy replay, assessment context, and
+the final review artifact.
 
-TASC does not claim to optimize CUDA kernels, GPU layouts, or model servers without hardware measurements. It replays measured observations, evaluates policies on a development split, nominates exactly one policy, and confirms only that frozen policy on a sealed holdout split.
+## P0 and P1
 
-A gate-passing synthetic run produces `DEMO_ONLY`; any failed holdout gate produces `HOLD`. A gate-passing, non-synthetic run produces `READY_FOR_MANUAL_PRODUCTION` only when the development nomination's HMAC attestation verifies; otherwise it produces `HOLD`. Every status remains decision support, and TASC never edits production configuration.
+The architecture separates decision authority from effects.
 
-## Why this project
+### P0: out-of-band authority
 
-Three concepts were considered:
+P0 owns:
 
-1. A GPU recipe tuner for quantization, batching, and parallelism.
-2. An inference observability recorder.
-3. An application-level cascade optimizer with evaluation gates.
+- protocol, profile, evaluator, route-signal, gate, split, and sampling
+  definitions;
+- dispatch/evaluator signature verification and local trust snapshots;
+- deterministic evidence joins and diagnostics;
+- development policy enumeration and selection;
+- exact-policy holdout and sealed-window assessment;
+- controller state and checkpoint replay;
+- self-contained shadow-run plans issued only from `SHADOW_ASSESSING`;
+- bounded next-experiment proposals; and
+- immutable raw-free artifact publication.
 
-The cascade optimizer is the strongest proof of concept because it is useful without pretending that local synthetic runs predict GPU performance. It combines self-improving evaluation discipline with inference engineering's core quality, latency, throughput, reliability, and cost trade-offs. The other two concepts become future adapters and experiment generators.
+P0 does not open model connections, score outputs, register protocols,
+configure endpoints, or deploy routes.
 
-## Boundaries
+### P1: bounded inference effects
 
-TASC will:
+P1 owns:
 
-- consume observations produced by a benchmark or production trace export;
-- require complete outcome matrices, including timeouts and provider failures;
-- distinguish perceived token rate from total service throughput;
-- compare P50/P90/P95/P99-style distributions rather than averages alone;
-- keep development selection and holdout confirmation as separate commands;
-- content-fingerprint specs, datasets, policies, and decisions for deterministic identity and consistency checks;
-- retain rejected candidates and failed gate reasons;
-- suggest the next measured inference experiment;
-- run with no credentials using clearly labeled synthetic fixtures;
-- optionally HMAC-attest a real-data nomination with an out-of-band environment secret.
+- exact runtime capability probes;
+- bounded JSON/SSE/NDJSON inference requests;
+- observer timing, usage, provider-ID, failure, and payload-identity capture;
+- stable paired/counterbalanced shadow execution; and
+- crash-safe durable collection state.
 
-TASC will not:
-
-- call a model provider;
-- invent performance improvements;
-- tune a live endpoint;
-- apply a production configuration;
-- expose copyrighted source material or private benchmark or customer data;
-- treat synthetic data as production evidence.
-
-## Architecture
+P1 cannot select or grade a policy. For paired collection it consumes one
+self-contained P0 plan binding the controller snapshot, protocol, frozen
+policy, window membership, endpoint/profile targets, normalized HTTP-limit
+digests, validity, and aggregate work budget. Runtime secrets remain separate
+references. P1 returns traces.
 
 ```text
-spec.json + dev measurements
+controller snapshot + protocol + frozen policy
           |
           v
- validate complete empirical matrix
-          |
-          v
- deterministic candidate generation
-          |
-          v
- replay fast / expert observations
-          |
-          v
- metrics + hard gates + Pareto frontier
-          |
-          v
- one content-fingerprinted, optionally HMAC-attested nomination
-          |
-          | separate command
-          v
- holdout measurements + nomination
-          |
-          v
- exact-policy confirmation
-          |
-          v
- DEMO_ONLY | READY_FOR_MANUAL_PRODUCTION | HOLD
+  P0 emits content-addressed plan +
+          |                       |
+          | exact bounded effect  v
+          +--------------------> P1 inference
+                                  |
+                                  | signed raw-free traces
+                                  v
+external evaluator evidence --> P0 join/assessment
+                                  |
+                                  v
+                          review artifacts only
 ```
 
-The implementation lives in `src/`:
+This keeps live calls subordinate to evaluation. No serving request waits on a
+TASC decision.
 
-- `schema.ts`: versioned Zod contracts and semantic validation;
-- `policy.ts`: deterministic policy generation, fingerprinting, and empirical replay;
-- `evaluate.ts`: metrics, paired quality uncertainty, gates, Pareto selection, and holdout confirmation;
-- `report.ts`: diagnostics and human/machine-readable artifacts.
+## Core contracts
 
-`src/cli.ts` is a small CLI adapter. It performs file I/O but delegates all decisions to pure library functions.
+### Experiment protocol
 
-## Versioned input contracts
+`ExperimentProtocol` freezes:
 
-### Inference spec
+- study/version/owner and validity interval;
+- distinct Ed25519 dispatch and collector authorities;
+- seeded group development/holdout partition;
+- seeded basis-point online membership;
+- complete execution-profile identities;
+- champion and candidate roles;
+- route-signal definition and calibration digest;
+- evaluator, rubric, calibration, producer, and required trusted keys;
+- finite declarative routing predicates;
+- independent gates and critical slices;
+- grouped-bootstrap configuration;
+- shadow execution ceilings and payload policy;
+- cost evidence semantics;
+- endpoint requirements; and
+- required runtime capabilities.
 
-The spec declares:
+An execution profile binds runtime/backend builds, model/tokenizer revisions,
+hardware, quantization, chat template, orchestration, and deployment
+configuration. A friendly endpoint alias cannot relabel that identity.
 
-- a champion profile and a faster primary profile;
-- model/runtime/hardware metadata for transparent provenance;
-- a deterministic candidate space of confidence and input-length thresholds;
-- critical slices that always escalate;
-- absolute service-level constraints;
-- a paired quality non-inferiority margin;
-- a minimum cost improvement required on development data;
-- a fixed bootstrap seed and iteration count.
+### Trace envelope
 
-Candidate policies use the fast profile first. They escalate to the expert profile when any configured rule fires:
+`TraceEnvelope` is a request-level inference observation. It records keyed
+identities rather than payload bytes, plus:
 
-- the primary attempt fails;
-- confidence is missing or below the candidate threshold;
-- input length is at or above the candidate threshold;
-- the case belongs to a critical slice.
+- study/protocol/case/group/replicate/split/window lineage;
+- the P0 shadow-plan, endpoint-binding, route, nullable non-secret
+  authentication reference, normalized HTTP-limit digest, and
+  capability-receipt lineage for shadow observations;
+- exact profile and policy digests;
+- route-time signal and provenance;
+- workload shape and traffic weight;
+- a pre-dispatch signed intent;
+- ordered attempts with `not_sent`, `sent_unknown`, or `completed`;
+- observer timings, status, abort lifecycle, model identity, usage, cost, and
+  allowlisted provider metrics; and
+- the keyed terminal-output identity; and
+- a separate collector signature over the complete raw-free final observation.
 
-The champion is expert-only. An optional fast-only candidate provides a useful lower-quality boundary point.
+The dispatch signature covers every routing and workload field that can affect
+replay before an inference call starts. Attempts and outputs are excluded from
+that pre-dispatch preimage because they do not yet exist. The collector
+signature covers those final attempts, timing, usage, cost, output identity,
+collector version, dispatch signature, and collection provenance. Dispatch and
+collector keys must be distinct.
 
-### Measurements
+### Evaluator evidence and trust
 
-Development and holdout are separate `tasc-measurements-v1` files. Each contains:
+`EvaluatorEvidence` is produced outside TASC. It binds one terminal output
+identity to an evaluator outcome and contains evaluator/rubric/calibration/
+producer identity, production time, key ID, and Ed25519 signature.
 
-- dataset ID, version, source, split, and a `synthetic` flag;
-- evaluator ID, version, kind, and validation state;
-- cases with stable `id` and cross-split `groupId`;
-- workload shape: input/output tokens, repeated-prefix tokens, concurrency, mode, and criticality;
-- strictly positive traffic weight and slice labels;
-- one or more observations for every declared serving profile.
+An `AssessmentContext` binds an explicit `asOf` time to fingerprints of the
+operator trust policy and revocation view. Verification checks:
 
-A successful observation records:
+- canonical signature and public key;
+- key purpose and producer/evaluator authorization;
+- rubric and calibration authorization;
+- key validity and revocation;
+- freshness and future skew; and
+- exact context/trust fingerprints.
 
-- bounded task score and optional confidence;
-- TTFT and end-to-end latency;
-- output token count;
-- perceived tokens per second;
-- total service tokens per second;
-- request cost;
-- optional cache-hit state.
+Verification creates an in-process authentic receipt. The join rejects
+lookalike caller-authored receipts, unpinned keys, lineage drift, duplicates,
+conflicts, or orphan evidence.
 
-A failed observation remains a row. It records an explicit failure status, cost, and elapsed latency. Failed rows contribute task score zero and count toward error rate. Omitting them is invalid.
+TASC has no judge prompt or evaluator client. An external model evaluator is
+just one producer kind; its operation and calibration remain outside this
+repository.
 
-All numeric inputs must be finite and non-negative except traffic weight, which must be strictly positive so zero-mass cases cannot influence paired inference or its minimum sample count. Replicate counts must match across profiles within a case so replay remains paired.
+### Joined assessment dataset
 
-Successful timing rows must also be internally coherent: end-to-end latency cannot precede TTFT, multi-token responses require positive perceived TPS, and token count/rate must fit within end-to-end latency. A bounded tolerance accommodates rounded or slightly different provider measurement windows without admitting physically impossible rows.
+`joinAssessmentEvidence`:
 
-An LLM judge may supply task scores only when the measurement metadata marks that judge as independently validated. Human and deterministic evaluators remain allowed. TASC trusts this metadata; evaluator calibration happens outside the tool and must be reviewed separately.
+1. preflights row cardinality and work;
+2. verifies each trace against the protocol, dispatch authority, and final
+   collector attestation;
+3. recomputes development/holdout membership;
+4. verifies trace/profile/route/evaluator lineage;
+5. joins trusted evidence to successful terminal outputs;
+6. preserves failures, ambiguous sends, missing scores, abstentions,
+   duplicates, conflicts, and missing profiles as explicit states;
+7. computes split, group, slice, case, replicate, traffic, trace-set, evaluator-
+   set, and dataset identities; and
+8. returns a recursively frozen, process-authenticated dataset.
 
-## Empirical policy replay
+Serialized joined datasets are not trusted on reload. Sources must be parsed,
+verified, and joined again.
 
-TASC never predicts a profile outcome. It chooses among recorded observations:
+## Assessment flow
 
-- expert-only uses the expert observation;
-- fast-only uses the fast observation;
-- a cascade uses fast unless an escalation rule fires;
-- an escalated success uses expert quality and output metrics;
-- escalated cost is `fast cost + expert cost`;
-- escalated TTFT is `fast elapsed time + expert TTFT`;
-- escalated end-to-end latency is `fast elapsed time + expert elapsed time`;
-- if expert also fails, the composite row is a failure and retains both costs and elapsed times.
+### Development
 
-This is intentionally conservative: a serial fallback cannot hide the time and money spent on the first attempt.
+Development is the only search phase. TASC enumerates one fast-only policy per
+candidate profile and one cascade per preregistered predicate. The expert-only
+champion remains the control.
 
-## Metrics and gates
+Replay uses measured paired executions:
 
-Each policy reports:
+- fast-only selects the candidate outcome;
+- expert-only selects the champion;
+- a cascade selects the expert when its one route predicate fires;
+- a primary terminal failure escalates;
+- serial fallback retains both attempts' measured cost and latency; and
+- unavailable or ambiguous outcomes stay unavailable.
 
-- traffic-weighted mean task score;
-- success and error rate;
-- P50 and P95 TTFT;
-- P50, P95, and P99 end-to-end latency;
-- P10 perceived TPS;
-- P50 total TPS;
-- cost per request and cost per 1,000 requests;
-- escalation rate;
-- critical-slice task score.
+Each candidate receives independent gates for mean score, paired grouped
+non-inferiority, critical-slice group coverage, failure rate, P95 TTFT, P95
+end-to-end latency, cost, evidence coverage, and independent group count.
+Service capacity is deferred to a sealed exact-policy window. No weighted
+aggregate can offset a failed gate.
 
-Development and holdout apply the same preregistered hard gates:
+Passing candidates are ranked by measured cost, then end-to-end latency, then a
+locale-independent policy digest. The result is either `NOMINATED`,
+`NO_CANDIDATE`, `INSUFFICIENT_EVIDENCE`, or `STALE`.
 
-- paired quality bootstrap lower bound is not below the configured non-inferiority margin;
-- mean task score meets the absolute floor;
-- every configured critical slice meets its floor;
-- P95 TTFT and P95 end-to-end latency stay under their ceilings;
-- P10 perceived TPS and P50 total TPS stay above their floors;
-- error rate stays under its ceiling;
-- cost per 1,000 stays under its ceiling.
+### Holdout
 
-Development additionally requires the configured cost improvement relative to the champion.
+Holdout accepts one authentic development nomination. It revalidates the
+persisted nomination by rerunning development from source evidence, verifies
+group partitioning and context lineage, and assesses only the frozen policy.
+There is no API that enumerates or retunes on holdout.
 
-No weighted score can compensate for a failed hard gate. Passing candidates are reduced to a Pareto frontier across quality, error rate, latency, throughput, and cost. TASC nominates the lowest-cost frontier member, with lower P95 end-to-end latency and then stable policy ID as deterministic tie-breakers.
+### Sealed online window
 
-At least three paired cases are required for an inferential quality decision. Smaller datasets remain invalid rather than producing false confidence.
+A `WindowManifest` binds:
 
-## Split discipline, artifact consistency, and optional attestation
+- exact frozen policy and protocol;
+- half-open event-time bounds and ingestion watermark;
+- deterministic membership rule and digest;
+- revision and predecessor;
+- trace/evaluator-set digests; and
+- exact-policy capacity evidence.
 
-Candidate enumeration and selection use development data only.
+Assessment recomputes membership for every trace, validates event and
+completion times, verifies accepted evidence is within the watermark, and
+replays exactly one frozen policy. Late evidence creates a linked manifest
+revision; it never mutates a sealed revision.
 
-The nomination binds:
+Operator-reported capacity is not promoted to measured capacity merely because
+the manifest self-digest is valid. Until a trusted exact-policy measurement
+receipt exists, a required capacity gate remains unavailable and the window
+returns `INSUFFICIENT_EVIDENCE`.
 
-- parsed spec digest;
-- development dataset digest;
-- evaluator identity and version;
-- development group IDs;
-- development synthetic provenance;
-- exact policy body and policy digest;
-- champion and candidate metrics, gates, and decision digest;
-- a public self-digest and, when configured, an `hmac-sha256` attestation.
+## Statistical model
 
-Holdout confirmation:
+Quality inference is paired by case and replicate, summarized within case, and
+bootstrapped over independent groups with the protocol's fixed seed,
+iterations, and alpha. Original traffic weights are retained. Replicates or
+correlated cases do not become independent samples.
 
-1. validates the holdout file and its `split`;
-2. verifies the HMAC first when an attestation key is supplied;
-3. always revalidates the nomination's self-digest;
-4. checks the current spec digest;
-5. regenerates the allowed candidate space and finds the exact nominated policy;
-6. rejects any holdout `groupId` seen in development;
-7. requires the evaluator identity and version used for nomination;
-8. evaluates only the champion and nominated policy;
-9. writes a confirmation packet.
+Operational metrics use declared traffic weights and preserve their evidence
+class: measured, provider-reported, modeled, or unavailable. A missing value is
+not zero. Failed terminal executions are visible protocol outcomes rather than
+dropped rows.
 
-There is no direct “pick the best holdout candidate” API.
+The estimator is deterministic for the same canonical protocol, verified
+sources, and assessment context. It does not claim that the supplied traffic
+weights or groups are representative; that is an operator review obligation.
 
-The public self-digest is a reproducibility and corruption check, not authentication: anyone can coherently edit and re-digest public data. Authenticity for a real-data nomination requires an out-of-band `TASC_ATTESTATION_KEY` of at least 32 UTF-8 bytes, supplied to both commands through the environment and never written to a CLI flag, artifact, or log. Passing real evidence without successful verification remains `HOLD`.
+## Controller and bounded experiment loop
 
-Neither the public hashes nor the HMAC prove benchmark provenance, evaluator quality, honest synthetic labeling, or operational sealing of the holdout. These remain manual review and data-custody responsibilities.
+The event-sourced controller records facts such as registration, collection,
+development readiness, development/holdout/window decisions, window manifests,
+identity drift, deployment observations, and retirement. Events and snapshots
+are content-addressed, replayed in order, bounded in count, and verified
+against pinned checkpoints.
 
-## Diagnostics and self-improvement
+`proposeExperiment` converts an assessment into one bounded intent. It can
+diagnose insufficient evidence, evaluator drift, quality or slice regression,
+latency, failure, cost, unavailable capacity, capability mismatch, or the need
+for sealed-shadow replication. The proposal freezes controls, states required
+evidence, carries a first-budget-limit stop condition, and sets
+`operator-registration-required`.
 
-Rejected policies are first-class results. TASC converts the dominant failed gate or bottleneck into a next-experiment proposal:
+This is the agentic loop:
 
-- high TTFT with repeated prefixes → benchmark prefix caching and cache-aware routing;
-- high TTFT on long inputs → benchmark chunked prefill; consider disaggregation only at sustained scale;
-- low perceived TPS at low concurrency → benchmark speculative decoding;
-- cost pressure on high-precision profiles → benchmark quantization behind the same quality gates;
-- low total TPS at high concurrency → benchmark continuous-batch and concurrency targets;
-- high end-to-end latency or errors → inspect queues, cold starts, autoscaling, routing, and provider failures.
-
-Every proposal is phrased as a hypothesis with measurement requirements. No unmeasured gain is reported as fact.
-
-## CLI and artifacts
-
-Development nomination:
-
-```bash
-npm run tasc -- nominate \
-  --spec examples/synthetic/spec.json \
-  --measurements examples/synthetic/dev.json \
-  --out /tmp/tasc-dev
+```text
+assessment → diagnosis → bounded hypothesis → operator registration
+     ^                                           |
+     |              new signed evidence          |
+     +-------------------------------------------+
 ```
 
-Holdout confirmation:
+The proposer does not edit the protocol, choose infrastructure, call an
+evaluator, execute the experiment, accept evidence, or deploy a result.
 
-```bash
-npm run tasc -- confirm \
-  --spec examples/synthetic/spec.json \
-  --measurements examples/synthetic/holdout.json \
-  --nomination /tmp/tasc-dev/nomination.json \
-  --out /tmp/tasc-holdout
+## Runtime collection
+
+Runtime profiles contain build-pinned route and capability declarations. The
+implementation has explicit codecs for OpenAI-shaped and native runtime
+contracts; shared JSON shape does not imply shared terminal, usage, streaming,
+or error semantics.
+
+Before contact, P1 validates:
+
+- the P0 plan, controller state, frozen policy, online membership, validity,
+  and aggregate work admission;
+- runtime capability and exact route;
+- endpoint alias/origin and orchestration descriptor, including mode-specific
+  Ray application/deployment, SkyPilot cluster, or SkyServe service identity;
+- instance/profile identity;
+- effect (`non-mutating`, `inference-canary`, or `consumptive`);
+- request/generation/media bounds;
+- the P0-pinned authentication reference as non-secret provenance (never the
+  credential value);
+- the exact normalized/defaulted HTTP-limit digest before any effect;
+- authorization TTL and whole-operation deadline; and
+- caller-owned aggregate work limits.
+
+Automatic conditional-capability canaries are not part of a shadow run. They
+would be separate potentially billable effects with their own admission and
+receipt. The v1 shadow plan therefore admits only build-pinned routes whose
+capability is already `supported`; conditional observation remains available
+through the explicit runtime-probe operation.
+
+Prepared invocation authority is private, one-shot, and expiring. Visible
+metadata cannot be copied into a new authorized request. Network policy pins
+the accepted IP into the actual connection, retains TLS hostname validation,
+rejects disallowed address classes, and disables redirects. See
+[runtime support](runtime-support.md) and the [threat model](threat-model.md).
+
+## Shadow crash semantics
+
+The shadow collector derives replicate identities and applies the plan's
+deterministic online membership before profile fan-out. Excluded replicates are
+reported with zero effects. It then accounts for the complete admitted
+Cartesian work before signing, filesystem, or network effects: cases,
+profiles, replicates, logical
+executions, attempts, calls, request/response bytes, durable records,
+concurrency, and wall clock.
+
+Its immutable lifecycle is:
+
+```text
+intent → send lease → outcome → accepted trace → complete marker
 ```
 
-`nominate` always writes `development-report.json`, `next-experiment.json`, and `report.md`; it writes `nomination.json` only when the status is `NOMINATED`. `confirm` writes `confirmation.json` and `report.md`. Reports prominently label synthetic evidence.
+- intent exists before contact;
+- a send lease marks the ambiguity boundary;
+- an outcome records what P1 can prove;
+- acceptance records the verified trace;
+- completion closes the logical execution.
 
-Each `--out` path must be a fresh, nonexistent directory. TASC refuses to reuse an output directory, never deletes an old artifact set, and never overwrites it.
+On resume:
 
-For real-data attestation, `TASC_ATTESTATION_KEY` is read only from the environment. The same trusted value must be present for nomination and confirmation. The synthetic example intentionally runs without it.
+- an accepted trace is deduplicated;
+- outcome without acceptance is deterministically rebuilt;
+- an expired lease without outcome becomes `sent_unknown`;
+- `sent_unknown` is never retried; and
+- only proven `not_sent` may consume another already-budgeted attempt.
 
-## Error handling
+This favors honest missing coverage over duplicate inference calls. Durable
+records never contain prompt/output bytes, authorization values, HMAC keys, or
+dispatch private keys.
 
-Input and integrity failures are fatal and produce a non-zero exit:
+## Artifact custody
 
-- invalid versions or unknown profiles;
-- duplicate IDs;
-- incomplete matrices;
-- mismatched replicate counts;
-- non-finite or out-of-range numbers;
-- unvalidated LLM judges;
-- direct holdout use in nomination;
-- non-holdout use in confirmation;
-- self-inconsistent nomination edits;
-- coherently re-digested nomination edits when keyed attestation verification is enabled;
-- cross-split group leakage;
-- evaluator drift.
+Artifact packets are immutable directories published under an existing trusted
+root. Payloads are snapshotted, bounded, written with restrictive modes,
+flushed where supported, hashed, and followed by a manifest written last.
+Publication is atomic within the cooperative namespace. Resume may verify an
+identical packet but never overwrite a different one.
 
-Ordinary candidate gate failures are not runtime errors. They are retained in the report and lead to `NO_CANDIDATE` or `HOLD`.
+Verification checks the exact allowlist, file modes, sizes, payload digests,
+packet digest, manifest self-digest, target binding, final metadata custody, and
+an optional pinned manifest digest. Readers receive copy-returning closures over
+the final verified bytes.
 
-## Verification strategy
+Every manifest embeds `evidence-only-no-deployment-authority`. Hash integrity is
+not attestation. Pure Node's path API also cannot eliminate every hostile
+same-UID namespace replacement race; the manifest declares that residual
+limitation.
 
-Tests cover:
+## Work and input bounds
 
-- schema and complete-matrix validation;
-- conservative replay for every escalation rule and double failure;
-- deterministic candidate and artifact fingerprints;
-- explicit failure accounting and percentile metrics;
-- hard-gate and Pareto selection behavior;
-- holdout isolation and leakage rejection;
-- public self-digest inconsistency rejection and keyed attestation rejection;
-- `DEMO_ONLY` versus `READY_FOR_MANUAL_PRODUCTION`;
-- CLI artifact creation on the bundled synthetic example.
+Every expansion point has caller-owned ceilings:
 
-Final verification includes targeted Vitest suites, TypeScript typecheck, the full test suite, both CLI commands, and `git diff --check`.
+- byte/depth/key/item/token/string/number limits for JSON and NDJSON;
+- trace/evidence/candidate/bootstrap/group/total assessment work;
+- experiment history and logical/attempt/cost/wall-clock budgets;
+- protocol and controller collection cardinality;
+- HTTP request/header/body/chunk/frame/deadline limits;
+- shadow request/response/record/network/concurrency/wall-clock budgets; and
+- artifact member/count/total-byte limits.
+
+Admission happens before expensive allocation or effects. Numeric arithmetic is
+checked for finite safe bounds. Error persistence uses allowlisted categories
+and never reflects provider or input bodies.
+
+## Source map
+
+| Area | Implementation |
+| --- | --- |
+| Contracts and signatures | `src/evidence.ts`, `src/assessment-context.ts`, `src/evaluator-trust.ts` |
+| Join and split discipline | `src/evidence-join.ts`, `src/window.ts` |
+| Policy replay and assessment | `src/policy.ts`, `src/assessment.ts`, `src/statistics.ts` |
+| Controller and experiments | `src/controller*.ts`, `src/experiments.ts` |
+| Artifact custody | `src/artifacts.ts` |
+| Bounded input and redaction | `src/bounded-input.ts`, `src/redaction.ts`, `src/references.ts` |
+| Runtime effects | `src/runtime/` |
+| CLI | `src/cli.ts`, `src/cli-v2.ts`, `src/cli-args.ts` |
+| Legacy adapter | `src/schema.ts`, `src/evaluate.ts`, `src/report.ts` |
+
+## Legacy compatibility
+
+Legacy v1 measurement-matrix confirmation remains capped at `HOLD` for real
+evidence. Migrate new studies to v2 for signed trace/evaluator lineage,
+sealed-window assessment, and the P0/P1 runtime boundary.
+
+## Non-goals
+
+- synchronous production routing;
+- a generic model/evaluator SDK;
+- an LLM-as-judge or reward-model package;
+- autonomous prompt, evaluator, gate, or holdout tuning;
+- cluster, model-server, autoscaling, or deployment mutation;
+- inference from unpaired aggregate benchmark tables;
+- raw payload or credential persistence; and
+- treating a digest, signature, `PASS`, or human recommendation as deployment
+  authority.

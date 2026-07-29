@@ -1,6 +1,7 @@
 node_modules/
 dist/
 coverage/
+release-candidate/
 .env
 .env.*
 !.env.example
@@ -14,3 +15,5 @@ __pycache__/
 *.py[cod]
 .venv-mlx/
 .DS_Store
+.worktrees/
+.superpowers/

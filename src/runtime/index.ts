@@ -1,0 +1,238 @@
+/**
+ * Deliberate P1 runtime surface.
+ *
+ * This subpath contains bounded inference observation and collection effects.
+ * It does not expose deployment mutation, evaluator generation, or test seams.
+ */
+export {
+  createRayServeEndpointDescriptor,
+  createSkyPilotEndpointDescriptor,
+  fingerprintEndpointDescriptor,
+  parseEndpointDescriptor,
+} from "./orchestration.js";
+export {
+  RUNTIME_PROFILE_IDS,
+  RUNTIME_REGISTRY_VERSION,
+  fingerprintRuntimeWireProfile,
+  getRuntimeProfile,
+  listRuntimeProfiles,
+  parseRuntimeCapabilityProbeEvidence,
+  parseRuntimeInstanceIdentity,
+  resolveRuntimeCapabilities,
+} from "./profiles.js";
+export { RUNTIME_CAPABILITIES } from "./types.js";
+export type {
+  CapabilityState,
+  DocumentedCapabilityExpectation,
+  EndpointDescriptor,
+  EvidenceDimensionStatus,
+  OrchestrationKind,
+  RayServeEndpointDescriptorInput,
+  ResolvedRuntimeProfile,
+  RuntimeBuildIdentity,
+  RuntimeCapability,
+  RuntimeCapabilityEvidence,
+  RuntimeCapabilityEvidenceMap,
+  RuntimeCapabilityIdentityVerification,
+  RuntimeCapabilityExpectations,
+  RuntimeCapabilityProbeEvidence,
+  RuntimeDocumentationSource,
+  RuntimeHealthRoute,
+  RuntimeInferenceRoute,
+  RuntimeInferenceWireProtocol,
+  RuntimeInstanceIdentity,
+  RuntimeIdentityVerificationBasis,
+  RuntimeLocality,
+  RuntimeMetricsRoute,
+  RuntimeModelRoute,
+  RuntimeProfileId,
+  RuntimeResponseFraming,
+  RuntimeSupportTier,
+  RuntimeVersionRoute,
+  RuntimeWireEndpoints,
+  RuntimeWireProfile,
+  SkyPilotEndpointDescriptorInput,
+  UnestablishedCapabilityExpectation,
+} from "./types.js";
+export {
+  COLLECTOR_TRUST_POLICY_VERSION,
+  assertCollectorEvaluatorKeyAuthorized,
+  assertCollectorStoreRootAuthorized,
+  authorizeCollectorRequest,
+  fingerprintCollectorEndpointBinding,
+  fingerprintCollectorTrustPolicy,
+  narrowCollectorTrustPolicy,
+  parseCollectorTrustPolicy,
+  pinAuthorizedCollectorRequest,
+} from "./network-policy.js";
+export type {
+  AuthorizedCollectorRequest,
+  CollectorDnsAddress,
+  CollectorDnsLookup,
+  CollectorEndpointTrust,
+  CollectorLocalMode,
+  CollectorPinOptions,
+  CollectorRequestAuthorizationInput,
+  CollectorRequestMethod,
+  CollectorRouteTrust,
+  CollectorTrustPolicy,
+  PinnedCollectorRequest,
+} from "./network-policy.js";
+export {
+  DEFAULT_RUNTIME_HTTP_LIMITS,
+  RUNTIME_HTTP_ACCEPT_VALUES,
+  RuntimeWireError,
+  withBoundedHttpResponse,
+} from "./http.js";
+export type {
+  BoundedRuntimeHttpResponse,
+  BoundedRuntimeHttpResult,
+  RuntimeContentTypeParameter,
+  RuntimeHttpAccept,
+  RuntimeHttpLimits,
+  RuntimeHttpRequest,
+  RuntimeSecretHeaderFactory,
+  RuntimeSecretHeaderName,
+  RuntimeSecretHeaders,
+  RuntimeWireDispatchState,
+  RuntimeWireErrorCode,
+  RuntimeWireTargetMetadata,
+  RuntimeWireTiming,
+} from "./http.js";
+export {
+  fingerprintRuntimeInvocationHttpLimits,
+  normalizeRuntimeInvocationHttpLimits,
+} from "../runtime-http-limits.js";
+export {
+  DEFAULT_SSE_LIMITS,
+  MAX_SSE_CHUNKS,
+  MAX_SSE_EVENT_BYTES,
+  MAX_SSE_EVENTS,
+  MAX_SSE_FIELD_BYTES,
+  MAX_SSE_LINE_BYTES,
+  MAX_SSE_LINES,
+  MAX_SSE_RETRY_MS,
+  MAX_SSE_TOTAL_BYTES,
+  RuntimeCodecError,
+  parseBoundedJsonSse,
+  parseBoundedSse,
+} from "./sse.js";
+export type {
+  BoundedJsonSseOptions,
+  BoundedSseLimits,
+  BoundedSseOptions,
+  JsonSseEvent,
+  JsonSseParseResult,
+  JsonSseProtocol,
+  JsonSseSummary,
+  RuntimeCodecErrorCode,
+  RuntimeStreamIdentity,
+  RuntimeStreamTiming,
+  SseEvent,
+  SseParseResult,
+  SseParseSummary,
+} from "./sse.js";
+export {
+  DEFAULT_NDJSON_STREAM_LIMITS,
+  MAX_NDJSON_ARRAY_ITEMS,
+  MAX_NDJSON_CHUNKS,
+  MAX_NDJSON_DEPTH,
+  MAX_NDJSON_DIAGNOSTIC_LENGTH,
+  MAX_NDJSON_LINES,
+  MAX_NDJSON_LINE_BYTES,
+  MAX_NDJSON_NUMERIC_TOKEN_LENGTH,
+  MAX_NDJSON_OBJECT_KEYS,
+  MAX_NDJSON_STRING_LENGTH,
+  MAX_NDJSON_TOKENS,
+  MAX_NDJSON_TOTAL_BYTES,
+  parseBoundedNdjsonStream,
+} from "./ndjson.js";
+export type {
+  BoundedNdjsonStreamLimits,
+  BoundedNdjsonStreamOptions,
+  NdjsonProtocol,
+  NdjsonStreamItem,
+  NdjsonStreamParseResult,
+  NdjsonStreamSummary,
+} from "./ndjson.js";
+export {
+  DEFAULT_PROMETHEUS_LIMITS,
+  MAX_PROMETHEUS_BYTES,
+  MAX_PROMETHEUS_LABEL_NAME_LENGTH,
+  MAX_PROMETHEUS_LABEL_VALUE_LENGTH,
+  MAX_PROMETHEUS_LABELS,
+  MAX_PROMETHEUS_LINE_BYTES,
+  MAX_PROMETHEUS_LINES,
+  MAX_PROMETHEUS_METRIC_NAME_LENGTH,
+  MAX_PROMETHEUS_SAMPLES,
+  MAX_PROMETHEUS_SELECTED_NAMES,
+  MAX_PROMETHEUS_SELECTED_SAMPLES,
+  parsePrometheusText,
+} from "./metrics.js";
+export type {
+  BoundedPrometheusLimits,
+  PrometheusLabel,
+  PrometheusParseResult,
+  PrometheusParseSummary,
+  PrometheusSample,
+  PrometheusTextOptions,
+} from "./metrics.js";
+export {
+  RUNTIME_CAPABILITY_AUTHORIZATION_VERSION,
+  RUNTIME_PROBE_VERSION,
+  RuntimeProbeInputError,
+  probeRuntimeCapability,
+} from "./probe.js";
+export type {
+  RuntimeCapabilityAuthorization,
+  RuntimeCapabilityAuthorizationExpectation,
+  RuntimeCapabilityProbeInput,
+  RuntimeCapabilityProbeResult,
+  RuntimeProbeCapability,
+  RuntimeProbeInputErrorCode,
+  RuntimeProbeMetric,
+  RuntimeProbeMetricsObservation,
+  RuntimeProbeObservation,
+  RuntimeProbeObservationEffect,
+} from "./probe.js";
+export {
+  PREPARED_RUNTIME_INVOCATION_VERSION,
+  RUNTIME_INVOCATION_DESCRIPTION_VERSION,
+  RUNTIME_INVOCATION_VERSION,
+  RuntimeInvocationInputError,
+  describeRuntimeInvocation,
+  dispatchPreparedRuntimeInvocation,
+  invokeRuntime,
+  prepareRuntimeInvocation,
+} from "./invoke.js";
+export type {
+  PreparedRuntimeInvocation,
+  RuntimeAbortLifecycle,
+  RuntimeChatMessage,
+  RuntimeGenerationRequest,
+  RuntimeInvocationDescription,
+  RuntimeInvocationInput,
+  RuntimeInvocationInputErrorCode,
+  RuntimeInvocationOutcome,
+  RuntimeInvocationOutput,
+  RuntimeInvocationPersistence,
+  RuntimeInvocationRoute,
+  RuntimeInvocationStatus,
+  RuntimeProviderTiming,
+  RuntimeProviderUsage,
+  RuntimeRequestedModel,
+} from "./invoke.js";
+export {
+  SHADOW_RUNNER_VERSION,
+  SHADOW_RUN_RESULT_VERSION,
+  runShadowCollection,
+} from "./shadow.js";
+export type {
+  CollectorAttestationSigner,
+  DispatchIntentSigner,
+  ShadowCaseInput,
+  ShadowProfileTarget,
+  ShadowRunInput,
+  ShadowRunResult,
+  ShadowWorkBudget,
+} from "./shadow.js";

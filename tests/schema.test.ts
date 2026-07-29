@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   assertMeasurementMatrix,
+  inferenceSpecSchema,
+  measurementSetSchema,
   parseInferenceSpec,
   parseMeasurementSet,
 } from "../src/schema.js";
@@ -84,8 +86,181 @@ describe("TASC input contracts", () => {
     const measurements = parseMeasurementSet(validMeasurements(), "dev");
 
     expect(spec.primaryProfileId).toBe("fast");
+    expect(spec.constraints.minimumIndependentGroups).toBe(3);
+    expect(spec.constraints.minimumCriticalSliceGroups).toBe(1);
+    expect(spec.bootstrap.alpha).toBe(0.05);
     expect(measurements.dataset.split).toBe("dev");
     expect(() => assertMeasurementMatrix(spec, measurements)).not.toThrow();
+  });
+
+  it("defaults legacy critical-slice group coverage to zero when no critical slice is configured", () => {
+    const withoutCriticalSlices = validSpec();
+    withoutCriticalSlices.criticalSlices = [];
+    expect(parseInferenceSpec(withoutCriticalSlices).constraints.minimumCriticalSliceGroups).toBe(0);
+
+    const inconsistent = validSpec();
+    inconsistent.criticalSlices = [];
+    (inconsistent.constraints as any).minimumCriticalSliceGroups = 1;
+    expect(() => parseInferenceSpec(inconsistent)).toThrow(/critical.slice.*minimum.*zero/i);
+  });
+
+  it("accepts explicit bounded legacy inference controls and rejects unsafe values", () => {
+    const explicit = validSpec();
+    (explicit.constraints as any).minimumIndependentGroups = 7;
+    (explicit.constraints as any).minimumCriticalSliceGroups = 2;
+    (explicit.bootstrap as any).alpha = 0.1;
+    expect(parseInferenceSpec(explicit)).toMatchObject({
+      constraints: {
+        minimumIndependentGroups: 7,
+        minimumCriticalSliceGroups: 2,
+      },
+      bootstrap: { alpha: 0.1 },
+    });
+
+    const invalidGroups = validSpec();
+    (invalidGroups.constraints as any).minimumIndependentGroups = 0;
+    expect(() => parseInferenceSpec(invalidGroups)).toThrow(/minimumIndependentGroups|greater than/i);
+    const invalidAlpha = validSpec();
+    (invalidAlpha.bootstrap as any).alpha = 1;
+    expect(() => parseInferenceSpec(invalidAlpha)).toThrow(/alpha|less than/i);
+  });
+
+  it("keeps the exported schema parser identical to the hardened migration parser", () => {
+    const legacy = validSpec();
+    expect(inferenceSpecSchema.parse(legacy)).toEqual(parseInferenceSpec(legacy));
+
+    let getterCalls = 0;
+    Object.defineProperty(legacy.profiles[0], "model", {
+      enumerable: true,
+      get() {
+        getterCalls += 1;
+        throw new Error("profile getter must not run");
+      },
+    });
+    expect(() => inferenceSpecSchema.parse(legacy)).toThrow(/accessor|own data propert/i);
+    expect(getterCalls).toBe(0);
+  });
+
+  it("migrates an explicitly undefined critical-slice group minimum like omission", () => {
+    const legacy = validSpec();
+    Object.defineProperty(legacy.constraints, "minimumCriticalSliceGroups", {
+      configurable: true,
+      enumerable: true,
+      value: undefined,
+      writable: true,
+    });
+    expect(parseInferenceSpec(legacy).constraints.minimumCriticalSliceGroups).toBe(1);
+  });
+
+  it("rejects prototype mutation keys instead of materializing inherited safety or lineage fields", () => {
+    const spec = validSpec();
+    Object.defineProperty(spec.constraints, "__proto__", {
+      enumerable: true,
+      value: { minimumIndependentGroups: 1 },
+    });
+    expect(() => parseInferenceSpec(spec)).toThrow(/__proto__|prototype.*key/i);
+
+    const measurements = validMeasurements();
+    const firstCase = measurements.cases[0] as Record<string, unknown>;
+    delete firstCase.groupId;
+    Object.defineProperty(firstCase, "__proto__", {
+      enumerable: true,
+      value: { groupId: "hidden-group" },
+    });
+    expect(() => parseMeasurementSet(measurements)).toThrow(/__proto__|prototype.*key/i);
+  });
+
+  it("rejects excessive contract nesting with a controlled depth error", () => {
+    const spec = validSpec() as Record<string, unknown>;
+    const extra: Record<string, unknown> = {};
+    let cursor = extra;
+    for (let depth = 0; depth < 100; depth += 1) {
+      const child: Record<string, unknown> = {};
+      cursor.child = child;
+      cursor = child;
+    }
+    spec.extra = extra;
+    expect(() => parseInferenceSpec(spec)).toThrow(/nesting depth|snapshot.*depth/i);
+  });
+
+  it("rejects repeated object references before a shared DAG can expand", () => {
+    const spec = validSpec() as Record<string, unknown>;
+    let shared: Record<string, unknown> = { leaf: true };
+    for (let depth = 0; depth < 12; depth += 1) {
+      shared = { left: shared, right: shared };
+    }
+    spec.extra = shared;
+    expect(() => parseInferenceSpec(spec)).toThrow(/repeated|shared.*reference/i);
+  });
+
+  it("rejects inherited or accessor-backed safety controls without invoking getters", () => {
+    for (const [label, mutate] of [
+      ["minimumIndependentGroups", (value: ReturnType<typeof validSpec>, getter: () => never) => {
+        Object.defineProperty(value.constraints, "minimumIndependentGroups", {
+          enumerable: true,
+          get: getter,
+        });
+      }],
+      ["minimumCriticalSliceGroups", (value: ReturnType<typeof validSpec>, getter: () => never) => {
+        Object.defineProperty(value.constraints, "minimumCriticalSliceGroups", {
+          enumerable: true,
+          get: getter,
+        });
+      }],
+      ["alpha", (value: ReturnType<typeof validSpec>, getter: () => never) => {
+        Object.defineProperty(value.bootstrap, "alpha", {
+          enumerable: true,
+          get: getter,
+        });
+      }],
+      ["constraints", (value: ReturnType<typeof validSpec>, getter: () => never) => {
+        Object.defineProperty(value, "constraints", {
+          enumerable: true,
+          get: getter,
+        });
+      }],
+    ] as const) {
+      const value = validSpec();
+      let getterCalls = 0;
+      mutate(value, () => {
+        getterCalls += 1;
+        throw new Error(`${label} getter must not run`);
+      });
+      expect(() => parseInferenceSpec(value)).toThrow(/plain.*data propert|accessor.*not allowed/i);
+      expect(getterCalls).toBe(0);
+    }
+
+    const inherited = validSpec();
+    inherited.constraints = Object.assign(
+      Object.create({ minimumIndependentGroups: 1 }),
+      inherited.constraints,
+    );
+    expect(() => parseInferenceSpec(inherited)).toThrow(/plain.*object|inherited|own.*data propert/i);
+  });
+
+  it("snapshots measurement rows without invoking lineage accessors", () => {
+    const measurements = validMeasurements();
+    let getterCalls = 0;
+    Object.defineProperty(measurements.cases[0], "groupId", {
+      enumerable: true,
+      get() {
+        getterCalls += 1;
+        throw new Error("measurement getter must not run");
+      },
+    });
+    expect(() => parseMeasurementSet(measurements)).toThrow(/groupId.*accessor|accessor.*groupId/i);
+    expect(getterCalls).toBe(0);
+
+    const throughSchema = validMeasurements();
+    Object.defineProperty(throughSchema.cases[0], "groupId", {
+      enumerable: true,
+      get() {
+        getterCalls += 1;
+        throw new Error("measurement schema getter must not run");
+      },
+    });
+    expect(() => measurementSetSchema.parse(throughSchema)).toThrow(/groupId.*accessor|accessor.*groupId/i);
+    expect(getterCalls).toBe(0);
   });
 
   it("rejects incomplete profile observations with the case and profile", () => {
@@ -122,6 +297,16 @@ describe("TASC input contracts", () => {
     measurements.cases[0].trafficWeight = 0;
 
     expect(() => parseMeasurementSet(measurements)).toThrow(/trafficWeight|greater than 0/i);
+  });
+
+  it("rejects duplicate or unbounded slice labels", () => {
+    const duplicate = validMeasurements();
+    duplicate.cases[0].slices = ["routine", "routine"];
+    expect(() => parseMeasurementSet(duplicate)).toThrow(/duplicate.*slice/i);
+
+    const oversized = validMeasurements();
+    oversized.cases[0].slices = Array.from({ length: 65 }, (_unused, index) => `slice-${index}`);
+    expect(() => parseMeasurementSet(oversized)).toThrow(/64|too big|at most/i);
   });
 
   it("rejects successful timing rows that cannot contain their measured token stream", () => {

@@ -1,10 +1,14 @@
 import { createHash } from "node:crypto";
 import { mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, resolve } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import {
+  ARTIFACT_MANIFEST_FILENAME,
+  verifyArtifactPacket,
+} from "../src/artifacts.js";
 import { sha256, stableJson } from "../src/integrity.js";
 import {
   buildConfirmationReport,
@@ -48,6 +52,20 @@ async function digest(path: string): Promise<string> {
 }
 
 describe("TASC CLI synthetic end-to-end example", () => {
+  it("keeps packaged safety docs aligned with the legacy-v1 HOLD boundary", async () => {
+    for (const path of [
+      resolve(REPO_ROOT, "README.md"),
+      resolve(REPO_ROOT, "docs/operating-guide.md"),
+      resolve(REPO_ROOT, "docs/design.md"),
+    ]) {
+      const source = await readFile(path, "utf8");
+      expect(source).not.toMatch(
+        /(?:produces?|returns?|status[^\n]*meaning)[^\n]{0,120}`READY_FOR_MANUAL_PRODUCTION`|`READY_FOR_MANUAL_PRODUCTION`[^\n]{0,160}(?:authenticated|real .*passed)/i,
+      );
+      expect(source).toMatch(/legacy v1[\s\S]{0,240}HOLD|HOLD[\s\S]{0,240}migrat[\s\S]{0,120}v2/i);
+    }
+  });
+
   it("nominates and confirms the exact cascade with deterministic, reviewer-ready artifacts", async () => {
     const root = await mkdtemp(resolve(tmpdir(), "tasc-cli-"));
     const devOne = resolve(root, "dev-one");
@@ -60,13 +78,17 @@ describe("TASC CLI synthetic end-to-end example", () => {
     ]);
     expect(firstNomination.status, firstNomination.stderr).toBe(0);
     expect(firstNomination.stdout).toContain("NOMINATED");
-    expect(firstNomination.stdout).toContain(devOne);
-    expect(await readdir(devOne)).toEqual([
+    expect(firstNomination.stdout).toContain("artifacts written");
+    expect(firstNomination.stdout).not.toContain(devOne);
+    expect((await readdir(devOne)).sort()).toEqual([
       "development-report.json",
+      ARTIFACT_MANIFEST_FILENAME,
       "next-experiment.json",
       "nomination.json",
       "report.md",
-    ]);
+    ].sort());
+    await expect(verifyArtifactPacket(dirname(devOne), basename(devOne)))
+      .resolves.toMatchObject({ path: devOne });
 
     const secondNomination = runCli([
       "nominate", "--spec", SPEC, "--measurements", DEV, "--out", devTwo,
@@ -101,6 +123,8 @@ describe("TASC CLI synthetic end-to-end example", () => {
 
     const nextExperiment = await json(resolve(devOne, "next-experiment.json"));
     expect(nextExperiment).toMatchObject({
+      version: "tasc-next-experiment-v1",
+      legacy: true,
       trigger: expect.any(String),
       hypothesis: expect.any(String),
       technique: expect.any(String),
@@ -122,8 +146,17 @@ describe("TASC CLI synthetic end-to-end example", () => {
     ]);
     expect(firstConfirmation.status, firstConfirmation.stderr).toBe(0);
     expect(firstConfirmation.stdout).toContain("DEMO_ONLY");
-    expect(firstConfirmation.stdout).toContain(holdoutOne);
-    expect(await readdir(holdoutOne)).toEqual(["confirmation.json", "report.md"]);
+    expect(firstConfirmation.stdout).toContain("artifacts written");
+    expect(firstConfirmation.stdout).not.toContain(holdoutOne);
+    expect((await readdir(holdoutOne)).sort()).toEqual([
+      "confirmation.json",
+      ARTIFACT_MANIFEST_FILENAME,
+      "report.md",
+    ].sort());
+    await expect(verifyArtifactPacket(
+      dirname(holdoutOne),
+      basename(holdoutOne),
+    )).resolves.toMatchObject({ path: holdoutOne });
 
     const secondConfirmation = runCli([
       "confirm",
@@ -147,7 +180,9 @@ describe("TASC CLI synthetic end-to-end example", () => {
       "--out", holdoutOne,
     ]);
     expect(reusedConfirmation.status).not.toBe(0);
-    expect(reusedConfirmation.stderr).toMatch(/output directory.*already exists.*fresh/i);
+    expect(reusedConfirmation.stderr).toMatch(
+      /artifact publication failed.*fresh output directory/i,
+    );
     expect(await digest(resolve(holdoutOne, "confirmation.json"))).toBe(confirmationBefore);
 
     const confirmation = await json(resolve(holdoutOne, "confirmation.json"));
@@ -181,6 +216,59 @@ describe("TASC CLI synthetic end-to-end example", () => {
     )).rejects.toThrow(/provenance.*synthetic/i);
   }, 30_000);
 
+  it("produces the same nomination and digest under distinct locale environments", async () => {
+    const root = await mkdtemp(resolve(tmpdir(), "tasc-locale-"));
+    const firstOut = resolve(root, "first");
+    const secondOut = resolve(root, "second");
+    const first = runCli([
+      "nominate", "--spec", SPEC, "--measurements", DEV, "--out", firstOut,
+    ], { LANG: "de_DE.UTF-8", LC_ALL: "de_DE.UTF-8" });
+    const second = runCli([
+      "nominate", "--spec", SPEC, "--measurements", DEV, "--out", secondOut,
+    ], { LANG: "sv_SE.UTF-8", LC_ALL: "sv_SE.UTF-8" });
+
+    expect(first.status, first.stderr).toBe(0);
+    expect(second.status, second.stderr).toBe(0);
+    expect(await json(resolve(firstOut, "nomination.json")))
+      .toEqual(await json(resolve(secondOut, "nomination.json")));
+    expect(await digest(resolve(firstOut, "nomination.json")))
+      .toBe(await digest(resolve(secondOut, "nomination.json")));
+  }, 30_000);
+
+  it("reports passing real legacy confirmation as HOLD with a v2 migration reason", async () => {
+    const root = await mkdtemp(resolve(tmpdir(), "tasc-legacy-real-"));
+    const devPath = resolve(root, "dev.json");
+    const holdoutPath = resolve(root, "holdout.json");
+    const devOut = resolve(root, "dev-out");
+    const holdoutOut = resolve(root, "holdout-out");
+    const dev = await json(DEV);
+    const holdout = await json(HOLDOUT);
+    dev.dataset.synthetic = false;
+    holdout.dataset.synthetic = false;
+    await writeFile(devPath, `${JSON.stringify(dev, null, 2)}\n`);
+    await writeFile(holdoutPath, `${JSON.stringify(holdout, null, 2)}\n`);
+    const key = "task4-real-legacy-attestation-key-at-least-32-bytes";
+
+    const nominated = runCli([
+      "nominate", "--spec", SPEC, "--measurements", devPath, "--out", devOut,
+    ], { TASC_ATTESTATION_KEY: key });
+    expect(nominated.status, nominated.stderr).toBe(0);
+    const confirmed = runCli([
+      "confirm",
+      "--spec", SPEC,
+      "--measurements", holdoutPath,
+      "--nomination", resolve(devOut, "nomination.json"),
+      "--out", holdoutOut,
+    ], { TASC_ATTESTATION_KEY: key });
+
+    expect(confirmed.status, confirmed.stderr).toBe(0);
+    expect(confirmed.stdout).toContain("HOLD");
+    const confirmation = await json(resolve(holdoutOut, "confirmation.json"));
+    expect(confirmation.status).toBe("HOLD");
+    expect(confirmation.statusReason).toMatch(/legacy v1.*migrat|migrat.*v2/i);
+    expect(await readFile(resolve(holdoutOut, "report.md"), "utf8")).toMatch(/legacy v1.*migrat|migrat.*v2/i);
+  }, 30_000);
+
   it("writes diagnostic artifacts and exits normally when no candidate passes", async () => {
     const root = await mkdtemp(resolve(tmpdir(), "tasc-no-candidate-"));
     const impossibleSpecPath = resolve(root, "spec.json");
@@ -199,7 +287,9 @@ describe("TASC CLI synthetic end-to-end example", () => {
       "nominate", "--spec", impossibleSpecPath, "--measurements", DEV, "--out", reusedOut,
     ]);
     expect(staleAttempt.status).not.toBe(0);
-    expect(staleAttempt.stderr).toMatch(/output directory.*already exists.*fresh/i);
+    expect(staleAttempt.stderr).toMatch(
+      /artifact publication failed.*fresh output directory/i,
+    );
     expect(staleAttempt.stdout).not.toContain("NO_CANDIDATE");
     expect(await digest(resolve(reusedOut, "nomination.json"))).toBe(originalNominationDigest);
 
@@ -209,11 +299,12 @@ describe("TASC CLI synthetic end-to-end example", () => {
 
     expect(run.status, run.stderr).toBe(0);
     expect(run.stdout).toContain("NO_CANDIDATE");
-    expect(await readdir(out)).toEqual([
+    expect((await readdir(out)).sort()).toEqual([
       "development-report.json",
+      ARTIFACT_MANIFEST_FILENAME,
       "next-experiment.json",
       "report.md",
-    ]);
+    ].sort());
     expect((await json(resolve(out, "development-report.json"))).status).toBe("NO_CANDIDATE");
     const report = await readFile(resolve(out, "report.md"), "utf8");
     expect(report).toContain("SYNTHETIC / DEMO ONLY");
@@ -221,6 +312,10 @@ describe("TASC CLI synthetic end-to-end example", () => {
 
     const development = await json(resolve(out, "development-report.json"));
     const nextExperiment = await json(resolve(out, "next-experiment.json"));
+    expect(nextExperiment).toMatchObject({
+      version: "tasc-next-experiment-v1",
+      legacy: true,
+    });
     expect(nextExperiment.trigger).toContain("cascade-47a5ff94080a050b");
     expect(nextExperiment.trigger).toContain("mean_task_score");
     expect(nextExperiment.trigger).toMatch(/does not meet required/);
@@ -377,5 +472,120 @@ describe("TASC CLI synthetic end-to-end example", () => {
     ]);
     expect(tampered.status).not.toBe(0);
     expect(tampered.stderr).toMatch(/self-digest|edited/i);
+  }, 30_000);
+
+  it("bounds raw CLI JSON before materialization without reflecting input secrets", async () => {
+    const root = await mkdtemp(resolve(tmpdir(), "tasc-cli-bounded-"));
+    const output = resolve(root, "out");
+    const duplicateSpecPath = resolve(root, "duplicate-spec.json");
+    const specSource = await readFile(SPEC, "utf8");
+    await writeFile(
+      duplicateSpecPath,
+      specSource.replace(
+        '"version": "tasc-inference-spec-v1"',
+        '"version": "tasc-inference-spec-v1",'
+          + '\n  "version": "tasc-inference-spec-v1"',
+      ),
+    );
+
+    const duplicate = runCli([
+      "nominate",
+      "--spec", duplicateSpecPath,
+      "--measurements", DEV,
+      "--out", output,
+    ]);
+    expect(duplicate.status).not.toBe(0);
+    expect(duplicate.stderr).toMatch(/invalid spec JSON.*duplicate-key/i);
+    await expect(readdir(output)).rejects.toThrow();
+
+    const secret = "Bearer planted-cli-secret-must-not-echo";
+    const malformedPath = resolve(root, "malformed-secret.json");
+    await writeFile(
+      malformedPath,
+      Buffer.concat([
+        Buffer.from(`{"secret":"${secret}","value":"`, "utf8"),
+        Buffer.from([0xc3, 0x28]),
+        Buffer.from('"}', "utf8"),
+      ]),
+    );
+    const malformed = runCli([
+      "nominate",
+      "--spec", SPEC,
+      "--measurements", malformedPath,
+      "--out", output,
+    ]);
+    expect(malformed.status).not.toBe(0);
+    expect(malformed.stderr).toMatch(/invalid measurement JSON.*invalid-utf8/i);
+    expect(malformed.stdout).not.toContain(secret);
+    expect(malformed.stderr).not.toContain(secret);
+    await expect(readdir(output)).rejects.toThrow();
+
+    const oversizedPath = resolve(root, "oversized.json");
+    await writeFile(
+      oversizedPath,
+      `{"value":"${"x".repeat((4 * 1024 * 1024) + 1)}"}`,
+    );
+    const oversized = runCli([
+      "nominate",
+      "--spec", SPEC,
+      "--measurements", oversizedPath,
+      "--out", output,
+    ]);
+    expect(oversized.status).not.toBe(0);
+    expect(oversized.stderr).toMatch(/invalid measurement JSON.*byte-limit/i);
+    await expect(readdir(output)).rejects.toThrow();
+  }, 30_000);
+
+  it("never reflects legacy source values or output paths", async () => {
+    const root = await mkdtemp(resolve(tmpdir(), "tasc-cli-redaction-"));
+    const sourceSecret = "TOP_SECRET_CASE_DO_NOT_LOG";
+    const pathSecret = "TOP_SECRET_OUTPUT_PATH_DO_NOT_LOG";
+    const invalidMeasurements = await json(DEV);
+    invalidMeasurements.cases[0].id = sourceSecret;
+    invalidMeasurements.cases[0].observations =
+      invalidMeasurements.cases[0].observations.filter(
+        ({ profileId }: { profileId: string }) => profileId !== "fast",
+      );
+    const invalidPath = resolve(root, "invalid-measurements.json");
+    await writeFile(
+      invalidPath,
+      `${JSON.stringify(invalidMeasurements)}\n`,
+    );
+
+    const rejected = runCli([
+      "nominate",
+      "--spec", SPEC,
+      "--measurements", invalidPath,
+      "--out", resolve(root, pathSecret),
+    ]);
+    expect(rejected.status).toBe(3);
+    expect(rejected.stderr).toContain("Legacy evaluation input was rejected.");
+    expect(rejected.stdout).not.toContain(sourceSecret);
+    expect(rejected.stdout).not.toContain(pathSecret);
+    expect(rejected.stderr).not.toContain(sourceSecret);
+    expect(rejected.stderr).not.toContain(pathSecret);
+
+    const output = resolve(root, pathSecret);
+    const first = runCli([
+      "nominate",
+      "--spec", SPEC,
+      "--measurements", DEV,
+      "--out", output,
+    ]);
+    expect(first.status, first.stderr).toBe(0);
+    expect(first.stdout).not.toContain(pathSecret);
+    expect(first.stderr).not.toContain(pathSecret);
+    const repeated = runCli([
+      "nominate",
+      "--spec", SPEC,
+      "--measurements", DEV,
+      "--out", output,
+    ]);
+    expect(repeated.status).toBe(4);
+    expect(repeated.stderr).toContain(
+      "Artifact publication failed; a fresh output directory is required.",
+    );
+    expect(repeated.stdout).not.toContain(pathSecret);
+    expect(repeated.stderr).not.toContain(pathSecret);
   }, 30_000);
 });

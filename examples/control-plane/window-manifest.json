@@ -1,0 +1,25 @@
+{
+  "version": "tasc-window-manifest-v2",
+  "windowId": "synthetic-window-1",
+  "protocolDigest": "sha256:01bc0afec0f0db2fe57f619565508925f64e4af6c83adce66744bbbe810d4aee",
+  "frozenPolicyDigest": "sha256:001c7a138f99f0defd943218a6984f28f3c18b8b39aff695c389e0237cd37283",
+  "eventTimeStartInclusive": "2026-07-23T00:00:00.000Z",
+  "eventTimeEndExclusive": "2026-07-23T00:01:30.000Z",
+  "ingestionWatermark": "2026-07-23T00:02:00.000Z",
+  "closureReason": "scheduled",
+  "membershipRule": {
+    "algorithm": "tasc-seeded-sha256-case-replicate-basis-points-v1",
+    "seed": "synthetic-shadow-sample-1",
+    "sampleBasisPoints": 10000
+  },
+  "membershipDigest": "sha256:dbdd1445c502c1cadb7d0c90a28b8d9b599797f65770437d58129fea70c176a6",
+  "revision": 1,
+  "predecessorManifestDigest": null,
+  "traceSetDigest": "sha256:4fca1def309a5813ee91a6ed8c875e9b9dd3679f4fed2f058f81356fdc37e06d",
+  "evaluatorSetDigest": "sha256:d1130dea100f2c3f7cc8b62dd034cf80c4f9827d8263c12d20365586c8b8b3bb",
+  "capacityEvidence": {
+    "kind": "unavailable",
+    "reasonCode": "trusted-receipt-not-collected"
+  },
+  "selfDigest": "sha256:57f3a38e25191dc2c4f073056d86107befc7cf78002ae5ff0340e58ed59f1d80"
+}
