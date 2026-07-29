@@ -12,6 +12,10 @@ import {
   type PersistedErrorCategory,
 } from "../redaction.js";
 import {
+  DEFAULT_RUNTIME_HTTP_LIMITS,
+  type RuntimeHttpLimits,
+} from "../runtime-http-limits.js";
+import {
   consumePinnedCollectorRequest,
   type PinnedCollectorRequest,
   type PinnedHttpRequestTarget,
@@ -107,31 +111,8 @@ function isAuthenticRuntimeWireError(
   );
 }
 
-export interface RuntimeHttpLimits {
-  readonly maxRequestBytes: number;
-  readonly maxResponseHeaderBytes: number;
-  readonly maxResponseHeaders: number;
-  readonly maxResponseBytes: number;
-  readonly maxResponseChunks: number;
-  readonly maxSecretHeaderBytes: number;
-  readonly connectTimeoutMs: number;
-  readonly headersTimeoutMs: number;
-  readonly bodyTimeoutMs: number;
-  readonly deadlineMs: number;
-}
-
-export const DEFAULT_RUNTIME_HTTP_LIMITS: RuntimeHttpLimits = Object.freeze({
-  maxRequestBytes: 1_048_576,
-  maxResponseHeaderBytes: 16_384,
-  maxResponseHeaders: 64,
-  maxResponseBytes: 8_388_608,
-  maxResponseChunks: 4_096,
-  maxSecretHeaderBytes: 8_192,
-  connectTimeoutMs: 5_000,
-  headersTimeoutMs: 10_000,
-  bodyTimeoutMs: 10_000,
-  deadlineMs: 30_000,
-});
+export { DEFAULT_RUNTIME_HTTP_LIMITS } from "../runtime-http-limits.js";
+export type { RuntimeHttpLimits } from "../runtime-http-limits.js";
 
 export type RuntimeSecretHeaderName = "authorization" | "x-api-key";
 export type RuntimeSecretHeaders = readonly (

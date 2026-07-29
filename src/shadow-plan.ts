@@ -68,6 +68,7 @@ const collectionTargetInputSchema = z.object({
   endpointBindingDigest: contractDigestSchema,
   route: routeSchema,
   authenticationReference: contractSlugSchema.nullable(),
+  httpLimitsDigest: contractDigestSchema,
   capabilityReceiptDigests:
     z.array(contractDigestSchema).max(MAX_CAPABILITY_RECEIPTS),
 }).strict();
@@ -425,6 +426,7 @@ function normalizePlanBody(input: unknown): ShadowRunPlanBody {
       endpointBindingDigest: target.endpointBindingDigest,
       route: target.route,
       authenticationReference: target.authenticationReference,
+      httpLimitsDigest: target.httpLimitsDigest,
       capabilityReceiptDigests: target.capabilityReceiptDigests,
     })),
     protocol,
@@ -442,6 +444,7 @@ function normalizePlanBody(input: unknown): ShadowRunPlanBody {
       || target.route !== normalized.route
       || target.authenticationReference
         !== normalized.authenticationReference
+      || target.httpLimitsDigest !== normalized.httpLimitsDigest
       || target.capabilityReceiptDigests.length
         !== normalized.capabilityReceiptDigests.length
       || target.capabilityReceiptDigests.some(

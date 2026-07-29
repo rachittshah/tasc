@@ -30,7 +30,7 @@ const repositoryRoot = resolve(import.meta.dirname, "..");
 const demoPath = resolve(repositoryRoot, "scripts/control-plane-demo.ts");
 const fixtureRoot = resolve(repositoryRoot, "examples/control-plane");
 const EXPECTED_SHADOW_PLAN_DIGEST =
-  "sha256:59e05741d187dda366db4028363890be9fb8b1828bf75d8f72837b4e84cd16ea";
+  "sha256:efa6b557cd8cef8862e733d6519f30844689e83925ee9123c8e1b1f3fca291b8";
 const networkBlocker = [
   'import net from "node:net";',
   'import http from "node:http";',
@@ -66,7 +66,7 @@ const GOLDEN_SUMMARY = [
   "development: NOMINATED",
   "selected policy kind: cascade",
   "selected policy digest: "
-    + "sha256:fe8efa318a040c2f35f0f2f630e34c3897f04753ae4f7998c48a400119fa19f1",
+    + "sha256:001c7a138f99f0defd943218a6984f28f3c18b8b39aff695c389e0237cd37283",
   "development coverage: groups=4 account-recovery-groups=2 evidence=1.00",
   "sealed window: INSUFFICIENT_EVIDENCE",
   "window coverage: groups=4 account-recovery-groups=2 evidence=1.00",
@@ -77,13 +77,13 @@ const GOLDEN_SUMMARY = [
   "authority: evidence-only-no-deployment-authority",
   "artifact packets: "
     + "development-assessment="
-    + "8d0fb525dbb25e0463bac7c09fae85cb0ab678942d4e180f5f0afff86dadebf4,"
+    + "aa1a5041a0741fbabbfb9ed238b8f6b9c6d4d1d0119796f8a894f504ea4f4c64,"
     + "next-experiment="
-    + "6ad1ef0cc210dbf058361b5f48f90a3c8f5f94598bf5e120676414589dec4ae6,"
+    + "a075339d4e176a004d5f49270fab655621d1495f4d7104f50df10a423bb33c0b,"
     + "policy-recommendation="
-    + "724211323bb623bd7113ad9e794f0d6dda2f82f918abf668ed99ab416d701a9b,"
+    + "be20fe85ff37a7c1cee6864ce068c2dedd3d1b61c80396f317bbe23832584a78,"
     + "sealed-window-assessment="
-    + "590a3c1dee9e4095909057b2dbd148ea5a0caa8cded47c25d948b9df59340bf6",
+    + "dcdf26fb6b328e97c27326cd7965dc477bdb54503e53684578ea4d0e343ea5a2",
   "artifact verification: 4/4 manifests and payload digests verified",
   "artifact root: <TEMP>",
   "",
@@ -213,6 +213,7 @@ describe("production control-plane demo", () => {
         collectionTargets: readonly {
           profileId: string;
           authenticationReference: string | null;
+          httpLimitsDigest: string;
         }[];
       };
       const onlineTraces = readFileSync(
@@ -223,6 +224,7 @@ describe("production control-plane demo", () => {
         collectionBinding: {
           shadowPlanDigest: string;
           authenticationReference: string | null;
+          httpLimitsDigest: string;
         } | null;
       });
       expect(controllerSnapshot.state).toBe("SHADOW_ASSESSING");
@@ -235,9 +237,13 @@ describe("production control-plane demo", () => {
         ({ authenticationReference }) => authenticationReference === null,
       )).toBe(true);
       expect(onlineTraces.every(
-        ({ collectionBinding }) =>
+        ({ profileId, collectionBinding }) =>
           collectionBinding?.shadowPlanDigest === plan.planDigest
-          && collectionBinding.authenticationReference === null,
+          && collectionBinding.authenticationReference === null
+          && collectionBinding.httpLimitsDigest
+            === plan.collectionTargets.find(
+              (target) => target.profileId === profileId,
+            )?.httpLimitsDigest,
       )).toBe(true);
     } finally {
       for (const { artifactRoot } of runs) {

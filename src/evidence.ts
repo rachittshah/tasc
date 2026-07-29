@@ -375,6 +375,7 @@ const collectionBindingSchema = z.object({
     "nativeGenerate",
   ]),
   authenticationReference: contractSlugSchema.nullable(),
+  httpLimitsDigest: contractDigestSchema,
   capabilityReceiptDigests: z.array(contractDigestSchema).max(16),
 }).strict();
 

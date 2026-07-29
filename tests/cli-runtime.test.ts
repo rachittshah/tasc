@@ -29,6 +29,9 @@ import {
   type PolicyBundle,
 } from "../src/policy.js";
 import {
+  fingerprintRuntimeInvocationHttpLimits,
+} from "../src/runtime-http-limits.js";
+import {
   fingerprintCollectorEndpointBinding,
   parseCollectorTrustPolicy,
 } from "../src/runtime/network-policy.js";
@@ -646,6 +649,9 @@ describe("runtime and shadow CLI execution", () => {
           instances[index].endpointDescriptorDigest,
         route: "completions" as const,
         authenticationReference: null,
+        httpLimitsDigest: fingerprintRuntimeInvocationHttpLimits({
+          maxResponseBytes: 1024 * 1024,
+        }),
         capabilityReceiptDigests: [],
       })),
       workBudget: planWorkBudget,
@@ -751,6 +757,21 @@ describe("runtime and shadow CLI execution", () => {
         ),
       },
     );
+    const wrongLimitsProfilesPath = await jsonFile(
+      root,
+      "wrong-limits-profiles.json",
+      {
+        schemaVersion: "tasc-cli-shadow-profiles-v2",
+        targets: profileTargets.map((target, index) =>
+          index === 0
+            ? {
+              ...target,
+              httpLimits: { maxResponseBytes: 2 * 1024 * 1024 },
+            }
+            : target
+        ),
+      },
+    );
     const conditionalProfilesPath = await jsonFile(
       root,
       "conditional-profiles.json",
@@ -846,6 +867,11 @@ describe("runtime and shadow CLI execution", () => {
       },
       {
         options: { profiles: wrongBindingProfilesPath },
+        input: "profiles",
+        detail: "runtime-rejected",
+      },
+      {
+        options: { profiles: wrongLimitsProfilesPath },
         input: "profiles",
         detail: "runtime-rejected",
       },

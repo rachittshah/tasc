@@ -5,35 +5,35 @@
     "version": "tasc-controller-snapshot-v1",
     "controllerId": "synthetic-shadow-controller-1",
     "studyId": "synthetic-support-routing",
-    "protocolDigest": "sha256:d1f3bc2f19f2207bb91a48c0795fc39692b4dbcb44d4dd319da9ab81b1369362",
+    "protocolDigest": "sha256:01bc0afec0f0db2fe57f619565508925f64e4af6c83adce66744bbbe810d4aee",
     "protocolCreatedAt": "2026-07-20T00:00:00.000Z",
     "protocolExpiresAt": "2026-09-01T00:00:00.000Z",
     "state": "SHADOW_ASSESSING",
     "sequence": 5,
-    "lastEventId": "sha256:4263612d35fd9530f518cbc250c380d2aa5d8eb22f82fa9620f74ed6702ac91e",
+    "lastEventId": "sha256:aa626e50f6b903259e49d241728815f0f7b866945d18d822011256d68d3968ee",
     "lastEventAt": "2026-07-22T00:00:01.000Z",
     "collectionId": "synthetic-shadow-collection-1",
     "developmentEvidence": {
-      "datasetDigest": "sha256:82742a492e379d3d6dc632bbda50e0deb3114adcfd020849b180aee30663e2ba",
-      "traceSetDigest": "sha256:b4064eaada950a5b2b7e5af6b4be218a3194e72d7df2c3f9378afc134bc68538",
-      "evaluatorSetDigest": "sha256:cf9d454055d6ddeec05f4b233e0b0e8cccdd0e60a82f868f8279528a54c9ec78"
+      "datasetDigest": "sha256:3a2a0c6a8c9214fdddcecb491278837e8140e461863d6264279d44e0130718d2",
+      "traceSetDigest": "sha256:280b4e759bda1b6aea6772662a4e1c05d656cf4542389bbecbbb64831c90f035",
+      "evaluatorSetDigest": "sha256:ab6c9a3e00493d879642b26944960dde880dd8aa2c0a6c025cdf8adb1a5256f5"
     },
     "selectedPolicy": {
-      "policyDigest": "sha256:fe8efa318a040c2f35f0f2f630e34c3897f04753ae4f7998c48a400119fa19f1",
+      "policyDigest": "sha256:001c7a138f99f0defd943218a6984f28f3c18b8b39aff695c389e0237cd37283",
       "issuedAt": "2026-07-22T00:00:00.000Z",
       "expiresAt": "2026-09-01T00:00:00.000Z"
     },
     "assessments": [
       {
         "version": "tasc-controller-assessment-projection-v1",
-        "decisionDigest": "sha256:0f8293801e78b8985a0aef7f7b62631c047cc5bd1dfb1668f9794f2491eeba62",
-        "assessmentContextDigest": "sha256:58391b7d2606c2706c94394dc9c1ca021e45c08b6d9c838b18e6c9e2fc668ca0",
-        "protocolDigest": "sha256:d1f3bc2f19f2207bb91a48c0795fc39692b4dbcb44d4dd319da9ab81b1369362",
-        "datasetDigest": "sha256:82742a492e379d3d6dc632bbda50e0deb3114adcfd020849b180aee30663e2ba",
-        "traceSetDigest": "sha256:b4064eaada950a5b2b7e5af6b4be218a3194e72d7df2c3f9378afc134bc68538",
-        "evaluatorSetDigest": "sha256:cf9d454055d6ddeec05f4b233e0b0e8cccdd0e60a82f868f8279528a54c9ec78",
+        "decisionDigest": "sha256:f429c17cd577d688c8749e7baf63bd24cf6bffa9a8b885f0792a3e66e40a032b",
+        "assessmentContextDigest": "sha256:bc0c7bb12e05211b9fdadf6955e1a5df0045f566dd7baf779a75e1767cac67a0",
+        "protocolDigest": "sha256:01bc0afec0f0db2fe57f619565508925f64e4af6c83adce66744bbbe810d4aee",
+        "datasetDigest": "sha256:3a2a0c6a8c9214fdddcecb491278837e8140e461863d6264279d44e0130718d2",
+        "traceSetDigest": "sha256:280b4e759bda1b6aea6772662a4e1c05d656cf4542389bbecbbb64831c90f035",
+        "evaluatorSetDigest": "sha256:ab6c9a3e00493d879642b26944960dde880dd8aa2c0a6c025cdf8adb1a5256f5",
         "selectedPolicy": {
-          "policyDigest": "sha256:fe8efa318a040c2f35f0f2f630e34c3897f04753ae4f7998c48a400119fa19f1",
+          "policyDigest": "sha256:001c7a138f99f0defd943218a6984f28f3c18b8b39aff695c389e0237cd37283",
           "issuedAt": "2026-07-22T00:00:00.000Z",
           "expiresAt": "2026-09-01T00:00:00.000Z"
         },
@@ -47,9 +47,9 @@
     "deploymentObservation": null,
     "staleReasons": [],
     "attestation": "unattested",
-    "snapshotDigest": "sha256:438145355cc248262f0788420c7e3a626541cc5301ee8fe6bc91ca34448109b4"
+    "snapshotDigest": "sha256:440200e506ee9144bacab526410f9ce50a2725fa7e591b2029295f76eff5fd95"
   },
-  "controllerSnapshotDigest": "sha256:438145355cc248262f0788420c7e3a626541cc5301ee8fe6bc91ca34448109b4",
+  "controllerSnapshotDigest": "sha256:440200e506ee9144bacab526410f9ce50a2725fa7e591b2029295f76eff5fd95",
   "protocol": {
     "version": "tasc-experiment-protocol-v2",
     "studyId": "synthetic-support-routing",
@@ -60,12 +60,12 @@
     "dispatchAuthority": {
       "keyId": "synthetic-dispatch-key-1",
       "algorithm": "ed25519",
-      "publicKeySpki": "MCowBQYDK2VwAyEAbtitmkw3TCsfKzwcmE7NDkNOx0TNWJC_BFljR0gVDGk"
+      "publicKeySpki": "MCowBQYDK2VwAyEAkVMAFDeCaI8NqKq1q3BIzjf0iyHw8AylVI91bChX6Bo"
     },
     "collectorAuthority": {
       "keyId": "synthetic-collector-key-1",
       "algorithm": "ed25519",
-      "publicKeySpki": "MCowBQYDK2VwAyEAtjUiYSJ20UJQP1JSA-nTVCfc-fXDz-XXUuSP5xp63n8"
+      "publicKeySpki": "MCowBQYDK2VwAyEA4BNsodV5dlPnnmUkVaibiyZREIDyy8niEMu7UAcEOAs"
     },
     "splitMembership": {
       "algorithm": "tasc-seeded-sha256-group-bucket-v1",
@@ -247,7 +247,7 @@
     ],
     "requiredCapabilities": []
   },
-  "protocolDigest": "sha256:d1f3bc2f19f2207bb91a48c0795fc39692b4dbcb44d4dd319da9ab81b1369362",
+  "protocolDigest": "sha256:01bc0afec0f0db2fe57f619565508925f64e4af6c83adce66744bbbe810d4aee",
   "frozenPolicy": {
     "version": "tasc-policy-bundle-v2",
     "compatibilityVersion": "tasc-policy-replay-v2",
@@ -263,13 +263,13 @@
       }
     ],
     "fallbackProfileId": "champion-vllm-ray",
-    "protocolDigest": "sha256:d1f3bc2f19f2207bb91a48c0795fc39692b4dbcb44d4dd319da9ab81b1369362",
+    "protocolDigest": "sha256:01bc0afec0f0db2fe57f619565508925f64e4af6c83adce66744bbbe810d4aee",
     "issuedAt": "2026-07-22T00:00:00.000Z",
     "expiresAt": "2026-09-01T00:00:00.000Z",
     "signer": null,
-    "policyDigest": "sha256:fe8efa318a040c2f35f0f2f630e34c3897f04753ae4f7998c48a400119fa19f1"
+    "policyDigest": "sha256:001c7a138f99f0defd943218a6984f28f3c18b8b39aff695c389e0237cd37283"
   },
-  "frozenPolicyDigest": "sha256:fe8efa318a040c2f35f0f2f630e34c3897f04753ae4f7998c48a400119fa19f1",
+  "frozenPolicyDigest": "sha256:001c7a138f99f0defd943218a6984f28f3c18b8b39aff695c389e0237cd37283",
   "window": {
     "windowId": "synthetic-window-1",
     "eventTimeStartInclusive": "2026-07-23T00:00:00.000Z",
@@ -279,7 +279,7 @@
       "seed": "synthetic-shadow-sample-1",
       "sampleBasisPoints": 10000
     },
-    "membershipDigest": "sha256:573ced9eeeb80fc179009dada84e7104c181856ce46a7f885afa8524ebcf1aec"
+    "membershipDigest": "sha256:dbdd1445c502c1cadb7d0c90a28b8d9b599797f65770437d58129fea70c176a6"
   },
   "collectionTargets": [
     {
@@ -288,6 +288,7 @@
       "endpointBindingDigest": "sha256:4e9cd79236b5afec3e43791c83c4a2c4bb07393b2ee97aa160e309c7bd7f80c7",
       "route": "completions",
       "authenticationReference": null,
+      "httpLimitsDigest": "sha256:3821776e6903dfbc4edb779900af93097a402dd718634c9de9b72512dcfd23e1",
       "capabilityReceiptDigests": [],
       "executionProfileDigest": "sha256:63ff7211603e61a0f0bf035e94e13f891f7ead1d7e46ddf830475aed2a82f763",
       "runtimeName": "tensorrt-llm",
@@ -299,6 +300,7 @@
       "endpointBindingDigest": "sha256:e57f144dd45851cd319ce8f26aa490ad749c115c496d7ed60e2337f918eaf342",
       "route": "completions",
       "authenticationReference": null,
+      "httpLimitsDigest": "sha256:3821776e6903dfbc4edb779900af93097a402dd718634c9de9b72512dcfd23e1",
       "capabilityReceiptDigests": [],
       "executionProfileDigest": "sha256:c7854c197a0c6918a16e543bf79fc7c96ca2565fdb919cee024a004c2064d527",
       "runtimeName": "vllm",
@@ -320,5 +322,5 @@
   },
   "issuedAt": "2026-07-22T00:00:02.000Z",
   "expiresAt": "2026-07-23T00:01:30.000Z",
-  "planDigest": "sha256:59e05741d187dda366db4028363890be9fb8b1828bf75d8f72837b4e84cd16ea"
+  "planDigest": "sha256:efa6b557cd8cef8862e733d6519f30844689e83925ee9123c8e1b1f3fca291b8"
 }

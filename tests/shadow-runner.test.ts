@@ -40,6 +40,9 @@ import {
   createStudyPayloadIdentity,
 } from "../src/references.js";
 import {
+  fingerprintRuntimeInvocationHttpLimits,
+} from "../src/runtime-http-limits.js";
+import {
   describeRuntimeInvocation,
   RuntimeInvocationInputError,
   type PreparedRuntimeInvocation,
@@ -259,6 +262,8 @@ function shadowPlan(input: {
         route: runtime.route,
         authenticationReference:
           runtime.authenticationReference ?? null,
+        httpLimitsDigest:
+          fingerprintRuntimeInvocationHttpLimits(runtime.httpLimits),
         capabilityReceiptDigests: [],
       };
     }),
@@ -1007,6 +1012,109 @@ describe("shadow runner", () => {
     await expect(readdir(made.root)).resolves.toEqual([]);
   });
 
+  it("rejects P1 HTTP-limit substitution before signer, storage, or P1 contact", async () => {
+    const fixture = protocolFixture();
+    const withResponseLimit = (maxResponseBytes: number) =>
+      targets(fixture.protocol).map((target) => ({
+        ...target,
+        runtime: {
+          ...target.runtime,
+          httpLimits: { maxResponseBytes },
+        },
+      })) as unknown as readonly ShadowProfileTarget[];
+    const approvedProfiles = withResponseLimit(4_096);
+    const signSpy = vi.fn(fixture.signer.sign);
+    const collectorSignSpy = vi.fn(fixture.collectorSigner.sign);
+    const prepare = vi.fn(fakePrepare);
+    const dispatch = vi.fn(async (prepared: PreparedRuntimeInvocation) =>
+      runtimeOutcome(prepared)
+    );
+    const made = await makeInput({
+      fixture: {
+        protocol: fixture.protocol,
+        signer: { ...fixture.signer, sign: signSpy },
+        collectorSigner: {
+          ...fixture.collectorSigner,
+          sign: collectorSignSpy,
+        },
+      },
+      profiles: approvedProfiles,
+      prepare,
+      dispatch,
+    });
+    const approvedDigest =
+      fingerprintRuntimeInvocationHttpLimits({
+        maxResponseBytes: 4_096,
+      });
+    expect(made.input.plan.collectionTargets.every(
+      ({ httpLimitsDigest }) => httpLimitsDigest === approvedDigest,
+    )).toBe(true);
+    const accepted = await runShadowCollection(made.input);
+    expect(accepted.status).toBe("complete");
+    expect(accepted.traces).toHaveLength(2);
+    const acceptedRootEntries = await readdir(made.root);
+    expect(acceptedRootEntries.length).toBeGreaterThan(0);
+
+    prepare.mockClear();
+    dispatch.mockClear();
+    signSpy.mockClear();
+    collectorSignSpy.mockClear();
+    const readPacket = vi.fn(async () => null);
+    const writePacket = vi.fn(async () => {
+      throw new Error("must not write");
+    });
+
+    await expect(runShadowCollection({
+      ...made.input,
+      profiles: withResponseLimit(2_048),
+      hooks: {
+        ...made.input.hooks,
+        readPacket:
+          readPacket as NonNullable<ShadowRunnerHooks["readPacket"]>,
+        writePacket: writePacket as unknown as NonNullable<
+          ShadowRunnerHooks["writePacket"]
+        >,
+      },
+    })).rejects.toThrow(/P0 HTTP limits/);
+    expect(prepare).not.toHaveBeenCalled();
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(signSpy).not.toHaveBeenCalled();
+    expect(collectorSignSpy).not.toHaveBeenCalled();
+    expect(readPacket).not.toHaveBeenCalled();
+    expect(writePacket).not.toHaveBeenCalled();
+    await expect(readdir(made.root)).resolves.toEqual(acceptedRootEntries);
+
+    const alteredProfiles = withResponseLimit(2_048);
+    const altered = await makeInput({
+      fixture: {
+        protocol: fixture.protocol,
+        signer: fixture.signer,
+        collectorSigner: fixture.collectorSigner,
+      },
+      clock: made.clock,
+      profiles: alteredProfiles,
+      prepare: fakePrepare,
+      dispatch: async (prepared) => runtimeOutcome(prepared),
+    });
+    const alteredAccepted = await runShadowCollection(altered.input);
+    const alteredDigest =
+      fingerprintRuntimeInvocationHttpLimits({
+        maxResponseBytes: 2_048,
+      });
+    expect(altered.input.plan.planDigest)
+      .not.toBe(made.input.plan.planDigest);
+    expect(alteredAccepted.traces.map(({ traceId }) => traceId))
+      .not.toEqual(accepted.traces.map(({ traceId }) => traceId));
+    expect(accepted.traces.every(
+      ({ collectionBinding }) =>
+        collectionBinding?.httpLimitsDigest === approvedDigest,
+    )).toBe(true);
+    expect(alteredAccepted.traces.every(
+      ({ collectionBinding }) =>
+        collectionBinding?.httpLimitsDigest === alteredDigest,
+    )).toBe(true);
+  });
+
   it.each([
     {
       name: "transport",
@@ -1183,6 +1291,12 @@ describe("shadow runner", () => {
     );
     expect(firstResult.traces.every(
       ({ traceId }) => /^trace-[a-f0-9]{64}$/.test(traceId),
+    )).toBe(true);
+    const defaultLimitsDigest =
+      fingerprintRuntimeInvocationHttpLimits();
+    expect(firstResult.traces.every(
+      ({ collectionBinding }) =>
+        collectionBinding?.httpLimitsDigest === defaultLimitsDigest,
     )).toBe(true);
   });
 

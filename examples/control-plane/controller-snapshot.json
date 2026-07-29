@@ -2,35 +2,35 @@
   "version": "tasc-controller-snapshot-v1",
   "controllerId": "synthetic-shadow-controller-1",
   "studyId": "synthetic-support-routing",
-  "protocolDigest": "sha256:d1f3bc2f19f2207bb91a48c0795fc39692b4dbcb44d4dd319da9ab81b1369362",
+  "protocolDigest": "sha256:01bc0afec0f0db2fe57f619565508925f64e4af6c83adce66744bbbe810d4aee",
   "protocolCreatedAt": "2026-07-20T00:00:00.000Z",
   "protocolExpiresAt": "2026-09-01T00:00:00.000Z",
   "state": "SHADOW_ASSESSING",
   "sequence": 5,
-  "lastEventId": "sha256:4263612d35fd9530f518cbc250c380d2aa5d8eb22f82fa9620f74ed6702ac91e",
+  "lastEventId": "sha256:aa626e50f6b903259e49d241728815f0f7b866945d18d822011256d68d3968ee",
   "lastEventAt": "2026-07-22T00:00:01.000Z",
   "collectionId": "synthetic-shadow-collection-1",
   "developmentEvidence": {
-    "datasetDigest": "sha256:82742a492e379d3d6dc632bbda50e0deb3114adcfd020849b180aee30663e2ba",
-    "traceSetDigest": "sha256:b4064eaada950a5b2b7e5af6b4be218a3194e72d7df2c3f9378afc134bc68538",
-    "evaluatorSetDigest": "sha256:cf9d454055d6ddeec05f4b233e0b0e8cccdd0e60a82f868f8279528a54c9ec78"
+    "datasetDigest": "sha256:3a2a0c6a8c9214fdddcecb491278837e8140e461863d6264279d44e0130718d2",
+    "traceSetDigest": "sha256:280b4e759bda1b6aea6772662a4e1c05d656cf4542389bbecbbb64831c90f035",
+    "evaluatorSetDigest": "sha256:ab6c9a3e00493d879642b26944960dde880dd8aa2c0a6c025cdf8adb1a5256f5"
   },
   "selectedPolicy": {
-    "policyDigest": "sha256:fe8efa318a040c2f35f0f2f630e34c3897f04753ae4f7998c48a400119fa19f1",
+    "policyDigest": "sha256:001c7a138f99f0defd943218a6984f28f3c18b8b39aff695c389e0237cd37283",
     "issuedAt": "2026-07-22T00:00:00.000Z",
     "expiresAt": "2026-09-01T00:00:00.000Z"
   },
   "assessments": [
     {
       "version": "tasc-controller-assessment-projection-v1",
-      "decisionDigest": "sha256:0f8293801e78b8985a0aef7f7b62631c047cc5bd1dfb1668f9794f2491eeba62",
-      "assessmentContextDigest": "sha256:58391b7d2606c2706c94394dc9c1ca021e45c08b6d9c838b18e6c9e2fc668ca0",
-      "protocolDigest": "sha256:d1f3bc2f19f2207bb91a48c0795fc39692b4dbcb44d4dd319da9ab81b1369362",
-      "datasetDigest": "sha256:82742a492e379d3d6dc632bbda50e0deb3114adcfd020849b180aee30663e2ba",
-      "traceSetDigest": "sha256:b4064eaada950a5b2b7e5af6b4be218a3194e72d7df2c3f9378afc134bc68538",
-      "evaluatorSetDigest": "sha256:cf9d454055d6ddeec05f4b233e0b0e8cccdd0e60a82f868f8279528a54c9ec78",
+      "decisionDigest": "sha256:f429c17cd577d688c8749e7baf63bd24cf6bffa9a8b885f0792a3e66e40a032b",
+      "assessmentContextDigest": "sha256:bc0c7bb12e05211b9fdadf6955e1a5df0045f566dd7baf779a75e1767cac67a0",
+      "protocolDigest": "sha256:01bc0afec0f0db2fe57f619565508925f64e4af6c83adce66744bbbe810d4aee",
+      "datasetDigest": "sha256:3a2a0c6a8c9214fdddcecb491278837e8140e461863d6264279d44e0130718d2",
+      "traceSetDigest": "sha256:280b4e759bda1b6aea6772662a4e1c05d656cf4542389bbecbbb64831c90f035",
+      "evaluatorSetDigest": "sha256:ab6c9a3e00493d879642b26944960dde880dd8aa2c0a6c025cdf8adb1a5256f5",
       "selectedPolicy": {
-        "policyDigest": "sha256:fe8efa318a040c2f35f0f2f630e34c3897f04753ae4f7998c48a400119fa19f1",
+        "policyDigest": "sha256:001c7a138f99f0defd943218a6984f28f3c18b8b39aff695c389e0237cd37283",
         "issuedAt": "2026-07-22T00:00:00.000Z",
         "expiresAt": "2026-09-01T00:00:00.000Z"
       },
@@ -44,5 +44,5 @@
   "deploymentObservation": null,
   "staleReasons": [],
   "attestation": "unattested",
-  "snapshotDigest": "sha256:438145355cc248262f0788420c7e3a626541cc5301ee8fe6bc91ca34448109b4"
+  "snapshotDigest": "sha256:440200e506ee9144bacab526410f9ce50a2725fa7e591b2029295f76eff5fd95"
 }

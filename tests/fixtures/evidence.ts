@@ -124,6 +124,7 @@ export const validCollectionBinding = () => ({
   endpointBindingDigest: digest("4"),
   route: "chatCompletions" as const,
   authenticationReference: null,
+  httpLimitsDigest: digest("7"),
   capabilityReceiptDigests: [digest("5"), digest("6")],
 });
 

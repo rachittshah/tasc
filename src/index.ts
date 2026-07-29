@@ -346,6 +346,14 @@ export type {
   WindowMembershipRule,
 } from "./window.js";
 export {
+  DEFAULT_RUNTIME_HTTP_LIMITS,
+  fingerprintRuntimeInvocationHttpLimits,
+  normalizeRuntimeInvocationHttpLimits,
+} from "./runtime-http-limits.js";
+export type {
+  RuntimeHttpLimits,
+} from "./runtime-http-limits.js";
+export {
   SHADOW_RUN_PLAN_AUTHORITY,
   SHADOW_RUN_PLAN_VERSION,
   buildShadowRunPlan,

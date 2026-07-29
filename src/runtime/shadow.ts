@@ -55,6 +55,11 @@ import {
   type PersistedErrorCategory,
 } from "../redaction.js";
 import {
+  fingerprintRuntimeInvocationHttpLimits,
+  normalizeRuntimeInvocationHttpLimits,
+  type RuntimeHttpLimits,
+} from "../runtime-http-limits.js";
+import {
   describeRuntimeInvocation,
   dispatchPreparedRuntimeInvocation,
   prepareRuntimeInvocation,
@@ -66,10 +71,6 @@ import {
   type RuntimeInvocationOutcome,
   type RuntimeInvocationPersistence,
 } from "./invoke.js";
-import {
-  DEFAULT_RUNTIME_HTTP_LIMITS,
-  type RuntimeHttpLimits,
-} from "./http.js";
 import {
   authorizeCollectorRequest,
   fingerprintCollectorEndpointBinding,
@@ -1070,30 +1071,6 @@ const RUNTIME_TARGET_KEYS = new Set([
   "httpLimits",
 ]);
 
-const HTTP_LIMIT_KEYS = new Set(
-  Object.keys(DEFAULT_RUNTIME_HTTP_LIMITS),
-);
-
-function normalizeHttpLimits(input: unknown): RuntimeHttpLimits {
-  const values: Record<string, number> = {
-    ...DEFAULT_RUNTIME_HTTP_LIMITS,
-  };
-  if (input !== undefined) {
-    const record = strictRecord(
-      input,
-      "shadow runtime HTTP limits",
-      HTTP_LIMIT_KEYS,
-    );
-    for (const [key, value] of Object.entries(record)) {
-      values[key] = safePositiveInteger(
-        value,
-        `shadow runtime HTTP limit ${key}`,
-      );
-    }
-  }
-  return Object.freeze(values) as unknown as RuntimeHttpLimits;
-}
-
 function runtimeRequestPath(
   descriptor: ReturnType<typeof parseEndpointDescriptor> | undefined,
   routePath: string,
@@ -1139,7 +1116,12 @@ function normalizeTarget(
       "shadow collector policy must be an immutable authentic authority",
     );
   }
-  const httpLimits = normalizeHttpLimits(runtime.httpLimits);
+  const httpLimits = normalizeRuntimeInvocationHttpLimits(runtime.httpLimits);
+  const httpLimitsDigest =
+    fingerprintRuntimeInvocationHttpLimits(httpLimits);
+  if (httpLimitsDigest !== planTarget.httpLimitsDigest) {
+    throw new Error("shadow runtime target conflicts with its P0 HTTP limits");
+  }
   const endpointDescriptor = runtime.endpointDescriptor === undefined
     ? undefined
     : parseEndpointDescriptor(runtime.endpointDescriptor);
@@ -1300,10 +1282,6 @@ function normalizeTarget(
     }
     normalizedRuntime.secretHeaderFactory = runtime.secretHeaderFactory;
   }
-  const httpLimitsDigest = domainSeparatedDigest(
-    "tasc/shadow-http-limits/v1",
-    httpLimits,
-  );
   return Object.freeze({
     profileId,
     runtime: Object.freeze(normalizedRuntime) as unknown as ShadowRuntimeTarget,
@@ -1788,6 +1766,8 @@ function traceBaseFor(
       route: job.profileTarget.planTarget.route,
       authenticationReference:
         job.profileTarget.planTarget.authenticationReference,
+      httpLimitsDigest:
+        job.profileTarget.planTarget.httpLimitsDigest,
       capabilityReceiptDigests:
         job.profileTarget.planTarget.capabilityReceiptDigests,
     },
@@ -2350,6 +2330,8 @@ function normalizeRunInput(
       endpointBindingDigest: preflight.endpointBindingDigest,
       authenticationReference:
         jobInput.profileTarget.planTarget.authenticationReference,
+      httpLimitsDigest:
+        jobInput.profileTarget.planTarget.httpLimitsDigest,
     };
     const job: PreparedJob = Object.freeze({
       ...jobInput,

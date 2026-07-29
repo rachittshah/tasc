@@ -14,6 +14,9 @@ import {
   type PolicyBundle,
 } from "../src/policy.js";
 import {
+  fingerprintRuntimeInvocationHttpLimits,
+} from "../src/runtime-http-limits.js";
+import {
   buildShadowRunPlan,
   fingerprintShadowRunPlan,
   isShadowRunPlanMember,
@@ -138,6 +141,7 @@ function inputFixture(options: {
         endpointBindingDigest: digest("8"),
         route: "chatCompletions",
         authenticationReference: null,
+        httpLimitsDigest: fingerprintRuntimeInvocationHttpLimits(),
         capabilityReceiptDigests: [digest("b"), digest("a")],
       },
       {
@@ -146,6 +150,7 @@ function inputFixture(options: {
         endpointBindingDigest: digest("9"),
         route: "chatCompletions",
         authenticationReference: null,
+        httpLimitsDigest: fingerprintRuntimeInvocationHttpLimits(),
         capabilityReceiptDigests: [],
       },
     ],

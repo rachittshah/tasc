@@ -1,7 +1,8 @@
 import {
+  createHash,
+  createPrivateKey,
+  createPublicKey,
   createSecretKey,
-  generateKeyPairSync,
-  randomBytes,
   sign,
 } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
@@ -18,6 +19,7 @@ import {
   fingerprintEvaluatorRevocations,
   fingerprintEvaluatorTrustPolicy,
   fingerprintExecutionProfile,
+  fingerprintRuntimeInvocationHttpLimits,
   fingerprintProtocol,
   fingerprintWindowManifest,
   isDevelopmentNomination,
@@ -47,6 +49,40 @@ const WINDOW_END = "2026-07-23T00:01:30.000Z";
 const WINDOW_WATERMARK = "2026-07-23T00:02:00.000Z";
 const PLAN_ISSUED_AT = "2026-07-22T00:00:02.000Z";
 const PAYLOAD_KEY_ID = "synthetic-study-payload-key";
+const PUBLIC_FIXTURE_KEY_DOMAIN =
+  "tasc/public-control-plane-fixture-key/v1";
+const ED25519_PKCS8_SEED_PREFIX = Buffer.from(
+  "302e020100300506032b657004220420",
+  "hex",
+);
+
+/**
+ * These deterministic keys are deliberately public test fixtures. They offer
+ * reproducible signatures and identities only; they confer no production
+ * authority and must never be reused for a real study.
+ */
+function publicFixtureSeed(label) {
+  return createHash("sha256")
+    .update(PUBLIC_FIXTURE_KEY_DOMAIN, "utf8")
+    .update("\0", "utf8")
+    .update(label, "utf8")
+    .digest();
+}
+
+function publicFixtureEd25519KeyPair(label) {
+  const privateKey = createPrivateKey({
+    key: Buffer.concat([
+      ED25519_PKCS8_SEED_PREFIX,
+      publicFixtureSeed(label),
+    ]),
+    format: "der",
+    type: "pkcs8",
+  });
+  return Object.freeze({
+    privateKey,
+    publicKey: createPublicKey(privateKey),
+  });
+}
 
 async function readJson(name) {
   return JSON.parse(await readFile(resolve(fixtureRoot, name), "utf8"));
@@ -168,6 +204,7 @@ function resignTrace({
       endpointBindingDigest: target.endpointBindingDigest,
       route: target.route,
       authenticationReference: target.authenticationReference,
+      httpLimitsDigest: target.httpLimitsDigest,
       capabilityReceiptDigests: target.capabilityReceiptDigests,
     };
   }
@@ -257,11 +294,11 @@ const [
   readJson("work-budget.json"),
 ]);
 
-// All secret material is process-local and is deliberately never serialized.
-const dispatchKeys = generateKeyPairSync("ed25519");
-const collectorKeys = generateKeyPairSync("ed25519");
-const evaluatorKeys = generateKeyPairSync("ed25519");
-const payloadKey = createSecretKey(randomBytes(32));
+// Public, deterministic fixture material is process-local and never serialized.
+const dispatchKeys = publicFixtureEd25519KeyPair("dispatch-ed25519");
+const collectorKeys = publicFixtureEd25519KeyPair("collector-ed25519");
+const evaluatorKeys = publicFixtureEd25519KeyPair("evaluator-ed25519");
+const payloadKey = createSecretKey(publicFixtureSeed("payload-hmac-sha256"));
 
 protocolInput.dispatchAuthority.publicKeySpki =
   publicKeySpki(dispatchKeys);
@@ -397,14 +434,24 @@ const plan = buildShadowRunPlan({
     eventTimeStartInclusive: WINDOW_START,
     eventTimeEndExclusive: WINDOW_END,
   },
-  collectionTargets: oldPlan.collectionTargets.map((target) => ({
-    profileId: target.profileId,
-    endpointAlias: target.endpointAlias,
-    endpointBindingDigest: target.endpointBindingDigest,
-    route: target.route,
-    authenticationReference: target.authenticationReference ?? null,
-    capabilityReceiptDigests: target.capabilityReceiptDigests,
-  })),
+  collectionTargets: oldPlan.collectionTargets.map((target) => {
+    const runtimeTarget = shadowProfiles.targets.find(
+      ({ profileId }) => profileId === target.profileId,
+    );
+    if (runtimeTarget === undefined) {
+      throw new Error(`profiles are missing fixture target ${target.profileId}`);
+    }
+    return {
+      profileId: target.profileId,
+      endpointAlias: target.endpointAlias,
+      endpointBindingDigest: target.endpointBindingDigest,
+      route: target.route,
+      authenticationReference: target.authenticationReference ?? null,
+      httpLimitsDigest:
+        fingerprintRuntimeInvocationHttpLimits(runtimeTarget.httpLimits),
+      capabilityReceiptDigests: target.capabilityReceiptDigests,
+    };
+  }),
   workBudget: {
     maxCases: 4,
     maxProfiles: 2,

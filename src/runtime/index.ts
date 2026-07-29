@@ -100,6 +100,10 @@ export type {
   RuntimeWireTiming,
 } from "./http.js";
 export {
+  fingerprintRuntimeInvocationHttpLimits,
+  normalizeRuntimeInvocationHttpLimits,
+} from "../runtime-http-limits.js";
+export {
   DEFAULT_SSE_LIMITS,
   MAX_SSE_CHUNKS,
   MAX_SSE_EVENT_BYTES,

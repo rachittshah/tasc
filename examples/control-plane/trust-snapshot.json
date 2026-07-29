@@ -9,7 +9,7 @@
       "keyId": "synthetic-evaluator-key-1",
       "purpose": "evaluator-evidence",
       "algorithm": "ed25519",
-      "publicKeySpki": "MCowBQYDK2VwAyEAYGfir-gvv2U8EdwbWfDqkvZMiH5CMoZ2InVwKZCrvEk",
+      "publicKeySpki": "MCowBQYDK2VwAyEAUz47-ghP-NN_DTMNMMUI3iG0FEImBCygF2UNIj97Wp4",
       "evaluatorId": "synthetic-correctness",
       "producerId": "synthetic-evaluator-service",
       "authorizedRubricVersions": [

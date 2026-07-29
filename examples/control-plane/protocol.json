@@ -8,12 +8,12 @@
   "dispatchAuthority": {
     "keyId": "synthetic-dispatch-key-1",
     "algorithm": "ed25519",
-    "publicKeySpki": "MCowBQYDK2VwAyEAbtitmkw3TCsfKzwcmE7NDkNOx0TNWJC_BFljR0gVDGk"
+    "publicKeySpki": "MCowBQYDK2VwAyEAkVMAFDeCaI8NqKq1q3BIzjf0iyHw8AylVI91bChX6Bo"
   },
   "collectorAuthority": {
     "keyId": "synthetic-collector-key-1",
     "algorithm": "ed25519",
-    "publicKeySpki": "MCowBQYDK2VwAyEAtjUiYSJ20UJQP1JSA-nTVCfc-fXDz-XXUuSP5xp63n8"
+    "publicKeySpki": "MCowBQYDK2VwAyEA4BNsodV5dlPnnmUkVaibiyZREIDyy8niEMu7UAcEOAs"
   },
   "splitMembership": {
     "algorithm": "tasc-seeded-sha256-group-bucket-v1",

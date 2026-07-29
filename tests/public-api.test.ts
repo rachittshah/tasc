@@ -175,6 +175,8 @@ describe("standalone public API", () => {
       authorizeControlledReference: expect.any(Function),
       resolveAuthorizedControlledReferenceRoot: expect.any(Function),
       createStudyPayloadIdentity: expect.any(Function),
+      fingerprintRuntimeInvocationHttpLimits: expect.any(Function),
+      normalizeRuntimeInvocationHttpLimits: expect.any(Function),
       SHADOW_RUN_PLAN_VERSION: "tasc-shadow-run-plan-v1",
       buildShadowRunPlan: expect.any(Function),
       parseShadowRunPlan: expect.any(Function),
@@ -185,6 +187,8 @@ describe("standalone public API", () => {
       listRuntimeProfiles: expect.any(Function),
       probeRuntimeCapability: expect.any(Function),
       describeRuntimeInvocation: expect.any(Function),
+      fingerprintRuntimeInvocationHttpLimits: expect.any(Function),
+      normalizeRuntimeInvocationHttpLimits: expect.any(Function),
       invokeRuntime: expect.any(Function),
       runShadowCollection: expect.any(Function),
     });

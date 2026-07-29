@@ -16,6 +16,9 @@ import {
   type PersistedError,
 } from "../redaction.js";
 import {
+  normalizeRuntimeInvocationHttpLimits,
+} from "../runtime-http-limits.js";
+import {
   DEFAULT_RUNTIME_HTTP_LIMITS,
   RuntimeWireError,
   withBoundedHttpResponse,
@@ -421,19 +424,6 @@ const MODEL_KEYS = new Set(["id", "revision"]);
 const MESSAGE_KEYS = new Set(["role", "content"]);
 const IDENTITY_KEYS = new Set(["studyId", "keyId", "key"]);
 const HTTP_LIMIT_KEYS = new Set(Object.keys(DEFAULT_RUNTIME_HTTP_LIMITS));
-const MAXIMUM_HTTP_LIMITS: Readonly<RuntimeHttpLimits> = Object.freeze({
-  maxRequestBytes: 16_777_216,
-  maxResponseHeaderBytes: 16_384,
-  maxResponseHeaders: 256,
-  maxResponseBytes: 16_777_216,
-  maxResponseChunks: 16_384,
-  maxSecretHeaderBytes: 16_384,
-  connectTimeoutMs: 30_000,
-  headersTimeoutMs: 60_000,
-  bodyTimeoutMs: 60_000,
-  deadlineMs: 300_000,
-});
-
 function inputFail(
   code: RuntimeInvocationInputErrorCode = "INVALID_INPUT",
 ): never {
@@ -720,26 +710,14 @@ function abortSignalIsAborted(signal: AbortSignal): boolean {
 }
 
 function parseHttpLimits(input: unknown): RuntimeHttpLimits {
-  if (input === undefined) return DEFAULT_RUNTIME_HTTP_LIMITS;
-  const snapshot = snapshotRecord(input, HTTP_LIMIT_KEYS);
-  const limits: Record<string, number> = {
-    ...DEFAULT_RUNTIME_HTTP_LIMITS,
-  };
-  for (const [key, value] of Object.entries(snapshot)) {
-    limits[key] = safeInteger(value, 1, Number.MAX_SAFE_INTEGER);
-    if (
-      limits[key]! > MAXIMUM_HTTP_LIMITS[key as keyof RuntimeHttpLimits]
-    ) {
-      inputFail();
-    }
-  }
-  if (
-    limits.maxRequestBytes! > MAX_REQUEST_BYTES
-    || limits.maxResponseBytes! > MAX_RESPONSE_BYTES
-  ) {
+  try {
+    const snapshot = input === undefined
+      ? undefined
+      : snapshotRecord(input, HTTP_LIMIT_KEYS);
+    return normalizeRuntimeInvocationHttpLimits(snapshot);
+  } catch {
     inputFail();
   }
-  return Object.freeze(limits) as unknown as RuntimeHttpLimits;
 }
 
 function requireRouteInputShape(

@@ -87,6 +87,9 @@ import {
   createStudyPayloadIdentity,
 } from "./references.js";
 import {
+  fingerprintRuntimeInvocationHttpLimits,
+} from "./runtime-http-limits.js";
+import {
   RuntimeInvocationInputError,
   type RuntimeInvocationInput,
   type RuntimeInvocationRoute,
@@ -1547,6 +1550,8 @@ function validateShadowTarget(
     || target.route !== planTarget.route
     || (target.endpoint.authentication?.reference ?? null)
       !== planTarget.authenticationReference
+    || fingerprintRuntimeInvocationHttpLimits(target.httpLimits)
+      !== planTarget.httpLimitsDigest
   ) {
     throw new Error("runtime target conflicts with the shadow run plan");
   }
