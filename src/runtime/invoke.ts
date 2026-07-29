@@ -961,18 +961,23 @@ function normalizeInvocation(
       inputFail();
     }
   }
-  const endpointBindingDigest = fingerprintCollectorEndpointBinding(
-    snapshot.policy as CollectorTrustPolicy,
-    endpointAlias,
-    endpointDescriptor,
-  );
+  const policy = snapshot.policy as CollectorTrustPolicy;
+  let endpointBindingDigest: string;
+  try {
+    endpointBindingDigest = fingerprintCollectorEndpointBinding(
+      policy,
+      endpointAlias,
+      endpointDescriptor,
+    );
+  } catch {
+    inputFail();
+  }
   if (instance.endpointDescriptorDigest !== endpointBindingDigest) {
     inputFail("ENDPOINT_BINDING_MISMATCH");
   }
   if (
     profile.locality === "local-only"
-    && (snapshot.policy as CollectorTrustPolicy).localMode
-      !== "literal-loopback-only"
+    && policy.localMode !== "literal-loopback-only"
   ) {
     inputFail("UNSUPPORTED_ROUTE");
   }
@@ -1041,8 +1046,7 @@ function normalizeInvocation(
     300_000,
   );
   if (
-    totalDeadlineMs
-      > (snapshot.policy as CollectorTrustPolicy).maximumRequestDurationMs
+    totalDeadlineMs > policy.maximumRequestDurationMs
   ) {
     inputFail();
   }
@@ -1057,7 +1061,7 @@ function normalizeInvocation(
     inputFail();
   }
   return Object.freeze({
-    policy: snapshot.policy as CollectorTrustPolicy,
+    policy,
     endpointAlias,
     ...(endpointDescriptor === undefined
       ? {}

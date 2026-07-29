@@ -2133,6 +2133,23 @@ describe("runtime invocation foundation", () => {
       httpLimits: { deadlineMs: 300_001 },
     })).rejects.toMatchObject({ code: "INVALID_INPUT" });
 
+    await expect(invokeRuntime({
+      ...valid.invocation,
+      policy: structuredClone(valid.policy),
+    })).rejects.toMatchObject({
+      code: "INVALID_INPUT",
+      dispatchState: "not_sent",
+    });
+
+    await expect(invokeRuntime({
+      ...valid.invocation,
+      totalDeadlineMs: 2_001,
+    })).rejects.toMatchObject({
+      code: "INVALID_INPUT",
+      dispatchState: "not_sent",
+    });
+    expect(server.contacts()).toBe(0);
+
     const controller = new AbortController();
     controller.abort();
     const cancelledPrepared = prepareRuntimeInvocation({
