@@ -516,6 +516,7 @@ describe("TASC CLI synthetic end-to-end example", () => {
     ]);
     expect(malformed.status).not.toBe(0);
     expect(malformed.stderr).toMatch(/invalid measurement JSON.*invalid-utf8/i);
+    expect(malformed.stdout).not.toContain(secret);
     expect(malformed.stderr).not.toContain(secret);
     await expect(readdir(output)).rejects.toThrow();
 
@@ -559,6 +560,8 @@ describe("TASC CLI synthetic end-to-end example", () => {
     ]);
     expect(rejected.status).toBe(3);
     expect(rejected.stderr).toContain("Legacy evaluation input was rejected.");
+    expect(rejected.stdout).not.toContain(sourceSecret);
+    expect(rejected.stdout).not.toContain(pathSecret);
     expect(rejected.stderr).not.toContain(sourceSecret);
     expect(rejected.stderr).not.toContain(pathSecret);
 
@@ -571,6 +574,7 @@ describe("TASC CLI synthetic end-to-end example", () => {
     ]);
     expect(first.status, first.stderr).toBe(0);
     expect(first.stdout).not.toContain(pathSecret);
+    expect(first.stderr).not.toContain(pathSecret);
     const repeated = runCli([
       "nominate",
       "--spec", SPEC,
@@ -581,6 +585,7 @@ describe("TASC CLI synthetic end-to-end example", () => {
     expect(repeated.stderr).toContain(
       "Artifact publication failed; a fresh output directory is required.",
     );
+    expect(repeated.stdout).not.toContain(pathSecret);
     expect(repeated.stderr).not.toContain(pathSecret);
   }, 30_000);
 });

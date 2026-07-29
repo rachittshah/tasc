@@ -1,4 +1,4 @@
-import { readFile, mkdtemp, readdir } from "node:fs/promises";
+import { readFile, mkdtemp, readdir, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -95,7 +95,9 @@ describe("legacy next-experiment diagnostics", () => {
     const proposal = proposeNextExperiment(result, { spec, measurements });
     expect(proposal.trigger).toMatch(/passed every development gate/i);
 
-    const root = await mkdtemp(join(tmpdir(), "tasc-report-diagnostics-"));
+    const root = await mkdtemp(
+      join(await realpath(tmpdir()), "tasc-report-diagnostics-"),
+    );
     const output = join(root, "packet");
     await writeDevelopmentArtifacts(output, result, {
       synthetic: true,

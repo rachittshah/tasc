@@ -18,6 +18,7 @@ const MODEL_REVISION = "fixture-revision-1";
 const CONFIGURATION_DIGEST = `sha256:${"b".repeat(64)}`;
 const MAX_CAPTURE_BYTES = 2 * 1024 * 1024;
 const PROCESS_TIMEOUT_MS = 15_000;
+const TEST_TIMEOUT_MS = PROCESS_TIMEOUT_MS + 5_000;
 
 interface ObservedInferenceRequest {
   readonly method: string;
@@ -329,7 +330,7 @@ describe("operator-real live smoke subprocess", () => {
     } finally {
       await server.close();
     }
-  });
+  }, TEST_TIMEOUT_MS);
 
   it("fails closed on a malformed provider response without reflecting it", async () => {
     const secret = `Bearer ${randomBytes(24).toString("base64url")}`;
@@ -377,5 +378,5 @@ describe("operator-real live smoke subprocess", () => {
     } finally {
       await server.close();
     }
-  });
+  }, TEST_TIMEOUT_MS);
 });
