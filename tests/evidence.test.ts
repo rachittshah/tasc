@@ -523,6 +523,13 @@ describe("evidence v2 contracts", () => {
       ...trace,
       rawProviderPayload: "must never enter the signing contract",
     })).toThrow(/unexpected field/i);
+    expect(() => collectorAttestationSigningBytes({
+      ...trace,
+      collectorAttestation: {
+        ...trace.collectorAttestation,
+        rawProviderPayload: "must never enter the signing contract",
+      },
+    })).toThrow(/unexpected field/i);
     const finalObservationMutations: Array<{
       readonly label: string;
       readonly change: (value: ReturnType<typeof validTraceInput>) => void;
