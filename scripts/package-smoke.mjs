@@ -134,7 +134,7 @@ function terminate(child) {
 }
 
 function diagnosticOutput(stdout, stderr) {
-  const source = Buffer.concat([stdout, stderr])
+  const source = Buffer.concat([...stdout, ...stderr])
     .toString("utf8")
     .replaceAll(/\u001b\[[0-9;]*m/g, "");
   const maximum = 4_000;
@@ -500,6 +500,7 @@ async function validateInstalledPackage(
   version,
   environment,
   typescriptCliPath,
+  nodeTypeRootsPath,
 ) {
   const installedRoot = join(
     consumerDirectory,
@@ -607,6 +608,10 @@ async function validateInstalledPackage(
       "NodeNext",
       "--moduleResolution",
       "NodeNext",
+      "--types",
+      "node",
+      "--typeRoots",
+      nodeTypeRootsPath,
       typeConsumerPath,
     ],
     { cwd: consumerDirectory, environment },
@@ -779,6 +784,7 @@ async function main() {
       sourceMetadata.version,
       environment,
       join(sourceDirectory, "node_modules", "typescript", "bin", "tsc"),
+      join(sourceDirectory, "node_modules", "@types"),
     );
 
     process.stdout.write(

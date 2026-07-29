@@ -42,6 +42,8 @@ const REQUIRED_PACKAGE_FILES = Object.freeze([
   "dist/cli.js",
   "dist/index.d.ts",
   "dist/index.js",
+  "dist/runtime/index.d.ts",
+  "dist/runtime/index.js",
   "package.json",
 ]);
 const ALLOWED_PACKAGE_ROOTS = new Set([
@@ -173,6 +175,39 @@ function isPlainRecord(value) {
     && Object.getPrototypeOf(value) === Object.prototype;
 }
 
+function hasExactKeys(value, expected) {
+  return isPlainRecord(value)
+    && JSON.stringify(sorted(Object.keys(value)))
+      === JSON.stringify(sorted(expected));
+}
+
+function hasExpectedPublicSurface(metadata, version) {
+  return isPlainRecord(metadata)
+    && metadata.name === PACKAGE_NAME
+    && metadata.version === version
+    && metadata.private !== true
+    && metadata.main === "./dist/index.js"
+    && metadata.types === "./dist/index.d.ts"
+    && metadata.sideEffects === false
+    && metadata.publishConfig?.access === "public"
+    && metadata.repository?.url
+      === "git+https://github.com/rachittshah/tasc.git"
+    && hasExactKeys(metadata.bin, ["tasc"])
+    && metadata.bin.tasc === "./dist/cli.js"
+    && hasExactKeys(metadata.exports, [".", "./runtime"])
+    && hasExactKeys(metadata.exports["."], ["default", "import", "types"])
+    && metadata.exports["."].types === "./dist/index.d.ts"
+    && metadata.exports["."].import === "./dist/index.js"
+    && metadata.exports["."].default === "./dist/index.js"
+    && hasExactKeys(
+      metadata.exports["./runtime"],
+      ["default", "import", "types"],
+    )
+    && metadata.exports["./runtime"].types === "./dist/runtime/index.d.ts"
+    && metadata.exports["./runtime"].import === "./dist/runtime/index.js"
+    && metadata.exports["./runtime"].default === "./dist/runtime/index.js";
+}
+
 function safePackagePath(path) {
   if (
     typeof path !== "string"
@@ -201,14 +236,9 @@ async function packageMetadata() {
     "package metadata",
   );
   if (
-    !isPlainRecord(metadata)
-    || metadata.name !== PACKAGE_NAME
-    || typeof metadata.version !== "string"
+    typeof metadata?.version !== "string"
     || !SEMVER_PATTERN.test(metadata.version)
-    || metadata.private === true
-    || metadata.publishConfig?.access !== "public"
-    || metadata.repository?.url
-      !== "git+https://github.com/rachittshah/tasc.git"
+    || !hasExpectedPublicSurface(metadata, metadata.version)
   ) {
     fail("package metadata is not the expected public release surface");
   }
@@ -443,13 +473,9 @@ async function validateTarball(packResult, version) {
     "packed package metadata",
   );
   if (
-    !isPlainRecord(packedMetadata)
-    || packedMetadata.name !== PACKAGE_NAME
-    || packedMetadata.version !== version
-    || packedMetadata.private === true
-    || packedMetadata.publishConfig?.access !== "public"
+    !hasExpectedPublicSurface(packedMetadata, version)
   ) {
-    fail("packed package identity is invalid");
+    fail("packed package public surface is invalid");
   }
   return Object.freeze({ digest, integrity });
 }
