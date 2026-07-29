@@ -24,6 +24,11 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "default": "./dist/index.js"
+    },
+    "./runtime": {
+      "types": "./dist/runtime/index.d.ts",
+      "import": "./dist/runtime/index.js",
+      "default": "./dist/runtime/index.js"
     }
   },
   "files": [
@@ -47,6 +52,7 @@
     "coverage": "vitest run --coverage --testTimeout=20000",
     "demo": "tsx scripts/demo.ts",
     "demo:control-plane": "tsx scripts/control-plane-demo.ts",
+    "live:smoke": "tsx scripts/live-smoke.ts",
     "package:smoke": "node scripts/package-smoke.mjs",
     "prepack": "npm run clean && npm run build",
     "typecheck": "tsc --noEmit",

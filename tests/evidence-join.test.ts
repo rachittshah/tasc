@@ -26,6 +26,7 @@ import {
   signEvaluatorEvidence,
   unsignedEvaluatorEvidence,
   validAssessmentContextInput,
+  validCollectionBinding,
   validProtocolInput,
   validTraceInputForProfile,
   type EvaluatorKeyFixture,
@@ -1144,6 +1145,7 @@ describe("deterministic assessment evidence join", () => {
         windowId === "window-1" ? "a" : "b",
       );
       mutable.sourceMode = "shadow";
+      mutable.collectionBinding = validCollectionBinding();
     };
     firstReplicate.forEach((trace) => makeOnline(trace, "window-1"));
     secondReplicate.forEach((trace) => makeOnline(trace, "window-2"));
@@ -1266,6 +1268,7 @@ describe("deterministic assessment evidence join", () => {
       trace.collectionWindowId = "window-1";
       trace.collectionWindowMembershipDigest = digest("a");
       trace.sourceMode = "shadow";
+      trace.collectionBinding = validCollectionBinding();
     });
     expect(() => joinAssessmentEvidence(
       protocol,

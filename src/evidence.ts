@@ -269,7 +269,19 @@ const endpointRequirementSchema = z.object({
   transport: z.enum(["https", "loopback-http"]),
 }).strict();
 
+const requiredTraceCapabilitySchema = z.enum([
+  "chat-completions",
+  "streaming",
+  "final-usage",
+]);
+
 const dispatchAuthoritySchema = z.object({
+  keyId: contractSlugSchema,
+  algorithm: z.literal("ed25519"),
+  publicKeySpki: canonicalBase64UrlSchema,
+}).strict();
+
+const collectorAuthoritySchema = z.object({
   keyId: contractSlugSchema,
   algorithm: z.literal("ed25519"),
   publicKeySpki: canonicalBase64UrlSchema,
@@ -283,6 +295,7 @@ export const experimentProtocolSchema = z.object({
   createdAt: contractTimestampSchema,
   expiresAt: contractTimestampSchema,
   dispatchAuthority: dispatchAuthoritySchema,
+  collectorAuthority: collectorAuthoritySchema,
   splitMembership: splitMembershipSchema,
   onlineWindowMembership: onlineWindowMembershipSchema,
   profiles: z.array(executionProfileSchema).min(2).max(MAX_PROFILES),
@@ -297,7 +310,8 @@ export const experimentProtocolSchema = z.object({
   shadowCollection: shadowCollectionSchema,
   costAllocation: protocolCostAllocationSchema,
   endpointRequirements: z.array(endpointRequirementSchema).max(MAX_PROFILES),
-  requiredCapabilities: z.array(contractSlugSchema).max(MAX_IDENTIFIERS),
+  requiredCapabilities:
+    z.array(requiredTraceCapabilitySchema).max(MAX_IDENTIFIERS),
 }).strict();
 
 type MutableExperimentProtocol = z.infer<typeof experimentProtocolSchema>;
@@ -337,7 +351,45 @@ const dispatchIntentSchema = dispatchIntentUnsignedSchema.extend({
   signature: canonicalBase64UrlSchema,
 }).strict();
 
+const collectorAttestationUnsignedSchema = z.object({
+  version: z.literal("tasc-collector-attestation-v1"),
+  collectedAt: contractTimestampSchema,
+  authorityKeyId: contractSlugSchema,
+  signatureAlgorithm: z.literal("ed25519"),
+}).strict();
+
+const collectorAttestationSchema =
+  collectorAttestationUnsignedSchema.extend({
+    signature: canonicalBase64UrlSchema,
+  }).strict();
+
+const collectionBindingSchema = z.object({
+  shadowPlanDigest: contractDigestSchema,
+  endpointAlias: contractSlugSchema,
+  endpointBindingDigest: contractDigestSchema,
+  route: z.enum([
+    "chatCompletions",
+    "completions",
+    "responses",
+    "nativeChat",
+    "nativeGenerate",
+  ]),
+  authenticationReference: contractSlugSchema.nullable(),
+  capabilityReceiptDigests: z.array(contractDigestSchema).max(16),
+}).strict();
+
+type MutableCollectorAttestation = z.infer<
+  typeof collectorAttestationSchema
+>;
+export type CollectorAttestation = DeepReadonly<
+  MutableCollectorAttestation
+>;
+
+type MutableCollectionBinding = z.infer<typeof collectionBindingSchema>;
+export type CollectionBinding = DeepReadonly<MutableCollectionBinding>;
+
 const dispatchIntentPayloadSchema = z.object({
+  version: z.literal("tasc-trace-envelope-v2"),
   studyId: contractSlugSchema,
   protocolDigest: contractDigestSchema,
   traceId: contractSlugSchema,
@@ -348,6 +400,7 @@ const dispatchIntentPayloadSchema = z.object({
   collectionWindowId: contractSlugSchema.nullable(),
   collectionWindowMembershipDigest: contractDigestSchema.nullable(),
   sourceMode: z.enum(["imported", "observed", "shadow"]),
+  collectionBinding: collectionBindingSchema.nullable(),
   profileId: contractSlugSchema,
   executionProfileDigest: contractDigestSchema,
   policyDigest: contractDigestSchema,
@@ -357,6 +410,18 @@ const dispatchIntentPayloadSchema = z.object({
   routeSignal: routeSignalObservationSchema.nullable(),
   dispatchIntent: dispatchIntentUnsignedSchema,
 }).strict();
+
+const traceDispatchAuthorizationSchema =
+  dispatchIntentPayloadSchema.extend({
+    dispatchIntent: dispatchIntentSchema,
+  }).strict();
+
+type MutableTraceDispatchAuthorization = z.infer<
+  typeof traceDispatchAuthorizationSchema
+>;
+export type TraceDispatchAuthorization = DeepReadonly<
+  MutableTraceDispatchAuthorization
+>;
 
 const observerTimingsSchema = z.object({
   startedAt: contractTimestampSchema,
@@ -468,7 +533,7 @@ const attemptSchema = z.object({
   }).strict(),
 }).strict();
 
-export const traceEnvelopeSchema = z.object({
+const traceEnvelopeBodySchema = z.object({
   version: z.literal("tasc-trace-envelope-v2"),
   studyId: contractSlugSchema,
   protocolDigest: contractDigestSchema,
@@ -480,6 +545,7 @@ export const traceEnvelopeSchema = z.object({
   collectionWindowId: contractSlugSchema.nullable(),
   collectionWindowMembershipDigest: contractDigestSchema.nullable(),
   sourceMode: z.enum(["imported", "observed", "shadow"]),
+  collectionBinding: collectionBindingSchema.nullable(),
   profileId: contractSlugSchema,
   executionProfileDigest: contractDigestSchema,
   policyDigest: contractDigestSchema,
@@ -491,6 +557,14 @@ export const traceEnvelopeSchema = z.object({
   attempts: z.array(attemptSchema).min(1).max(MAX_ATTEMPTS),
   terminalOutputId: keyedIdentitySchema.nullable(),
   collectorVersion: persistedTraceIdentityTextSchema,
+}).strict();
+
+const collectorAttestationPayloadSchema = traceEnvelopeBodySchema.extend({
+  collectorAttestation: collectorAttestationUnsignedSchema,
+}).strict();
+
+export const traceEnvelopeSchema = traceEnvelopeBodySchema.extend({
+  collectorAttestation: collectorAttestationSchema,
 }).strict();
 
 type MutableTraceEnvelope = z.infer<typeof traceEnvelopeSchema>;
@@ -514,6 +588,7 @@ export function dispatchIntentSigningBytes(input: unknown): Buffer {
   }
   const intent = binding as Record<string, unknown>;
   const payload = dispatchIntentPayloadSchema.parse({
+    version: trace.version,
     studyId: trace.studyId,
     protocolDigest: trace.protocolDigest,
     traceId: trace.traceId,
@@ -525,6 +600,7 @@ export function dispatchIntentSigningBytes(input: unknown): Buffer {
     collectionWindowMembershipDigest:
       trace.collectionWindowMembershipDigest,
     sourceMode: trace.sourceMode,
+    collectionBinding: trace.collectionBinding,
     profileId: trace.profileId,
     executionProfileDigest: trace.executionProfileDigest,
     policyDigest: trace.policyDigest,
@@ -543,6 +619,158 @@ export function dispatchIntentSigningBytes(input: unknown): Buffer {
     domain: "tasc/dispatch-intent-signature/v1",
     intent: payload,
   });
+}
+
+/**
+ * Canonical final-observation bytes. Unlike the pre-dispatch authorization,
+ * this signature binds the complete raw-free trace, including the dispatch
+ * signature, every attempt, terminal output identity, and collector version.
+ * Only the collector attestation's own signature is excluded.
+ */
+export function collectorAttestationSigningBytes(input: unknown): Buffer {
+  const snapshot = snapshotBoundedContractInput(input);
+  if (snapshot === null || typeof snapshot !== "object") {
+    throw new Error("collector attestation signing input must be a trace object");
+  }
+  const trace = snapshot as Record<string, unknown>;
+  const binding = trace.collectorAttestation;
+  if (binding === null || typeof binding !== "object") {
+    throw new Error("trace collector attestation must be an object");
+  }
+  const attestation = binding as Record<string, unknown>;
+  const payload = collectorAttestationPayloadSchema.parse({
+    ...trace,
+    collectorAttestation: {
+      version: attestation.version,
+      collectedAt: attestation.collectedAt,
+      authorityKeyId: attestation.authorityKeyId,
+      signatureAlgorithm: attestation.signatureAlgorithm,
+    },
+  });
+  return canonicalJsonBytes({
+    domain: "tasc/collector-attestation-signature/v1",
+    trace: payload,
+  });
+}
+
+function traceDispatchAuthorization(
+  trace: TraceEnvelope,
+): TraceDispatchAuthorization {
+  return deepFreezeContract({
+    version: trace.version,
+    studyId: trace.studyId,
+    protocolDigest: trace.protocolDigest,
+    traceId: trace.traceId,
+    caseId: trace.caseId,
+    groupId: trace.groupId,
+    replicateId: trace.replicateId,
+    split: trace.split,
+    collectionWindowId: trace.collectionWindowId,
+    collectionWindowMembershipDigest:
+      trace.collectionWindowMembershipDigest,
+    sourceMode: trace.sourceMode,
+    collectionBinding: trace.collectionBinding,
+    profileId: trace.profileId,
+    executionProfileDigest: trace.executionProfileDigest,
+    policyDigest: trace.policyDigest,
+    observedRoute: trace.observedRoute,
+    workload: trace.workload,
+    slices: trace.slices,
+    routeSignal: trace.routeSignal,
+    dispatchIntent: trace.dispatchIntent,
+  });
+}
+
+function verifyNormalizedTraceDispatchAuthorization(
+  authorization: TraceDispatchAuthorization,
+  protocol: ExperimentProtocol,
+): TraceDispatchAuthorization {
+  if (
+    authorization.studyId !== protocol.studyId
+    || authorization.protocolDigest
+      !== fingerprintNormalizedProtocol(protocol)
+  ) {
+    throw new Error("Dispatch intent conflicts with the protocol.");
+  }
+  if (
+    authorization.dispatchIntent.authorityKeyId
+      !== protocol.dispatchAuthority.keyId
+    || authorization.dispatchIntent.signatureAlgorithm
+      !== protocol.dispatchAuthority.algorithm
+  ) {
+    throw new Error("Dispatch intent conflicts with the protocol authority.");
+  }
+
+  const issuedAt = Date.parse(authorization.dispatchIntent.issuedAt);
+  if (
+    issuedAt < Date.parse(protocol.createdAt)
+    || issuedAt >= Date.parse(protocol.expiresAt)
+  ) {
+    throw new Error(
+      "Dispatch intent is outside the protocol validity interval.",
+    );
+  }
+
+  const signature = Buffer.from(
+    authorization.dispatchIntent.signature,
+    "base64url",
+  );
+  let authentic = false;
+  try {
+    authentic =
+      signature.toString("base64url")
+        === authorization.dispatchIntent.signature
+      && verifySignature(
+        null,
+        dispatchIntentSigningBytes(authorization),
+        importCanonicalDispatchAuthorityKey(
+          protocol.dispatchAuthority.publicKeySpki,
+        ),
+        signature,
+      );
+  } catch {
+    authentic = false;
+  }
+  if (!authentic) {
+    throw new Error("Invalid dispatch-intent signature.");
+  }
+  return authorization;
+}
+
+/**
+ * Authenticate the strict pre-dispatch authorization before an attempt or
+ * collector observation exists. This deliberately cannot authenticate any
+ * operational outcome; callers must use `verifyTraceDispatchIntent` before
+ * consuming final trace facts.
+ */
+export function verifyTraceDispatchAuthorization(
+  authorizationInput: unknown,
+  protocolInput: unknown,
+): TraceDispatchAuthorization {
+  let protocol: ExperimentProtocol;
+  try {
+    const snapshot = snapshotProxyFreeContractInput(protocolInput);
+    const parsed = experimentProtocolSchema.parse(snapshot);
+    assertProtocolSemantics(parsed);
+    protocol = deepFreezeContract(parsed);
+  } catch {
+    throw new Error("Dispatch-intent protocol is invalid.");
+  }
+
+  let authorization: TraceDispatchAuthorization;
+  try {
+    const snapshot = snapshotProxyFreeContractInput(authorizationInput);
+    const parsed = traceDispatchAuthorizationSchema.parse(snapshot);
+    assertDispatchAuthorizationSemantics(parsed);
+    authorization = deepFreezeContract(parsed);
+  } catch {
+    throw new Error("Dispatch authorization is invalid.");
+  }
+
+  return verifyNormalizedTraceDispatchAuthorization(
+    authorization,
+    protocol,
+  );
 }
 
 /**
@@ -577,52 +805,93 @@ export function verifyTraceDispatchIntent(
     throw new Error("Dispatch-intent trace is invalid.");
   }
 
-  if (
-    trace.studyId !== protocol.studyId
-    || trace.protocolDigest !== fingerprintNormalizedProtocol(protocol)
-  ) {
-    throw new Error("Dispatch intent conflicts with the protocol.");
-  }
-  if (
-    trace.dispatchIntent.authorityKeyId
-      !== protocol.dispatchAuthority.keyId
-    || trace.dispatchIntent.signatureAlgorithm
-      !== protocol.dispatchAuthority.algorithm
-  ) {
-    throw new Error("Dispatch intent conflicts with the protocol authority.");
-  }
+  verifyNormalizedTraceDispatchAuthorization(
+    traceDispatchAuthorization(trace),
+    protocol,
+  );
 
-  const issuedAt = Date.parse(trace.dispatchIntent.issuedAt);
   if (
-    issuedAt < Date.parse(protocol.createdAt)
-    || issuedAt >= Date.parse(protocol.expiresAt)
+    trace.collectorAttestation.authorityKeyId
+      !== protocol.collectorAuthority.keyId
+    || trace.collectorAttestation.signatureAlgorithm
+      !== protocol.collectorAuthority.algorithm
   ) {
     throw new Error(
-      "Dispatch intent is outside the protocol validity interval.",
+      "Collector attestation conflicts with the protocol authority.",
     );
   }
 
-  const signature = Buffer.from(
-    trace.dispatchIntent.signature,
+  const collectorSignature = Buffer.from(
+    trace.collectorAttestation.signature,
     "base64url",
   );
-  let authentic = false;
+  let collectorAuthentic = false;
   try {
-    authentic =
-      signature.toString("base64url") === trace.dispatchIntent.signature
+    collectorAuthentic =
+      collectorSignature.toString("base64url")
+        === trace.collectorAttestation.signature
       && verifySignature(
         null,
-        dispatchIntentSigningBytes(trace),
-        importCanonicalDispatchAuthorityKey(
-          protocol.dispatchAuthority.publicKeySpki,
+        collectorAttestationSigningBytes(trace),
+        importCanonicalCollectorAuthorityKey(
+          protocol.collectorAuthority.publicKeySpki,
         ),
-        signature,
+        collectorSignature,
       );
   } catch {
-    authentic = false;
+    collectorAuthentic = false;
   }
-  if (!authentic) {
-    throw new Error("Invalid dispatch-intent signature.");
+  if (!collectorAuthentic) {
+    throw new Error("Invalid collector-attestation signature.");
+  }
+
+  const terminal = trace.attempts[trace.attempts.length - 1];
+  const collectedAt = Date.parse(trace.collectorAttestation.collectedAt);
+  if (
+    collectedAt < Date.parse(terminal.observerTimings.completedAt)
+    || collectedAt < Date.parse(protocol.createdAt)
+    || collectedAt >= Date.parse(protocol.expiresAt)
+  ) {
+    throw new Error(
+      "Collector attestation is outside the final-observation interval.",
+    );
+  }
+
+  for (const capability of protocol.requiredCapabilities) {
+    if (
+      capability === "chat-completions"
+      && (
+        trace.workload.mode !== "chat"
+        || (
+          trace.collectionBinding !== null
+          && trace.collectionBinding.route !== "chatCompletions"
+        )
+      )
+    ) {
+      throw new Error(
+        "Trace does not satisfy required chat-completions capability.",
+      );
+    }
+    if (
+      capability === "streaming"
+      && terminal.status === "success"
+      && terminal.payloads.eventStream === null
+    ) {
+      throw new Error("Trace does not satisfy required streaming capability.");
+    }
+    if (
+      capability === "final-usage"
+      && terminal.status === "success"
+      && (
+        terminal.tokenUsage.input === null
+        || terminal.tokenUsage.output === null
+        || terminal.tokenUsage.total === null
+      )
+    ) {
+      throw new Error(
+        "Trace does not satisfy required final-usage capability.",
+      );
+    }
   }
   return trace;
 }
@@ -733,6 +1002,17 @@ function assertScoreRange(
 }
 
 function importCanonicalDispatchAuthorityKey(encoded: string): KeyObject {
+  return importCanonicalAuthorityKey(encoded, "dispatch");
+}
+
+function importCanonicalCollectorAuthorityKey(encoded: string): KeyObject {
+  return importCanonicalAuthorityKey(encoded, "collector");
+}
+
+function importCanonicalAuthorityKey(
+  encoded: string,
+  authority: "dispatch" | "collector",
+): KeyObject {
   try {
     const bytes = Buffer.from(encoded, "base64url");
     const key = createPublicKey({
@@ -747,12 +1027,12 @@ function importCanonicalDispatchAuthorityKey(encoded: string): KeyObject {
       || !Buffer.isBuffer(canonical)
       || !canonical.equals(bytes)
     ) {
-      throw new Error("noncanonical or non-Ed25519 dispatch key");
+      throw new Error(`noncanonical or non-Ed25519 ${authority} key`);
     }
     return key;
   } catch {
     throw new Error(
-      "dispatch authority must contain canonical Ed25519 SPKI",
+      `${authority} authority must contain canonical Ed25519 SPKI`,
     );
   }
 }
@@ -761,6 +1041,18 @@ function assertProtocolSemantics(protocol: MutableExperimentProtocol): void {
   importCanonicalDispatchAuthorityKey(
     protocol.dispatchAuthority.publicKeySpki,
   );
+  importCanonicalCollectorAuthorityKey(
+    protocol.collectorAuthority.publicKeySpki,
+  );
+  if (
+    protocol.collectorAuthority.keyId === protocol.dispatchAuthority.keyId
+    || protocol.collectorAuthority.publicKeySpki
+      === protocol.dispatchAuthority.publicKeySpki
+  ) {
+    throw new Error(
+      "collector authority must be distinct from dispatch authority",
+    );
+  }
   if (Date.parse(protocol.expiresAt) <= Date.parse(protocol.createdAt)) {
     throw new Error("protocol expiry must be after creation");
   }
@@ -919,31 +1211,87 @@ function assertAttemptSemantics(
   }
 }
 
-function assertTraceSemantics(trace: MutableTraceEnvelope): void {
-  if (trace.observedRoute.selectedProfileId !== trace.profileId) {
+function assertDispatchAuthorizationSemantics(
+  authorization: MutableTraceDispatchAuthorization,
+): void {
+  if (
+    authorization.observedRoute.selectedProfileId
+      !== authorization.profileId
+  ) {
     throw new Error("observed selected profile must match the top-level profile");
   }
   if (
-    trace.split === "online"
+    authorization.split === "online"
     && (
-      trace.collectionWindowId === null
-      || trace.collectionWindowMembershipDigest === null
+      authorization.collectionWindowId === null
+      || authorization.collectionWindowMembershipDigest === null
     )
   ) {
     throw new Error("online traces require a collection window id and membership digest");
   }
   if (
-    trace.split !== "online"
+    authorization.split !== "online"
     && (
-      trace.collectionWindowId !== null
-      || trace.collectionWindowMembershipDigest !== null
+      authorization.collectionWindowId !== null
+      || authorization.collectionWindowMembershipDigest !== null
     )
   ) {
     throw new Error(
       "development and holdout traces cannot claim an online collection window or membership digest",
     );
   }
-  unique(trace.slices, "slice");
+  if (
+    authorization.sourceMode === "shadow"
+    && authorization.collectionBinding === null
+  ) {
+    throw new Error(
+      "shadow traces require a signed raw-free collection binding",
+    );
+  }
+  if (
+    authorization.sourceMode !== "shadow"
+    && authorization.collectionBinding !== null
+  ) {
+    throw new Error(
+      "non-shadow traces cannot claim a shadow collection binding",
+    );
+  }
+  if (authorization.collectionBinding !== null) {
+    unique(
+      authorization.collectionBinding.capabilityReceiptDigests,
+      "capability receipt digest",
+    );
+    const sorted = [
+      ...authorization.collectionBinding.capabilityReceiptDigests,
+    ]
+      .sort(compareCodeUnits);
+    if (
+      sorted.some(
+        (digest, index) =>
+          digest
+            !== authorization.collectionBinding!
+              .capabilityReceiptDigests[index],
+      )
+    ) {
+      throw new Error(
+        "capability receipt digests must be sorted canonically",
+      );
+    }
+  }
+  unique(authorization.slices, "slice");
+  if (
+    authorization.routeSignal !== null
+    && Date.parse(authorization.routeSignal.provenance.observedAt)
+      > Date.parse(authorization.dispatchIntent.issuedAt)
+  ) {
+    throw new Error(
+      "route signal must be observed before dispatch intent issuance",
+    );
+  }
+}
+
+function assertTraceSemantics(trace: MutableTraceEnvelope): void {
+  assertDispatchAuthorizationSemantics(trace);
   unique(trace.attempts.map(({ attemptId }) => attemptId), "attempt id");
   if (
     Date.parse(trace.dispatchIntent.issuedAt)
@@ -953,16 +1301,6 @@ function assertTraceSemantics(trace: MutableTraceEnvelope): void {
       "dispatch intent must be issued no later than the first attempt starts",
     );
   }
-  if (
-    trace.routeSignal !== null
-    && Date.parse(trace.routeSignal.provenance.observedAt)
-      > Date.parse(trace.dispatchIntent.issuedAt)
-  ) {
-    throw new Error(
-      "route signal must be observed before dispatch intent issuance",
-    );
-  }
-
   let priorCompletion = Number.NEGATIVE_INFINITY;
   trace.attempts.forEach((attempt, index) => {
     assertAttemptSemantics(attempt, index);

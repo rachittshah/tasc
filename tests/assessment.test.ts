@@ -51,6 +51,7 @@ import {
   signEvaluatorEvidence,
   unsignedEvaluatorEvidence,
   validAssessmentContextInput,
+  validCollectionBinding,
   validExecutionProfile,
   validProtocolInput,
   validTraceInputForProfile,
@@ -250,6 +251,7 @@ function assessmentFixture<DatasetSplit extends Split = "dev">(
         trace.collectionWindowMembershipDigest =
           options.windowMembershipDigest ?? `sha256:${"d".repeat(64)}`;
         trace.sourceMode = "shadow";
+        trace.collectionBinding = validCollectionBinding();
         trace.routeSignal.provenance.observedAt =
           "2026-07-23T00:00:00.000Z";
         trace.attempts[0].observerTimings = {

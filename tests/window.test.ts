@@ -23,6 +23,7 @@ import {
   evaluatorKeyFixture,
   signEvaluatorEvidence,
   unsignedEvaluatorEvidence,
+  validCollectionBinding,
   validProtocolInput,
   validTraceInput,
 } from "./fixtures/evidence.js";
@@ -113,6 +114,7 @@ function onlineTrace(
   input.collectionWindowId = manifest.windowId;
   input.collectionWindowMembershipDigest = manifest.membershipDigest;
   input.sourceMode = "shadow";
+  input.collectionBinding = validCollectionBinding();
   input.attempts[0].observerTimings.startedAt =
     manifest.eventTimeStartInclusive;
   input.attempts[0].observerTimings.headersAt =
@@ -383,6 +385,7 @@ describe("tasc-window-manifest-v2", () => {
     input.collectionWindowId = manifest.windowId;
     input.collectionWindowMembershipDigest = manifest.membershipDigest;
     input.sourceMode = "shadow";
+    input.collectionBinding = validCollectionBinding();
     input.attempts[0].status = "failure";
     input.attempts[0].finishReason = null;
     input.attempts[0].failureCategory = "transient";

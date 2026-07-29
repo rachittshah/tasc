@@ -5,6 +5,7 @@ import {
 } from "node:crypto";
 import type { WorkBudget } from "../../src/work-budget.js";
 import {
+  collectorAttestationSigningBytes,
   dispatchIntentSigningBytes,
   evaluatorEvidenceSigningBytes,
   fingerprintExecutionProfile,
@@ -15,11 +16,45 @@ import {
 } from "../../src/index.js";
 
 const dispatchAuthorityKeyPair = generateKeyPairSync("ed25519");
+const collectorAuthorityKeyPair = generateKeyPairSync("ed25519");
 
 function dispatchAuthorityPublicKeySpki(): string {
   return dispatchAuthorityKeyPair.publicKey
     .export({ type: "spki", format: "der" })
     .toString("base64url");
+}
+
+function collectorAuthorityPublicKeySpki(): string {
+  return collectorAuthorityKeyPair.publicKey
+    .export({ type: "spki", format: "der" })
+    .toString("base64url");
+}
+
+export function signCollectorAttestation<
+  Trace extends {
+    collectorAttestation: {
+      collectedAt: string;
+      signature: string;
+    };
+    attempts: readonly {
+      observerTimings: { completedAt: string };
+    }[];
+  },
+>(
+  trace: Trace,
+  privateKey: KeyObject = collectorAuthorityKeyPair.privateKey,
+  options: Readonly<{ preserveCollectedAt?: boolean }> = {},
+): Trace {
+  if (options.preserveCollectedAt !== true) {
+    trace.collectorAttestation.collectedAt =
+      trace.attempts[trace.attempts.length - 1].observerTimings.completedAt;
+  }
+  trace.collectorAttestation.signature = sign(
+    null,
+    collectorAttestationSigningBytes(trace),
+    privateKey,
+  ).toString("base64url");
+  return trace;
 }
 
 export function signDispatchIntent<
@@ -28,6 +63,13 @@ export function signDispatchIntent<
       issuedAt: string;
       signature: string;
     };
+    collectorAttestation?: {
+      collectedAt: string;
+      signature: string;
+    };
+    attempts: readonly {
+      observerTimings: { completedAt: string };
+    }[];
   },
 >(trace: Trace): Trace {
   const source = trace as Trace & {
@@ -49,6 +91,14 @@ export function signDispatchIntent<
     dispatchIntentSigningBytes(trace),
     dispatchAuthorityKeyPair.privateKey,
   ).toString("base64url");
+  if (trace.collectorAttestation !== undefined) {
+    signCollectorAttestation(trace as Trace & {
+      collectorAttestation: {
+        collectedAt: string;
+        signature: string;
+      };
+    });
+  }
   return trace;
 }
 
@@ -66,6 +116,15 @@ export const keyedIdentity = (digit = "a") => ({
   algorithm: "hmac-sha256" as const,
   keyId: "study-payload-key",
   value: digit.repeat(64),
+});
+
+export const validCollectionBinding = () => ({
+  shadowPlanDigest: digest("3"),
+  endpointAlias: "approved-vllm",
+  endpointBindingDigest: digest("4"),
+  route: "chatCompletions" as const,
+  authenticationReference: null,
+  capabilityReceiptDigests: [digest("5"), digest("6")],
 });
 
 export const validExecutionProfile = (id = "champion") => ({
@@ -117,6 +176,11 @@ export const validProtocolInput = () => {
       keyId: "dispatch-authority-1",
       algorithm: "ed25519" as const,
       publicKeySpki: dispatchAuthorityPublicKeySpki(),
+    },
+    collectorAuthority: {
+      keyId: "collector-authority-1",
+      algorithm: "ed25519" as const,
+      publicKeySpki: collectorAuthorityPublicKeySpki(),
     },
     splitMembership: {
       algorithm: "tasc-seeded-sha256-group-bucket-v1" as const,
@@ -220,6 +284,7 @@ export const validTraceInput = () => {
     collectionWindowId: null,
     collectionWindowMembershipDigest: null,
     sourceMode: "imported" as const,
+    collectionBinding: null,
     profileId: "champion",
     executionProfileDigest: fingerprintExecutionProfile(protocol.profiles[0]),
     policyDigest: digest("c"),
@@ -329,6 +394,13 @@ export const validTraceInput = () => {
     ],
     terminalOutputId: keyedIdentity("1"),
     collectorVersion: "collector-2.0.0",
+    collectorAttestation: {
+      version: "tasc-collector-attestation-v1" as const,
+      collectedAt: "2026-07-21T00:00:00.500Z",
+      authorityKeyId: protocol.collectorAuthority.keyId,
+      signatureAlgorithm: "ed25519" as const,
+      signature: "pending",
+    },
   };
   return signDispatchIntent(trace);
 };

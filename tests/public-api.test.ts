@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import * as tasc from "../src/index.js";
+import * as runtime from "../src/runtime/index.js";
 import type {
   ArtifactReadPayload,
   ArtifactReadResult,
@@ -14,28 +15,37 @@ import type {
   ControlledReferenceStore,
   ControllerEventBody,
   ControllerSnapshotBody,
-  CollectorTrustPolicy,
-  BoundedRuntimeHttpResult,
-  BoundedSseLimits,
-  BoundedNdjsonStreamLimits,
-  PrometheusParseResult,
   KeyedPayloadIdentity,
-  PinnedCollectorRequest,
   PersistedError,
   PersistedErrorCategory,
+} from "../src/index.js";
+import type {
+  BoundedNdjsonStreamLimits,
+  BoundedRuntimeHttpResult,
+  BoundedSseLimits,
+  CollectorAttestationSigner,
+  CollectorTrustPolicy,
+  DispatchIntentSigner,
+  PinnedCollectorRequest,
   PreparedRuntimeInvocation,
-  RuntimeHttpLimits,
-  RuntimeContentTypeParameter,
-  RuntimeWireDispatchState,
-  RuntimeWireErrorCode,
+  PrometheusParseResult,
   RuntimeCapabilityAuthorization,
   RuntimeCapabilityProbeInput,
   RuntimeCapabilityProbeResult,
-  RuntimeProbeMetric,
-  RuntimeProbeMetricsObservation,
+  RuntimeContentTypeParameter,
+  RuntimeHttpLimits,
   RuntimeInvocationInput,
   RuntimeInvocationOutcome,
-} from "../src/index.js";
+  RuntimeProbeMetric,
+  RuntimeProbeMetricsObservation,
+  RuntimeWireDispatchState,
+  RuntimeWireErrorCode,
+  ShadowCaseInput,
+  ShadowProfileTarget,
+  ShadowRunInput,
+  ShadowRunResult,
+  ShadowWorkBudget,
+} from "../src/runtime/index.js";
 
 type TaskEightPublicTypes = [
   AuthorizedControlledReference,
@@ -98,6 +108,19 @@ type RuntimeCallPublicTypes = [
 
 const runtimeCallPublicTypeCount: RuntimeCallPublicTypes["length"] = 8;
 
+type ShadowRunnerPublicTypes = [
+  CollectorAttestationSigner,
+  DispatchIntentSigner,
+  ShadowCaseInput,
+  ShadowProfileTarget,
+  ShadowRunInput,
+  ShadowRunResult,
+  ShadowWorkBudget,
+];
+
+const shadowRunnerPublicTypeCount:
+  ShadowRunnerPublicTypes["length"] = 7;
+
 describe("standalone public API", () => {
   it("exports the complete policy-lab surface from one package entry point", () => {
     expect(tasc).toMatchObject({
@@ -152,44 +175,36 @@ describe("standalone public API", () => {
       authorizeControlledReference: expect.any(Function),
       resolveAuthorizedControlledReferenceRoot: expect.any(Function),
       createStudyPayloadIdentity: expect.any(Function),
-      COLLECTOR_TRUST_POLICY_VERSION: "tasc-collector-trust-policy-v1",
-      parseCollectorTrustPolicy: expect.any(Function),
-      fingerprintCollectorEndpointBinding: expect.any(Function),
-      fingerprintCollectorTrustPolicy: expect.any(Function),
-      narrowCollectorTrustPolicy: expect.any(Function),
-      authorizeCollectorRequest: expect.any(Function),
-      pinAuthorizedCollectorRequest: expect.any(Function),
-      withBoundedHttpResponse: expect.any(Function),
-      RUNTIME_HTTP_ACCEPT_VALUES: expect.arrayContaining([
-        "application/json",
-        "text/event-stream",
-        "application/x-ndjson",
-        "text/plain; version=0.0.4",
-      ]),
-      RuntimeWireError: expect.any(Function),
-      RuntimeCodecError: expect.any(Function),
-      parseBoundedSse: expect.any(Function),
-      parseBoundedJsonSse: expect.any(Function),
-      parseBoundedNdjsonStream: expect.any(Function),
-      parsePrometheusText: expect.any(Function),
-      RUNTIME_PROBE_VERSION: "tasc-runtime-probe-v1",
-      RUNTIME_CAPABILITY_AUTHORIZATION_VERSION:
-        "tasc-runtime-capability-authorization-v1",
-      RuntimeProbeInputError: expect.any(Function),
-      probeRuntimeCapability: expect.any(Function),
-      RUNTIME_INVOCATION_VERSION: "tasc-runtime-invocation-v1",
-      PREPARED_RUNTIME_INVOCATION_VERSION:
-        "tasc-prepared-runtime-invocation-v1",
-      RuntimeInvocationInputError: expect.any(Function),
-      prepareRuntimeInvocation: expect.any(Function),
-      dispatchPreparedRuntimeInvocation: expect.any(Function),
-      invokeRuntime: expect.any(Function),
+      SHADOW_RUN_PLAN_VERSION: "tasc-shadow-run-plan-v1",
+      buildShadowRunPlan: expect.any(Function),
+      parseShadowRunPlan: expect.any(Function),
+      verifyTraceDispatchAuthorization: expect.any(Function),
     });
+    expect(runtime).toMatchObject({
+      RUNTIME_REGISTRY_VERSION: "tasc-runtime-registry-v1",
+      listRuntimeProfiles: expect.any(Function),
+      probeRuntimeCapability: expect.any(Function),
+      describeRuntimeInvocation: expect.any(Function),
+      invokeRuntime: expect.any(Function),
+      runShadowCollection: expect.any(Function),
+    });
+    for (const effectfulExport of [
+      "parseCollectorTrustPolicy",
+      "probeRuntimeCapability",
+      "invokeRuntime",
+      "runShadowCollection",
+    ]) {
+      expect(tasc).not.toHaveProperty(effectfulExport);
+    }
+    expect(runtime).not.toHaveProperty("runShadowCollectionForTesting");
+    expect(runtime).not.toHaveProperty("verifyRuntimeCapabilityAuthorization");
+    expect(runtime).not.toHaveProperty("consumePinnedCollectorRequest");
     expect(taskEightPublicTypeCount).toBe(11);
     expect(controllerPublicTypeCount).toBe(2);
     expect(artifactResumePublicTypeCount).toBe(3);
     expect(runtimeTransportPublicTypeCount).toBe(10);
     expect(runtimeCallPublicTypeCount).toBe(8);
+    expect(shadowRunnerPublicTypeCount).toBe(7);
   });
 
   it("keeps deterministic identities independent of object insertion order", () => {

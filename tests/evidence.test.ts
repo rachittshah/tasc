@@ -1,5 +1,7 @@
+import { generateKeyPairSync } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
+  collectorAttestationSigningBytes,
   fingerprintExecutionProfile,
   fingerprintProtocol,
   parseEvaluatorEvidence,
@@ -8,6 +10,7 @@ import {
   parseExperimentProtocolJson,
   parseTraceEnvelope,
   parseTraceEnvelopeJson,
+  verifyTraceDispatchAuthorization,
   verifyTraceDispatchIntent,
 } from "../src/evidence.js";
 import type { BoundedJsonLimits } from "../src/bounded-input.js";
@@ -16,7 +19,9 @@ import {
   digest,
   evaluatorKeyFixture,
   mutate,
+  signCollectorAttestation,
   signDispatchIntent,
+  validCollectionBinding,
   validEvaluatorEvidenceInput,
   validExecutionProfile,
   validProtocolInput,
@@ -352,6 +357,7 @@ describe("evidence v2 contracts", () => {
       trace.collectionWindowId = "shadow-window-1";
       trace.collectionWindowMembershipDigest = digest("a");
       trace.sourceMode = "shadow";
+      trace.collectionBinding = validCollectionBinding();
     });
     expect(() => parseTraceEnvelope(online, TEST_WORK_BUDGET)).not.toThrow();
     expect(() => parseTraceEnvelope(
@@ -458,6 +464,272 @@ describe("evidence v2 contracts", () => {
     });
     expect(() => verifyTraceDispatchIntent(invalidSignature, protocol))
       .toThrow(/invalid dispatch-intent signature/i);
+  });
+
+  it("verifies strict dispatch authorization before any outcome exists", () => {
+    const protocol = validProtocolInput();
+    const {
+      attempts: _attempts,
+      terminalOutputId: _terminalOutputId,
+      collectorVersion: _collectorVersion,
+      collectorAttestation: _collectorAttestation,
+      ...authorization
+    } = validTraceInput();
+
+    const verified = verifyTraceDispatchAuthorization(
+      authorization,
+      protocol,
+    );
+    expect(verified).toEqual(authorization);
+    expect(verified).not.toBe(authorization);
+    expect(Object.isFrozen(verified)).toBe(true);
+
+    const changedOutcomeFreeField = mutate(authorization, (value) => {
+      value.policyDigest = digest("f");
+    });
+    expect(() => verifyTraceDispatchAuthorization(
+      changedOutcomeFreeField,
+      protocol,
+    )).toThrow(/invalid dispatch-intent signature/i);
+
+    expect(() => verifyTraceDispatchAuthorization(
+      { ...authorization, attempts: [] },
+      protocol,
+    )).toThrow(/dispatch authorization is invalid/i);
+  });
+
+  it("authenticates every final collector observation independently of dispatch", () => {
+    const protocol = validProtocolInput();
+    const trace = validTraceInput();
+    const originalDispatchSignature = trace.dispatchIntent.signature;
+    const signingBytes = collectorAttestationSigningBytes(trace);
+    expect(collectorAttestationSigningBytes(
+      mutate(trace, (value) => {
+        value.collectorAttestation.signature =
+          value.collectorAttestation.signature.endsWith("A")
+            ? `${value.collectorAttestation.signature.slice(0, -1)}B`
+            : `${value.collectorAttestation.signature.slice(0, -1)}A`;
+      }),
+    )).toEqual(signingBytes);
+    expect(collectorAttestationSigningBytes(
+      mutate(trace, (value) => {
+        value.dispatchIntent.signature =
+          value.dispatchIntent.signature.endsWith("A")
+            ? `${value.dispatchIntent.signature.slice(0, -1)}B`
+            : `${value.dispatchIntent.signature.slice(0, -1)}A`;
+      }),
+    )).not.toEqual(signingBytes);
+    const finalObservationMutations: Array<{
+      readonly label: string;
+      readonly change: (value: ReturnType<typeof validTraceInput>) => void;
+    }> = [
+      {
+        label: "observer timing",
+        change: (value) => {
+          value.attempts[0].observerTimings.headersAt =
+            "2026-07-21T00:00:00.051Z";
+        },
+      },
+      {
+        label: "usage",
+        change: (value) => {
+          value.attempts[0].tokenUsage.input.value += 1;
+        },
+      },
+      {
+        label: "cost",
+        change: (value) => {
+          value.attempts[0].cost.amount += 0.001;
+        },
+      },
+      {
+        label: "status",
+        change: (value) => {
+          const attempt = value.attempts[0] as unknown as {
+            status: "success" | "failure";
+            finishReason: string | null;
+            failureCategory: string | null;
+          };
+          attempt.status = "failure";
+          attempt.finishReason = null;
+          attempt.failureCategory = "provider-error";
+          value.terminalOutputId = null as unknown as typeof value.terminalOutputId;
+        },
+      },
+      {
+        label: "terminal output identity",
+        change: (value) => {
+          value.terminalOutputId.value = "2".repeat(64);
+        },
+      },
+      {
+        label: "collector version",
+        change: (value) => {
+          value.collectorVersion = "collector-2.0.1";
+        },
+      },
+    ];
+
+    for (const testCase of finalObservationMutations) {
+      const changed = mutate(trace, testCase.change);
+      expect(
+        changed.dispatchIntent.signature,
+        `${testCase.label} must leave pre-dispatch authorization unchanged`,
+      ).toBe(originalDispatchSignature);
+      expect(
+        () => verifyTraceDispatchIntent(changed, protocol),
+        testCase.label,
+      ).toThrow(/invalid collector-attestation signature/i);
+    }
+
+    const alternateCollector = generateKeyPairSync("ed25519");
+    const wrongKey = mutate(trace, () => undefined);
+    signCollectorAttestation(wrongKey, alternateCollector.privateKey);
+    expect(() => verifyTraceDispatchIntent(wrongKey, protocol))
+      .toThrow(/invalid collector-attestation signature/i);
+
+    const wrongAuthority = mutate(trace, (value) => {
+      value.collectorAttestation.authorityKeyId = "other-collector-authority";
+    });
+    signCollectorAttestation(wrongAuthority);
+    expect(() => verifyTraceDispatchIntent(wrongAuthority, protocol))
+      .toThrow(/collector attestation.*authority|authority.*collector attestation/i);
+
+    for (const collectedAt of [
+      "2026-07-21T00:00:00.499Z",
+      protocol.expiresAt,
+    ]) {
+      const wrongTime = mutate(trace, (value) => {
+        value.collectorAttestation.collectedAt = collectedAt;
+      });
+      signCollectorAttestation(
+        wrongTime,
+        undefined,
+        { preserveCollectedAt: true },
+      );
+      expect(() => verifyTraceDispatchIntent(wrongTime, protocol))
+        .toThrow(/final-observation interval/i);
+    }
+  });
+
+  it("binds raw-free shadow collection provenance into dispatch authorization", () => {
+    const protocol = validProtocolInput();
+    const trace = mutate(validTraceInput(), (value: any) => {
+      value.split = "online";
+      value.collectionWindowId = "shadow-window-1";
+      value.collectionWindowMembershipDigest = digest("a");
+      value.sourceMode = "shadow";
+      value.collectionBinding = validCollectionBinding();
+    });
+    signDispatchIntent(trace);
+    expect(() => verifyTraceDispatchIntent(trace, protocol)).not.toThrow();
+
+    const changedRoute = mutate(trace, (value: any) => {
+      value.collectionBinding!.route = "responses";
+    });
+    expect(changedRoute.dispatchIntent.signature)
+      .toBe(trace.dispatchIntent.signature);
+    expect(() => verifyTraceDispatchIntent(changedRoute, protocol))
+      .toThrow(/invalid dispatch-intent signature/i);
+
+    const missingBinding = mutate(trace, (value: any) => {
+      value.collectionBinding = null;
+    });
+    signDispatchIntent(missingBinding);
+    expect(() => parseTraceEnvelope(missingBinding, TEST_WORK_BUDGET))
+      .toThrow(/shadow traces require.*collection binding/i);
+    expect(() => verifyTraceDispatchIntent(missingBinding, protocol))
+      .toThrow(/dispatch-intent trace is invalid/i);
+
+    const nonShadowBinding = mutate(trace, (value: any) => {
+      value.sourceMode = "observed";
+    });
+    signDispatchIntent(nonShadowBinding);
+    expect(() => parseTraceEnvelope(nonShadowBinding, TEST_WORK_BUDGET))
+      .toThrow(/non-shadow traces cannot claim.*collection binding/i);
+    expect(() => verifyTraceDispatchIntent(nonShadowBinding, protocol))
+      .toThrow(/dispatch-intent trace is invalid/i);
+
+    const duplicateReceipts = mutate(trace, (value: any) => {
+      value.collectionBinding!.capabilityReceiptDigests = [
+        digest("5"),
+        digest("5"),
+      ];
+    });
+    expect(() => parseTraceEnvelope(duplicateReceipts, TEST_WORK_BUDGET))
+      .toThrow(/duplicate capability receipt digest/i);
+
+    const unsortedReceipts = mutate(trace, (value: any) => {
+      value.collectionBinding!.capabilityReceiptDigests = [
+        digest("6"),
+        digest("5"),
+      ];
+    });
+    expect(() => parseTraceEnvelope(unsortedReceipts, TEST_WORK_BUDGET))
+      .toThrow(/sorted canonically/i);
+  });
+
+  it("enforces canonical required trace capabilities after dispatch authentication", () => {
+    const protocol = validProtocolInput();
+    const mutations: Array<{
+      readonly mutateTrace: (trace: ReturnType<typeof validTraceInput>) => void;
+      readonly expected: RegExp;
+    }> = [
+      {
+        mutateTrace: (trace) => {
+          trace.workload.mode = "completion";
+        },
+        expected: /required chat-completions capability/i,
+      },
+      {
+        mutateTrace: (trace) => {
+          const payloads = trace.attempts[0].payloads as unknown as {
+            eventStream: unknown | null;
+          };
+          payloads.eventStream = null;
+        },
+        expected: /required streaming capability/i,
+      },
+      {
+        mutateTrace: (trace) => {
+          const usage = trace.attempts[0].tokenUsage as unknown as {
+            total: unknown | null;
+          };
+          usage.total = null;
+        },
+        expected: /required final-usage capability/i,
+      },
+    ];
+
+    for (const testCase of mutations) {
+      const trace = mutate(validTraceInput(), testCase.mutateTrace);
+      signDispatchIntent(trace);
+      expect(() => verifyTraceDispatchIntent(trace, protocol))
+        .toThrow(testCase.expected);
+    }
+
+    const wrongShadowRoute = mutate(validTraceInput(), (trace: any) => {
+      trace.split = "online";
+      trace.collectionWindowId = "shadow-window-1";
+      trace.collectionWindowMembershipDigest = digest("a");
+      trace.sourceMode = "shadow";
+      trace.collectionBinding = {
+        ...validCollectionBinding(),
+        route: "completions",
+      };
+    });
+    signDispatchIntent(wrongShadowRoute);
+    expect(() => verifyTraceDispatchIntent(wrongShadowRoute, protocol))
+      .toThrow(/required chat-completions capability/i);
+
+    const unknownRequirement = validProtocolInput() as unknown as {
+      requiredCapabilities: string[];
+    };
+    unknownRequirement.requiredCapabilities = ["judge-model"];
+    expect(() => verifyTraceDispatchIntent(
+      validTraceInput(),
+      unknownRequirement,
+    )).toThrow(/protocol is invalid/i);
   });
 
   it("rejects accessor and proxy dispatch inputs without reflecting or reading them", () => {
@@ -589,6 +861,7 @@ describe("evidence v2 contracts", () => {
       createdAt: protocol.createdAt,
       expiresAt: protocol.expiresAt,
       dispatchAuthority: protocol.dispatchAuthority,
+      collectorAuthority: protocol.collectorAuthority,
       splitMembership: protocol.splitMembership,
       onlineWindowMembership: protocol.onlineWindowMembership,
       championProfileId: protocol.championProfileId,
@@ -617,6 +890,26 @@ describe("evidence v2 contracts", () => {
       }),
       TEST_WORK_BUDGET,
     )).toThrow(/dispatch authority.*Ed25519 SPKI/i);
+    expect(() => parseExperimentProtocol(
+      mutate(validProtocolInput(), (protocol) => {
+        protocol.collectorAuthority.publicKeySpki = "bm90LWEtc3BraQ";
+      }),
+      TEST_WORK_BUDGET,
+    )).toThrow(/collector authority.*Ed25519 SPKI/i);
+    expect(() => parseExperimentProtocol(
+      mutate(validProtocolInput(), (protocol) => {
+        protocol.collectorAuthority.keyId =
+          protocol.dispatchAuthority.keyId;
+      }),
+      TEST_WORK_BUDGET,
+    )).toThrow(/collector authority.*distinct.*dispatch authority/i);
+    expect(() => parseExperimentProtocol(
+      mutate(validProtocolInput(), (protocol) => {
+        protocol.collectorAuthority.publicKeySpki =
+          protocol.dispatchAuthority.publicKeySpki;
+      }),
+      TEST_WORK_BUDGET,
+    )).toThrow(/collector authority.*distinct.*dispatch authority/i);
     expect(() => parseExperimentProtocol(
       mutate(validProtocolInput(), (protocol) => {
         protocol.profiles[1].id = "champion";

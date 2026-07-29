@@ -44,6 +44,8 @@ const REQUIRED_PACKAGE_FILES = Object.freeze([
   "dist/cli.js",
   "dist/index.d.ts",
   "dist/index.js",
+  "dist/runtime/index.d.ts",
+  "dist/runtime/index.js",
   "package.json",
 ]);
 const ALLOWED_PACKAGE_ROOTS = new Set([
@@ -497,6 +499,7 @@ async function validateInstalledPackage(
   consumerDirectory,
   version,
   environment,
+  typescriptCliPath,
 ) {
   const installedRoot = join(
     consumerDirectory,
@@ -516,14 +519,34 @@ async function validateInstalledPackage(
     || installedMetadata.bin?.tasc !== "./dist/cli.js"
     || installedMetadata.exports?.["."]?.import !== "./dist/index.js"
     || installedMetadata.exports?.["."]?.types !== "./dist/index.d.ts"
+    || installedMetadata.exports?.["./runtime"]?.import
+      !== "./dist/runtime/index.js"
+    || installedMetadata.exports?.["./runtime"]?.types
+      !== "./dist/runtime/index.d.ts"
   ) {
     fail("installed package metadata is not the deliberate public surface");
   }
 
   const importCheck = [
     `const value = await import(${JSON.stringify(PACKAGE_NAME)});`,
+    `const runtime = await import(${
+      JSON.stringify(`${PACKAGE_NAME}/runtime`)
+    });`,
     "if (typeof value.parseInferenceSpec !== 'function') {",
     "  throw new Error('root export is unavailable');",
+    "}",
+    "for (const name of ['buildShadowRunPlan', 'parseShadowRunPlan', 'verifyTraceDispatchAuthorization']) {",
+    "  if (typeof value[name] !== 'function') {",
+    "    throw new Error(`root control-plane export ${name} is unavailable`);",
+    "  }",
+    "}",
+    "for (const name of ['invokeRuntime', 'runShadowCollection']) {",
+    "  if (typeof runtime[name] !== 'function') {",
+    "    throw new Error(`runtime effect export ${name} is unavailable`);",
+    "  }",
+    "}",
+    "if ('invokeRuntime' in value || 'runShadowCollection' in value) {",
+    "  throw new Error('runtime effects leaked through the root export');",
     "}",
     "process.stdout.write('import-ok\\n');",
   ].join("\n");
@@ -535,6 +558,59 @@ async function validateInstalledPackage(
   if (imported.stdout.toString("utf8") !== "import-ok\n") {
     fail("consumer import returned unexpected output");
   }
+
+  const typeConsumerPath = join(consumerDirectory, "consumer.ts");
+  await writeFile(
+    typeConsumerPath,
+    [
+      `import {`,
+      `  buildShadowRunPlan,`,
+      `  parseShadowRunPlan,`,
+      `  verifyTraceDispatchAuthorization,`,
+      `  type BuildShadowRunPlanInput,`,
+      `  type ShadowRunPlan,`,
+      `} from ${JSON.stringify(PACKAGE_NAME)};`,
+      `import {`,
+      `  runShadowCollection,`,
+      `  type CollectorAttestationSigner,`,
+      `  type DispatchIntentSigner,`,
+      `  type ShadowRunInput,`,
+      `  type ShadowRunResult,`,
+      `} from ${JSON.stringify(`${PACKAGE_NAME}/runtime`)};`,
+      `void buildShadowRunPlan;`,
+      `void parseShadowRunPlan;`,
+      `void verifyTraceDispatchAuthorization;`,
+      `void runShadowCollection;`,
+      `type InstalledSurface = [`,
+      `  BuildShadowRunPlanInput,`,
+      `  ShadowRunPlan,`,
+      `  CollectorAttestationSigner,`,
+      `  DispatchIntentSigner,`,
+      `  ShadowRunInput,`,
+      `  ShadowRunResult,`,
+      `];`,
+      `const installedSurfaceCount: InstalledSurface["length"] = 6;`,
+      `void installedSurfaceCount;`,
+      ``,
+    ].join("\n"),
+    { encoding: "utf8", flag: "wx", mode: 0o600 },
+  );
+  await runCommand(
+    process.execPath,
+    [
+      typescriptCliPath,
+      "--noEmit",
+      "--strict",
+      "--target",
+      "ES2022",
+      "--module",
+      "NodeNext",
+      "--moduleResolution",
+      "NodeNext",
+      typeConsumerPath,
+    ],
+    { cwd: consumerDirectory, environment },
+  );
 
   const executable = join(
     consumerDirectory,
@@ -702,6 +778,7 @@ async function main() {
       consumerDirectory,
       sourceMetadata.version,
       environment,
+      join(sourceDirectory, "node_modules", "typescript", "bin", "tsc"),
     );
 
     process.stdout.write(
