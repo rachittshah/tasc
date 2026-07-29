@@ -565,6 +565,10 @@ export const traceEnvelopeSchema = traceEnvelopeBodySchema.extend({
   collectorAttestation: collectorAttestationSchema,
 }).strict();
 
+const TRACE_ENVELOPE_KEYS: ReadonlySet<string> = new Set(
+  Object.keys(traceEnvelopeSchema.shape),
+);
+
 type MutableTraceEnvelope = z.infer<typeof traceEnvelopeSchema>;
 export type TraceEnvelope = DeepReadonly<MutableTraceEnvelope>;
 
@@ -631,6 +635,13 @@ export function collectorAttestationSigningBytes(input: unknown): Buffer {
     throw new Error("collector attestation signing input must be a trace object");
   }
   const trace = snapshot as Record<string, unknown>;
+  for (const key of Reflect.ownKeys(trace)) {
+    if (typeof key !== "string" || !TRACE_ENVELOPE_KEYS.has(key)) {
+      throw new Error(
+        "collector attestation signing input has an unexpected field",
+      );
+    }
+  }
   const binding = trace.collectorAttestation;
   if (binding === null || typeof binding !== "object") {
     throw new Error("trace collector attestation must be an object");
