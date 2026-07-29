@@ -1454,7 +1454,6 @@ export async function withBoundedHttpResponse<T>(
     assertIdentityEncoding(response.headers, timing);
     assertContentLength(response.headers, limits, timing);
     const parsedContentType = parseContentType(response.headers, timing);
-    resetBodyTimer();
 
     let bodyTaken = false;
     const boundedBody: AsyncIterable<Uint8Array> = Object.freeze({
@@ -1473,6 +1472,7 @@ export async function withBoundedHttpResponse<T>(
         }
         bodyTaken = true;
         try {
+          resetBodyTimer();
           for await (const chunk of response.body) {
             if (chunk.byteLength === 0) {
               resetBodyTimer();

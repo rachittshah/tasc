@@ -798,6 +798,25 @@ describe("bounded runtime HTTP lifecycle", () => {
     });
 
     await withLoopbackServer((_request, response) => {
+      response.end("available-before-consumer-read");
+    }, async (server) => {
+      const value = await withBoundedHttpResponse(
+        await mintPin({ origin: server.origin }),
+        {
+          limits: {
+            bodyTimeoutMs: 25,
+            deadlineMs: 500,
+          },
+        },
+        async (response) => {
+          await new Promise((resolve) => setTimeout(resolve, 75));
+          return readBody(response);
+        },
+      );
+      expect(value.value).toBe("available-before-consumer-read");
+    });
+
+    await withLoopbackServer((_request, response) => {
       response.end("must not be contacted");
     }, async (server) => {
       const error = await captureWireError(
