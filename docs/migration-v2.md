@@ -33,10 +33,10 @@ a fresh v2 study for a v2 decision.
 
 | Legacy v1 | V2 replacement | Important difference |
 | --- | --- | --- |
-| `tasc-inference-spec-v1` | `tasc-experiment-protocol-v2` | Profiles, candidate policies, gates, evaluator requirements, split rules, work limits, and dispatch authority are normalized and fingerprinted. |
-| `tasc-measurements-v1` case/observation | `tasc-trace-envelope-v2` | Inference lifecycle, attempts, route signal, timing, usage, dispatch signature, and keyed request/response identities are explicit; no score is embedded. |
+| `tasc-inference-spec-v1` | `tasc-experiment-protocol-v2` | Profiles, candidate policies, gates, evaluator requirements, split rules, work limits, and distinct dispatch/collector authorities are normalized and fingerprinted. |
+| `tasc-measurements-v1` case/observation | `tasc-trace-envelope-v2` | Inference lifecycle, attempts, route signal, timing, usage, pre-dispatch authorization, final collector attestation, collection provenance, and keyed request/response identities are explicit; no score is embedded. |
 | inline evaluator metadata and task score | `tasc-evaluator-evidence-v2` | Score is independently signed, time-bound, revocable, and joined to the trace by explicit identities. |
-| optional `TASC_ATTESTATION_KEY` nomination HMAC | protocol dispatch authority plus evaluator trust snapshot | Separate authorities cover inference dispatch and evaluator evidence. Public digests remain non-secret identities. |
+| optional `TASC_ATTESTATION_KEY` nomination HMAC | protocol dispatch/collector authorities plus evaluator trust snapshot | Separate authorities cover pre-call dispatch, final operational observation, and evaluator evidence. Public digests remain non-secret identities. |
 | implicit invocation context | `tasc-assessment-context-v2` | Assessment time, trust-policy digest, revocation digest, and controller lineage are frozen. |
 | development/holdout file label | protocol split membership and joined dataset | Group disjointness and completeness are checked at the join/assessment boundary. |
 | no online-window contract | `tasc-window-manifest-v2` | Event range, watermark, source, membership, policy, and protocol are sealed before window assessment. |
@@ -84,7 +84,30 @@ Declare:
 Changing one of these after seeing holdout results is a new protocol, not a
 migration correction.
 
-### 3. Reconstruct inference traces without inventing fields
+### 3. Prepare P0 collection authority for fresh traces
+
+When migration requires new inference calls, first advance the replayed
+controller to `SHADOW_ASSESSING` and build one self-contained
+`tasc-shadow-run-plan-v1` from its exact snapshot, selected policy, protocol,
+window, endpoint/profile bindings, and aggregate work budget. Pin the expected
+plan digest at the operator job boundary. Pin each nullable non-secret
+authentication reference in the corresponding P0 collection target; changing
+that reference creates new collection authority and trace lineage.
+
+Prepare the matching v2 shadow target configuration and collector trust policy.
+Keep the per-study payload HMAC, dispatch private key, collector-attestation
+private key, and provider credential in separate environment references; the
+dispatch and collector Ed25519 authorities must be distinct. P1 accepts the plan
+and those exact runtime bindings—it does not accept loose policy, membership,
+protocol, or work-budget overrides. The same per-study HMAC key must remain
+available for crash resume because it also authenticates the local shadow
+journal; an old unauthenticated journal is intentionally not accepted.
+
+Historical traces do not acquire this authority retroactively. If the original
+call lacks authentic dispatch or collector provenance, collect it again under a
+new plan.
+
+### 4. Reconstruct inference traces without inventing fields
 
 A v1 observation can be exported as a v2 trace only when the original raw
 record establishes every required field. Preserve failure attempts. Leave
@@ -99,12 +122,14 @@ Do not:
 - join aggregate benchmark accuracy to unrelated request traces;
 - fabricate model/tokenizer revisions or configuration digests; or
 - create dispatch signatures for historical calls that were never authorized
-  under the v2 protocol.
+  under the v2 protocol; or
+- create collector attestations for operational outcomes that were not observed
+  by the registered collector.
 
 If historical dispatch provenance is insufficient, collect fresh paired traces.
 The resumable shadow runner is designed for that job.
 
-### 4. Produce evaluator evidence separately
+### 5. Produce evaluator evidence separately
 
 Use a frozen deterministic evaluator or externally validated human/model
 evaluator. Emit one signed evidence contract for the trace/output identity with
@@ -113,14 +138,14 @@ the declared task, score, evaluator version, production time, and trusted key.
 TASC verifies and joins evidence; it does not call a judge model or generate
 replacement grades. Missing or untrusted evidence remains missing.
 
-### 5. Freeze trust and assessment context
+### 6. Freeze trust and assessment context
 
 Create an operator snapshot containing trusted evaluator keys, validity
 windows, allowed tasks/evaluators, and revocations. Bind its digests and the
 assessment time into the v2 assessment context. Review clock skew and
 revocations before every assessment.
 
-### 6. Validate before assessing
+### 7. Validate before assessing
 
 The CLI requires an explicit work budget:
 
@@ -139,7 +164,7 @@ Contract-only trace validation does not prove protocol admission. The
 assessment join performs protocol, split, lineage, completeness, and evaluator
 trust checks.
 
-### 7. Re-run development selection
+### 8. Re-run development selection
 
 ```bash
 tasc assess development \
@@ -155,7 +180,7 @@ tasc assess development \
 The output directory must not exist. Preserve the complete immutable packet,
 including rejected candidates and limitations.
 
-### 8. Confirm the exact nomination
+### 9. Confirm the exact nomination
 
 Use group-disjoint, previously sealed holdout data. V2 confirmation revalidates
 the persisted development nomination against the development dataset and
@@ -180,7 +205,7 @@ tasc assess holdout \
 Do not search holdout for a replacement policy. A failed or stale nomination is
 a result, not permission to retune.
 
-### 9. Use sealed windows for shadow-online grading
+### 10. Use sealed windows for shadow-online grading
 
 Live collection and online assessment are separate. Collect raw-free inference
 traces under a protocol and work budget, obtain external evaluator evidence,
@@ -208,6 +233,8 @@ not promote the policy.
 - [ ] Original v1 artifacts are immutable and retained.
 - [ ] V2 protocol was declared before holdout/window evidence was inspected.
 - [ ] Every execution profile and runtime configuration is pinned.
+- [ ] Fresh collection uses a pinned P0 plan, exact target bindings, and
+      distinct dispatch/collector authorities.
 - [ ] Historical fields were migrated only when supported by raw evidence.
 - [ ] Fresh paired traces were collected where v1 provenance was insufficient.
 - [ ] Failures and `sent_unknown` attempts remain visible.
@@ -218,6 +245,28 @@ not promote the policy.
 - [ ] Work budgets and provider quotas cap maximum cost.
 - [ ] Artifact durability and manifest verification are acceptable.
 - [ ] Reviewers understand that every packet has `NO_DEPLOYMENT_AUTHORITY`.
+
+## Correcting pre-release orchestration descriptors
+
+An unreleased v2 development draft used `locator.serviceName` for both plain
+SkyPilot and SkyServe descriptors. That shape did not match SkyPilot's own
+identity model: a plain `sky launch` target is identified by a cluster name,
+while `sky serve up` creates a named SkyServe service.
+
+Do not rename the field inside an already fingerprinted descriptor. Recreate
+the operator-owned descriptor from authoritative deployment metadata:
+
+- `kind: "skypilot"` requires `locator.clusterName`;
+- `kind: "skyserve"` requires `locator.serviceName`; and
+- Ray Serve continues to require both `locator.applicationName` and
+  `locator.deploymentName`.
+
+The parser rejects the ambiguous draft
+`{ "kind": "skypilot", "locator": { "serviceName": "..." } }` rather than
+silently interpreting that value as a cluster. Recompute the endpoint
+descriptor fingerprint and every operator-controlled binding that legitimately
+depends on it, then collect fresh evidence under the corrected identity. Never
+rewrite an accepted trace or signed historical record.
 
 ## Compatibility policy
 
@@ -232,4 +281,3 @@ They will not acquire v2 production semantics. New protocol, evidence, runtime,
 shadow, controller, and assessment work belongs in versioned v2 contracts. A
 future breaking contract will use a new explicit version rather than silently
 changing v1 or v2 interpretation.
-

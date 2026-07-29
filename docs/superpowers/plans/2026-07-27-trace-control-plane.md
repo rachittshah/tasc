@@ -34,6 +34,14 @@ primitives, Python `unittest` for the optional MLX runner, GitHub Actions.
   identities, calibration provenance, and lifecycle.
 - P0 is the out-of-band controller. Network model calls are optional P1 and
   MUST NOT infect the deterministic core.
+- Paired P1 collection MUST consume one self-contained P0 run plan binding the
+  controller snapshot, frozen policy, window membership, endpoint targets,
+  validity, and aggregate work budget. Loose caller-authored policy/window
+  digests are not authority.
+- Pre-dispatch and final operational facts MUST use distinct Ed25519 dispatch
+  and collector authorities. Accepted traces require both signatures.
+- Automatic conditional-capability canaries MUST NOT escape shadow admission;
+  conditional observations remain explicit standalone probe effects.
 - Tasks 1–9 form a complete, green P0 commit boundary before Task 10 starts P1.
   P1 is layered onto the same requested draft PR without leaving P0 dependent on
   runtime code.

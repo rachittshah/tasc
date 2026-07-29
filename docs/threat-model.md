@@ -17,8 +17,9 @@ authority or adapter to change production traffic.
    mutation.
 2. Raw prompts, outputs, credentials, signing keys, and payload-identity keys do
    not enter durable controller or assessment artifacts.
-3. A partial, ambiguous, stale, untrusted, synthetic, or incomplete observation
-   cannot be silently promoted to successful evidence.
+3. A partial, ambiguous, stale, untrusted, or incomplete observation cannot be
+   silently promoted to successful evidence. V2 cannot infer whether authentic
+   operator-supplied evidence is synthetic or representative.
 4. Development selection, holdout confirmation, and sealed online-window
    assessment preserve their declared data and evaluator lineage.
 5. Work is finite before expansion or dispatch, and every parser, transport,
@@ -28,6 +29,8 @@ authority or adapter to change production traffic.
 7. Public digests provide deterministic identity and corruption detection;
    signatures and operator trust policy provide authenticity where claimed.
 8. No status grants deployment authority.
+9. P1 shadow effects require one P0 plan and accepted operational facts require
+   a collector key distinct from the pre-dispatch key.
 
 ## Assets
 
@@ -103,6 +106,8 @@ Controls:
 
 - `CollectorTrustPolicy` authorizes an exact alias, origin, runtime build,
   method, path prefix, duration ceiling, and optional authentication reference;
+- the P0 plan and signed trace `collectionBinding` pin that non-secret
+  reference, while the corresponding credential remains process-local;
 - remote endpoints require HTTPS and public literal/DNS results;
 - local endpoints require an exact literal-loopback origin plus explicit local
   mode;
@@ -189,22 +194,35 @@ Threats:
 - a retry duplicates a billable or stateful inference;
 - two collectors accept the same logical execution;
 - resume loses failures or changes counterbalancing order.
+- P1 changes its local HMAC key to manipulate online-window membership.
 
 Controls:
 
+- a self-contained P0 plan binds controller state, frozen policy, public
+  membership rule, endpoint targets, validity, and every work ceiling;
 - shadow work and every retry are budgeted before contact;
-- stable HMAC-derived trace, replicate, and attempt IDs bind protocol, case,
-  profile, window, and policy lineage;
+- stable public plan-derived replicate IDs make membership reproducible and
+  independent of P1 secrets, while keyed trace/request identities protect
+  payload linkage;
 - profile order is deterministic and counterbalanced;
 - an immutable intent is written before a send lease;
 - the lease is durable before network dispatch;
 - outcome, accepted trace, and completion marker are separate immutable packets;
 - an expired lease with no outcome becomes `sent_unknown` and is never retried;
 - only a result proving `not_sent` can consume a pre-budgeted retry;
-- identical concurrent packet publication deduplicates; conflicting content
-  fails;
-- resume verifies packet manifests and reconstructs state monotonically; and
-- accepted traces are returned once per logical execution.
+- every local journal record except the already collector-signed accepted trace
+  has a distinct-domain per-study HMAC over study, protocol, plan, run, target,
+  kind, schema, authentication metadata, and canonical record body;
+- a random MAC-covered lease claim identifies the process whose immutable claim
+  won, including when another actor exact-copied its staged bytes;
+- identical concurrent publication deduplicates; a different
+  correctly-authenticated winner remains authoritative for conservative
+  `sent_unknown` races, while unauthenticated content fails closed;
+- resume verifies packet manifests and journal authentication before it uses
+  state or invokes the collector signer, then reconstructs state monotonically;
+- accepted traces are returned once per logical execution; and
+- a distinct collector signature covers all attempts, terminal identity,
+  collector version, dispatch signature, and plan/endpoint provenance.
 
 Residual risk: a provider can execute a request without returning a provider
 request ID or supporting idempotency. TASC reports `sent_unknown`; an operator
@@ -262,9 +280,9 @@ Controls:
   policy;
 - controller events and checkpoints replay deterministically;
 - decisions include lineage digests and explicit limitations;
-- synthetic evidence is capped at demonstration status; legacy real v1 fails
-  closed at `HOLD`;
-- every artifact declares `NO_DEPLOYMENT_AUTHORITY`; and
+- legacy synthetic evidence is capped at `DEMO_ONLY`, while v2 relies on
+  operator trust and custody to keep synthetic fixtures out of real studies;
+- every artifact-packet manifest declares `NO_DEPLOYMENT_AUTHORITY`; and
 - there is no deployment adapter in the repository.
 
 ### Artifact tampering and filesystem races
@@ -290,13 +308,18 @@ Controls:
   packet digest;
 - immutable `write-or-verify-identical` supports crash recovery without mutable
   checkpoints;
+- resume-authoritative journal bodies are HMAC-authenticated independently of
+  their public packet hashes;
 - platforms that cannot prove full durability report a degraded level; and
 - signatures/HMACs are used for authenticity claims; public SHA-256 digests are
   only identity and corruption checks.
 
 Residual risk: some network filesystems do not honor local atomicity and fsync
-semantics. Use a supported local filesystem or an external transactional object
-store adapter with equivalent, independently reviewed guarantees.
+semantics. A hostile same-UID actor can still delete records, squat on target
+names, or cause denial of service, and a process that can read the service's
+environment may also obtain its keys. Use a protected cooperative `0700` root
+on a supported local filesystem, or an external transactional object-store
+adapter with equivalent, independently reviewed guarantees.
 
 ### Denial of service and cost amplification
 
@@ -358,7 +381,7 @@ protection outside this repository.
 
 | Category | Representative risk | Primary controls |
 | --- | --- | --- |
-| Spoofing | fake evaluator/runtime identity | operator key policy, signatures, endpoint binding, explicit identity-verification basis |
+| Spoofing | fake evaluator/runtime/collector identity or substituted plan | distinct operator key roles, signatures, endpoint binding, pinned plan digest/operator custody, explicit identity-verification basis |
 | Tampering | edited traces, controller state, or artifact packet | canonical digests, signatures, immutable packets, custody verification |
 | Repudiation | uncertain whether a live call was sent | intent/lease/outcome journal and explicit `sent_unknown` |
 | Information disclosure | prompt, output, token, path, provider body | HMAC identities, ephemeral secret factories, allowlisted persistence/diagnostics |
@@ -377,14 +400,16 @@ Before a real study:
    launch configuration, and orchestration descriptor.
 4. Set provider quotas and a TASC work budget that reflects acceptable maximum
    spend.
-5. Validate evaluator calibration and revocation state independently.
-6. Seal group-disjoint development/holdout or online-window membership.
-7. Run passive probes before inference-canary probes and review identity fields
+5. Issue and pin the P0 shadow plan only after the controller reaches
+   `SHADOW_ASSESSING`; keep dispatch and collector keys distinct.
+6. Validate evaluator calibration and revocation state independently.
+7. Seal group-disjoint development/holdout or online-window membership.
+8. Run passive probes before inference-canary probes and review identity fields
    that remain unverified.
-8. Store artifacts on a filesystem with understood atomicity/fsync behavior.
-9. Treat `sent_unknown`, missing usage, partial traces, degraded durability, and
+9. Store artifacts on a filesystem with understood atomicity/fsync behavior.
+10. Treat `sent_unknown`, missing usage, partial traces, degraded durability, and
    missing evidence as blockers requiring reconciliation.
-10. Review the final packet manually; do not wire TASC status directly to a
+11. Review the final packet manually; do not wire TASC status directly to a
     deploy or routing system.
 
 ## Reporting
@@ -392,4 +417,3 @@ Before a real study:
 Follow [`SECURITY.md`](../SECURITY.md). Do not include real prompts, model
 outputs, credentials, signing keys, private endpoint names, or customer traces
 in a public issue or pull request.
-

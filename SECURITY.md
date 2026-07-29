@@ -55,8 +55,9 @@ in protocol, trace, endpoint, case, work-budget, artifact, or CLI argument JSON.
 This includes:
 
 - provider authorization values;
-- per-study HMAC payload-identity keys;
+- per-study HMAC payload-identity and resume-journal keys;
 - Ed25519 dispatch private keys;
+- Ed25519 collector-attestation private keys;
 - evaluator private keys; and
 - the legacy `TASC_ATTESTATION_KEY`.
 
@@ -65,10 +66,10 @@ artifacts, logs, issues, pull requests, or diagnostic output. Use separate keys
 per authority and study, rotate them through the external secret manager, and
 review evaluator revocations before assessment.
 
-The legacy HMAC authenticates nomination continuity only. V2 dispatch and
-evaluator signatures authenticate their exact canonical contracts only.
-Neither proves that a benchmark is honest, an evaluator is calibrated, a
-holdout remained sealed, or a rollout is safe.
+The legacy HMAC authenticates nomination continuity only. V2 dispatch,
+collector-attestation, and evaluator signatures authenticate their respective
+exact canonical contracts only. Neither proves that a benchmark is honest, an
+evaluator is calibrated, a holdout remained sealed, or a rollout is safe.
 
 ## Live endpoint policy
 
@@ -93,8 +94,11 @@ TensorRT, vLLM, or other deployment.
 
 Write real artifacts to a trusted, access-controlled root on a filesystem whose
 atomic rename and fsync behavior you understand. TASC refuses existing targets,
-symlinks, custody drift, conflicting resume packets, and manifest mismatch.
-Review any reported degraded durability before accepting a packet.
+symlinks, custody drift, unauthenticated resume packets, and manifest mismatch.
+An authenticated immutable winner can conservatively supersede a competing
+outcome (for example, `sent_unknown` beating a late response). Create shadow
+roots with mode `0700`, retain the same per-study HMAC key for resume, and
+review any reported degraded durability before accepting a packet.
 
 Public SHA-256 digests are deterministic identities and corruption checks.
 Anyone who can edit an artifact can recompute them. Do not treat a public digest
@@ -113,8 +117,10 @@ as authenticity.
 ## Production boundary
 
 TASC is an out-of-band evidence controller. It has no deployment adapter and no
-synchronous production-routing function. Every v2 artifact explicitly carries
-`NO_DEPLOYMENT_AUTHORITY`; legacy real v1 remains capped at `HOLD`.
+synchronous production-routing function. Every v2 CLI result and
+artifact-packet manifest explicitly carries `NO_DEPLOYMENT_AUTHORITY`; legacy
+real v1 remains capped at `HOLD`. Other contracts carry only the authority
+defined by their type and never gain deployment authority from a status value.
 
 `NOMINATED` or `PASS` means the declared evidence passed the declared
 assessment phase. A human must independently review evidence truth,

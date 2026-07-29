@@ -29,6 +29,24 @@ The first production-shaped release has two priorities:
 This ordering keeps the decision engine useful for traces collected by any
 system and prevents network clients from becoming the product's center.
 
+### 1.1 Final P0/P1 authority closure
+
+The implemented release sharpens that boundary:
+
+- P0 emits one content-addressed `tasc-shadow-run-plan-v1` only from a
+  `SHADOW_ASSESSING` controller snapshot. The plan embeds the exact protocol,
+  frozen policy, deterministic window membership, endpoint/profile bindings,
+  validity, and aggregate work budget.
+- P1 consumes that plan and excludes nonmembers before effects. It cannot
+  replace policy/window digests or silently run a conditional-capability
+  canary.
+- The protocol carries distinct Ed25519 dispatch and collector authorities.
+  Dispatch authenticates the pre-call routing intent; collector attestation
+  authenticates the complete raw-free final observation and collection
+  provenance.
+- The plan digest is integrity, not origin attestation. Operator custody and a
+  pinned expected digest remain the authority for the P0 artifact.
+
 ## 2. Goals
 
 TASC must:
@@ -413,10 +431,12 @@ Each runtime has a separate profile rather than one misleading generic adapter:
 - MLX-LM as experimental/local-only.
 
 A capability has state `supported`, `conditional`, `unsupported`, or `unknown`,
-plus probe time, evidence source, runtime build, model revision, backend, and
-configuration digest. Startup probes independently cover transport liveness,
-model readiness, model discovery, streaming framing, final usage, log
-probabilities, structured output, cancellation, and metrics.
+plus evidence source and its exact runtime/model/backend/configuration scope.
+Live probes cover registered health, discovery, metrics, and explicit
+non-streaming route-canary observations. Streaming framing, terminal usage,
+log probabilities, structured output, and cancellation are established only by
+the corresponding bounded invocation contract tests or separately scoped live
+evidence; a route canary does not prove those dimensions.
 
 Ray Serve and SkyPilot/SkyServe are declarative orchestration descriptors. The
 underlying runtime profile still owns the wire contract. P1 will not load
@@ -431,6 +451,8 @@ The shadow runner:
   response/event-size limits;
 - records durable dispatch intent before sending and preserves
   `not_sent | sent_unknown | completed`;
+- binds the P0-selected non-secret authentication reference into the plan and
+  signed trace, and HMAC-authenticates resume-authoritative journal records;
 - retries only an explicitly retry-safe runtime outcome; ambiguous requests are
   retained and fail coverage rather than being assumed deduplicated;
 - aborts outstanding requests on cancellation;
@@ -487,10 +509,13 @@ tasc assess holdout --protocol ... --traces ... --evidence ... --context ... --n
 tasc assess window --protocol ... --traces ... --evidence ... --context ... --policy ... --window ... --out ...
 tasc experiment next --assessment ... --history ... --out ...
 tasc runtime probe --endpoint ... --runtime ...
-tasc shadow run --protocol ... --cases ... --out ...
+tasc shadow run --plan ... --plan-digest <operator-pinned-sha256> --cases ... --profiles ... --trust ... --identity ... --out ...
 tasc --help
 tasc --version
 ```
+
+`--plan-digest` is an independently custodied P0 approval value. P1 must not
+derive or copy it from the plan it is being asked to execute.
 
 Commands return structured JSON on stdout, diagnostics on stderr, and documented
 exit codes. The public library exposes intentional entry points instead of
