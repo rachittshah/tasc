@@ -35,6 +35,7 @@ const SKY_INPUT_KEYS = new Set([
   "skyPilotBuild",
   "configurationDigest",
   "mode",
+  "clusterName",
   "serviceName",
   "authenticationReference",
 ]);
@@ -127,7 +128,7 @@ function parseDigest(value: unknown): string {
 function parseLocator(value: unknown, label: string): string {
   const locator = boundedString(value, label, 128);
   if (!LOCATOR_PATTERN.test(locator)) {
-    throw new Error(`${label} must be an opaque service identifier`);
+    throw new Error(`${label} must be an opaque orchestration identifier`);
   }
   return locator;
 }
@@ -262,17 +263,38 @@ function descriptorOrchestration(
         : { authenticationReference }),
     };
   }
+  if (base.kind === "skypilot") {
+    const locator = snapshotRecord(
+      base.locator,
+      "SkyPilot locator",
+      new Set(["clusterName"]),
+    );
+    return {
+      kind: "skypilot",
+      build,
+      configurationDigest,
+      locator: {
+        clusterName: parseLocator(
+          locator.clusterName,
+          "SkyPilot cluster name",
+        ),
+      },
+      ...(authenticationReference === undefined
+        ? {}
+        : { authenticationReference }),
+    };
+  }
   const locator = snapshotRecord(
     base.locator,
-    "SkyPilot locator",
+    "SkyServe locator",
     new Set(["serviceName"]),
   );
   return {
-    kind: base.kind,
+    kind: "skyserve",
     build,
     configurationDigest,
     locator: {
-      serviceName: parseLocator(locator.serviceName, "SkyPilot service name"),
+      serviceName: parseLocator(locator.serviceName, "SkyServe service name"),
     },
     ...(authenticationReference === undefined
       ? {}
@@ -371,6 +393,16 @@ export function createSkyPilotEndpointDescriptor(
   if (snapshot.mode !== "skypilot" && snapshot.mode !== "skyserve") {
     throw new Error("SkyPilot endpoint has an unknown mode");
   }
+  if (snapshot.mode === "skypilot" && snapshot.serviceName !== undefined) {
+    throw new Error(
+      "SkyPilot endpoint requires clusterName and cannot contain serviceName",
+    );
+  }
+  if (snapshot.mode === "skyserve" && snapshot.clusterName !== undefined) {
+    throw new Error(
+      "SkyServe endpoint requires serviceName and cannot contain clusterName",
+    );
+  }
   const profileId = boundedString(
     snapshot.runtimeProfileId,
     "runtime profile id",
@@ -397,12 +429,19 @@ export function createSkyPilotEndpointDescriptor(
         MAX_BUILD_LENGTH,
       ),
       configurationDigest: parseDigest(snapshot.configurationDigest),
-      locator: {
-        serviceName: parseLocator(
-          snapshot.serviceName,
-          "SkyPilot service name",
-        ),
-      },
+      locator: snapshot.mode === "skypilot"
+        ? {
+          clusterName: parseLocator(
+            snapshot.clusterName,
+            "SkyPilot cluster name",
+          ),
+        }
+        : {
+          serviceName: parseLocator(
+            snapshot.serviceName,
+            "SkyServe service name",
+          ),
+        },
       ...(parseAuthenticationReference(snapshot.authenticationReference)
           === undefined
         ? {}

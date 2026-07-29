@@ -206,16 +206,16 @@ const VLLM_DOCUMENTATION =
 const SGLANG_DOCUMENTATION =
   "https://github.com/sgl-project/sglang/blob/v0.5.16/python/sglang/srt/entrypoints/http_server.py";
 const TRT_DOCUMENTATION =
-  "https://github.com/NVIDIA/TensorRT-LLM/blob/v1.2.1/docs/source/commands/trtllm-serve/index.rst";
+  "https://github.com/NVIDIA/TensorRT-LLM/blob/v1.2.1/tensorrt_llm/serve/openai_server.py";
 const LLAMA_DOCUMENTATION =
   "https://github.com/ggml-org/llama.cpp/blob/b10156/tools/server/README.md";
 const OLLAMA_DOCUMENTATION =
-  "https://github.com/ollama/ollama/blob/v0.32.5/docs/api.md";
+  "https://github.com/ollama/ollama/blob/v0.32.5/server/routes.go";
 const TGI_DOCUMENTATION =
-  "https://huggingface.co/docs/text-generation-inference/en/reference/api_reference";
+  "https://github.com/huggingface/text-generation-inference/blob/v3.3.7/router/src/server.rs";
 const LM_STUDIO_DOCUMENTATION = "https://lmstudio.ai/docs/developer/rest";
 const MLX_DOCUMENTATION =
-  "https://github.com/ml-explore/mlx-lm/blob/v0.31.3/mlx_lm/SERVER.md";
+  "https://github.com/ml-explore/mlx-lm/blob/v0.31.3/mlx_lm/server.py";
 
 const profiles = [
   defineProfile({
@@ -376,6 +376,11 @@ const profiles = [
         url: "https://lmstudio.ai/docs/developer/openai-compat/responses",
         kind: "official-documentation",
       },
+      {
+        title: "LM Studio 0.4.1 API changelog",
+        url: "https://lmstudio.ai/docs/developer/api-changelog",
+        kind: "official-documentation",
+      },
     ),
     capabilitySeeds: {
       chatCompletions: {
@@ -465,8 +470,13 @@ const profiles = [
     },
     documentation: documentation(
       {
-        title: "MLX-LM v0.31.3 HTTP server",
+        title: "MLX-LM v0.31.3 HTTP server source",
         url: MLX_DOCUMENTATION,
+        kind: "official-documentation",
+      },
+      {
+        title: "MLX-LM v0.31.3 server documentation",
+        url: "https://github.com/ml-explore/mlx-lm/blob/v0.31.3/mlx_lm/SERVER.md",
         kind: "official-documentation",
       },
       {
@@ -500,9 +510,8 @@ const profiles = [
         note: "Log probabilities depend on route and model support.",
       },
       structuredOutput: {
-        state: "conditional",
-        model: "conditional",
-        note: "Structured behavior is model dependent.",
+        state: "unsupported",
+        note: "The pinned server does not parse a response_format or grammar contract.",
       },
       tools: {
         state: "conditional",
@@ -579,12 +588,22 @@ const profiles = [
     },
     documentation: documentation(
       {
-        title: "Ollama v0.32.5 API source",
+        title: "Ollama v0.32.5 route source",
         url: OLLAMA_DOCUMENTATION,
         kind: "official-documentation",
       },
       {
-        title: "Ollama OpenAI compatibility",
+        title: "Ollama v0.32.5 native API",
+        url: "https://github.com/ollama/ollama/blob/v0.32.5/docs/api.md",
+        kind: "official-documentation",
+      },
+      {
+        title: "Ollama v0.32.5 OpenAI compatibility",
+        url: "https://github.com/ollama/ollama/blob/v0.32.5/docs/api/openai-compatibility.mdx",
+        kind: "official-documentation",
+      },
+      {
+        title: "Ollama readable OpenAI compatibility guide",
         url: "https://docs.ollama.com/api/openai-compatibility",
         kind: "official-documentation",
       },
@@ -693,7 +712,11 @@ const profiles = [
         info: modelRoute("/model_info", "runtime-model-info"),
       },
       health: {
-        liveness: healthRoute("/health", "liveness"),
+        liveness: healthRoute(
+          "/health",
+          "liveness",
+          "inference-canary",
+        ),
         readiness: healthRoute(
           "/health_generate",
           "readiness",
@@ -769,8 +792,12 @@ const profiles = [
         note: "The pinned server documents model-list and model-info routes.",
       },
       liveness: {
-        state: "supported",
-        note: "The pinned server documents /health.",
+        state: "conditional",
+        configuration: "conditional",
+        requirements: [
+          "treat /health as an inference canary unless launch configuration is independently authenticated",
+        ],
+        note: "SGLANG_ENABLE_HEALTH_ENDPOINT_GENERATION can make /health perform one-token generation.",
       },
       readiness: {
         state: "conditional",
@@ -838,8 +865,13 @@ const profiles = [
     },
     documentation: documentation(
       {
-        title: "TensorRT-LLM trtllm-serve",
+        title: "TensorRT-LLM v1.2.1 OpenAI server source",
         url: TRT_DOCUMENTATION,
+        kind: "official-documentation",
+      },
+      {
+        title: "TensorRT-LLM v1.2.1 trtllm-serve documentation",
+        url: "https://github.com/NVIDIA/TensorRT-LLM/blob/v1.2.1/docs/source/commands/trtllm-serve/trtllm-serve.rst",
         kind: "official-documentation",
       },
       {
@@ -956,8 +988,13 @@ const profiles = [
     },
     documentation: documentation(
       {
-        title: "TGI HTTP API",
+        title: "TGI v3.3.7 route source",
         url: TGI_DOCUMENTATION,
+        kind: "official-documentation",
+      },
+      {
+        title: "TGI readable HTTP API guide",
+        url: "https://huggingface.co/docs/text-generation-inference/en/reference/api_reference",
         kind: "official-documentation",
       },
       {

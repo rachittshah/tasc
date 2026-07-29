@@ -9,6 +9,7 @@ import type { Socket } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createStudyPayloadIdentity } from "../src/references.js";
 import {
+  describeRuntimeInvocation,
   dispatchPreparedRuntimeInvocation,
   invokeRuntime,
   prepareRuntimeInvocation,
@@ -426,6 +427,87 @@ function sseResponse(
   ).join(""));
 }
 
+function lmStudioGeneration(
+  stream: boolean,
+): RuntimeGenerationRequest {
+  return {
+    model: MODEL,
+    stream,
+    n: 1,
+    messages: [{
+      role: "system",
+      content: "Return only the requested evaluation result.",
+    }, {
+      role: "user",
+      content: "private prompt must not persist",
+    }],
+    maxTokens: 32,
+    temperature: 0,
+    topP: 0.9,
+  };
+}
+
+function lmStudioNativeJson(
+  text: string,
+  reasoning = "internal reasoning must not persist",
+): Record<string, unknown> {
+  return {
+    model_instance_id: MODEL.id,
+    output: [{
+      type: "reasoning",
+      content: reasoning,
+    }, {
+      type: "message",
+      content: text,
+    }],
+    stats: {
+      input_tokens: 2,
+      total_output_tokens: 3,
+      reasoning_output_tokens: 1,
+      tokens_per_second: 24.5,
+      time_to_first_token_seconds: 0.125,
+    },
+  };
+}
+
+function lmStudioNativeEvents(
+  text: string,
+  reasoning = "internal reasoning must not persist",
+): Record<string, unknown>[] {
+  const midpoint = Math.ceil(text.length / 2);
+  return [{
+    type: "chat.start",
+    model_instance_id: MODEL.id,
+  }, {
+    type: "prompt_processing.start",
+  }, {
+    type: "prompt_processing.progress",
+    progress: 1,
+  }, {
+    type: "prompt_processing.end",
+  }, {
+    type: "reasoning.start",
+  }, {
+    type: "reasoning.delta",
+    content: reasoning,
+  }, {
+    type: "reasoning.end",
+  }, {
+    type: "message.start",
+  }, {
+    type: "message.delta",
+    content: text.slice(0, midpoint),
+  }, {
+    type: "message.delta",
+    content: text.slice(midpoint),
+  }, {
+    type: "message.end",
+  }, {
+    type: "chat.end",
+    result: lmStudioNativeJson(text, reasoning),
+  }];
+}
+
 describe("runtime invocation foundation", () => {
   it("sends one canonical vLLM completion request and returns raw-free immutable JSON normalization", async () => {
     const server = await startServer((_request, response) => {
@@ -841,6 +923,390 @@ describe("runtime invocation foundation", () => {
         },
       },
     });
+  });
+
+  it("invokes exact LM Studio native v1 JSON and SSE without server-side storage", async () => {
+    let jsonContact = 0;
+    const jsonServer = await startServer((_request, response) => {
+      jsonContact += 1;
+      jsonResponse(
+        response,
+        lmStudioNativeJson(
+          jsonContact === 1 ? "probe" : "json-native",
+        ),
+      );
+    });
+    const jsonRuntime = fixture({
+      server: jsonServer,
+      profileId: "lm-studio",
+      route: "nativeChat",
+      stream: false,
+    });
+    const jsonProbe = await deadline(probeRuntimeCapability({
+      policy: jsonRuntime.policy,
+      endpointAlias: jsonRuntime.invocation.endpointAlias,
+      instance: jsonRuntime.instance,
+      capability: "nativeChat",
+      observationEffect: "inference-canary",
+      totalDeadlineMs: 1_500,
+      authorizationTtlMs: 2_000,
+    }));
+    const jsonOutcome = await deadline(invokeRuntime({
+      ...jsonRuntime.invocation,
+      generation: lmStudioGeneration(false),
+      totalDeadlineMs: 500,
+      capabilityAuthorizations: [jsonProbe.authorization!],
+    }));
+
+    expect(jsonServer.contacts()).toBe(2);
+    expect(jsonServer.requests()[1]).toMatchObject({
+      accept: "application/json",
+      path: "/api/v1/chat",
+    });
+    expect(JSON.parse(
+      Buffer.from(jsonServer.requests()[1]!.body).toString("utf8"),
+    )).toEqual({
+      input: [{
+        type: "message",
+        content: "private prompt must not persist",
+      }],
+      max_output_tokens: 32,
+      model: MODEL.id,
+      store: false,
+      stream: false,
+      system_prompt: "Return only the requested evaluation result.",
+      temperature: 0,
+      top_p: 0.9,
+    });
+    expect(jsonOutcome).toMatchObject({
+      status: "completed",
+      output: { text: "json-native" },
+      persistence: {
+        finishReason: "completed",
+        finalUsage: "present",
+        providerUsage: {
+          inputTokens: 2,
+          outputTokens: 3,
+          totalTokens: 5,
+        },
+        resolvedModel: { id: MODEL.id },
+      },
+    });
+    const jsonPersistence = JSON.stringify(jsonOutcome.persistence);
+    expect(jsonPersistence).not.toContain("private prompt");
+    expect(jsonPersistence).not.toContain("json-native");
+    expect(jsonPersistence).not.toContain("internal reasoning");
+
+    let streamContact = 0;
+    const streamServer = await startServer((_request, response) => {
+      streamContact += 1;
+      if (streamContact === 1) {
+        jsonResponse(response, lmStudioNativeJson("probe"));
+        return;
+      }
+      sseResponse(response, lmStudioNativeEvents("stream-native"));
+    });
+    const streamRuntime = fixture({
+      server: streamServer,
+      profileId: "lm-studio",
+      route: "nativeChat",
+      stream: true,
+    });
+    const streamProbe = await deadline(probeRuntimeCapability({
+      policy: streamRuntime.policy,
+      endpointAlias: streamRuntime.invocation.endpointAlias,
+      instance: streamRuntime.instance,
+      capability: "nativeChat",
+      observationEffect: "inference-canary",
+      totalDeadlineMs: 1_500,
+      authorizationTtlMs: 2_000,
+    }));
+    const streamOutcome = await deadline(invokeRuntime({
+      ...streamRuntime.invocation,
+      generation: lmStudioGeneration(true),
+      totalDeadlineMs: 500,
+      capabilityAuthorizations: [streamProbe.authorization!],
+    }));
+
+    expect(streamServer.contacts()).toBe(2);
+    expect(streamServer.requests()[1]).toMatchObject({
+      accept: "text/event-stream",
+      path: "/api/v1/chat",
+    });
+    expect(streamOutcome).toMatchObject({
+      status: "completed",
+      output: { text: "stream-native" },
+      persistence: {
+        finishReason: "completed",
+        finalUsage: "present",
+        providerUsage: {
+          inputTokens: 2,
+          outputTokens: 3,
+          totalTokens: 5,
+        },
+      },
+    });
+    expect(streamOutcome.persistence.eventStreamIdentity)
+      .toEqual(streamOutcome.persistence.responseIdentity);
+  });
+
+  it("classifies malformed, unterminated, and failed LM Studio native streams", async () => {
+    let contact = 0;
+    const server = await startServer((_request, response) => {
+      contact += 1;
+      if (contact === 1) {
+        jsonResponse(response, lmStudioNativeJson("probe"));
+        return;
+      }
+      if (contact === 2) {
+        sseResponse(response, [{
+          type: "chat.start",
+          model_instance_id: MODEL.id,
+        }, {
+          type: "unknown.event",
+        }]);
+        return;
+      }
+      if (contact === 3) {
+        sseResponse(response, [{
+          type: "chat.start",
+          model_instance_id: MODEL.id,
+        }, {
+          type: "message.start",
+        }, {
+          type: "message.delta",
+          content: "partial",
+        }, {
+          type: "message.end",
+        }]);
+        return;
+      }
+      const failureEvents = lmStudioNativeEvents("partial");
+      failureEvents.splice(-1, 0, {
+        type: "error",
+        error: {
+          type: "internal_error",
+          message: "sensitive provider failure",
+        },
+      });
+      sseResponse(response, failureEvents);
+    });
+    const runtime = fixture({
+      server,
+      profileId: "lm-studio",
+      route: "nativeChat",
+      stream: true,
+    });
+    const probe = await deadline(probeRuntimeCapability({
+      policy: runtime.policy,
+      endpointAlias: runtime.invocation.endpointAlias,
+      instance: runtime.instance,
+      capability: "nativeChat",
+      observationEffect: "inference-canary",
+      totalDeadlineMs: 1_500,
+      authorizationTtlMs: 2_000,
+    }));
+    const invocation: RuntimeInvocationInput = {
+      ...runtime.invocation,
+      generation: lmStudioGeneration(true),
+      totalDeadlineMs: 500,
+      capabilityAuthorizations: [probe.authorization!],
+    };
+
+    const malformed = await deadline(invokeRuntime(invocation));
+    expect(malformed).toMatchObject({
+      status: "failed",
+      output: null,
+      persistence: {
+        finishReason: null,
+        finalUsage: "missing",
+        terminalOutputIdentity: null,
+        error: { category: "invalid-response" },
+      },
+    });
+
+    const unterminated = await deadline(invokeRuntime(invocation));
+    expect(unterminated).toMatchObject({
+      status: "incomplete",
+      output: { text: "partial" },
+      persistence: {
+        finishReason: null,
+        finalUsage: "missing",
+        partialOutput: true,
+        terminalOutputIdentity: null,
+        error: { category: "invalid-response" },
+      },
+    });
+
+    const failed = await deadline(invokeRuntime(invocation));
+    expect(failed).toMatchObject({
+      status: "failed",
+      output: { text: "partial" },
+      persistence: {
+        finishReason: null,
+        finalUsage: "present",
+        partialOutput: true,
+        terminalOutputIdentity: null,
+        error: { category: "invalid-response" },
+      },
+    });
+    expect(JSON.stringify(failed.persistence))
+      .not.toContain("sensitive provider failure");
+    expect(server.contacts()).toBe(4);
+  });
+
+  it("rejects LM Studio native inputs the pinned API cannot represent", async () => {
+    const server = await startServer((_request, response) => {
+      jsonResponse(response, lmStudioNativeJson("unexpected"));
+    });
+    const runtime = fixture({
+      server,
+      profileId: "lm-studio",
+      route: "nativeChat",
+      stream: false,
+    });
+    const valid = lmStudioGeneration(false);
+    const cases: RuntimeGenerationRequest[] = [{
+      ...valid,
+      seed: 7,
+    }, {
+      ...valid,
+      stop: "END",
+    }, {
+      ...valid,
+      temperature: 1.1,
+    }, {
+      ...valid,
+      messages: [{
+        role: "user",
+        content: "question",
+      }, {
+        role: "assistant",
+        content: "history the native API cannot encode",
+      }],
+    }, {
+      ...valid,
+      messages: [{
+        role: "system",
+        content: "first",
+      }, {
+        role: "system",
+        content: "second",
+      }, {
+        role: "user",
+        content: "question",
+      }],
+    }];
+
+    for (const candidate of cases) {
+      expect(() => describeRuntimeInvocation({
+        ...runtime.invocation,
+        generation: candidate,
+      })).toThrowError(expect.objectContaining({
+        code: "INVALID_INPUT",
+        dispatchState: "not_sent",
+      }));
+    }
+    expect(server.contacts()).toBe(0);
+  });
+
+  it("fails closed on ambiguous LM Studio native output evidence", async () => {
+    const cases = [{
+      name: "reasoning without a message",
+      response: {
+        ...lmStudioNativeJson("unused"),
+        output: [{
+          type: "reasoning",
+          content: "reasoning-only-secret",
+        }],
+      },
+    }, {
+      name: "an unrequested tool call",
+      response: {
+        ...lmStudioNativeJson("terminal-secret"),
+        output: [{
+          type: "tool_call",
+          tool: "unrequested_tool",
+          arguments: {},
+          output: "tool-secret",
+          provider_info: {
+            type: "plugin",
+            plugin_id: "unrequested",
+          },
+        }, {
+          type: "message",
+          content: "terminal-secret",
+        }],
+      },
+    }, {
+      name: "multiple terminal messages",
+      response: {
+        ...lmStudioNativeJson("first-secret"),
+        output: [{
+          type: "message",
+          content: "first-secret",
+        }, {
+          type: "message",
+          content: "second-secret",
+        }],
+      },
+    }, {
+      name: "a stateful response identifier",
+      response: {
+        ...lmStudioNativeJson("stored-secret"),
+        response_id: "resp_must_not_exist",
+      },
+    }] as const;
+
+    for (const testCase of cases) {
+      let contact = 0;
+      const server = await startServer((_request, response) => {
+        contact += 1;
+        jsonResponse(
+          response,
+          contact === 1
+            ? lmStudioNativeJson("probe")
+            : testCase.response,
+        );
+      });
+      const runtime = fixture({
+        server,
+        profileId: "lm-studio",
+        route: "nativeChat",
+        stream: false,
+      });
+      const probe = await deadline(probeRuntimeCapability({
+        policy: runtime.policy,
+        endpointAlias: runtime.invocation.endpointAlias,
+        instance: runtime.instance,
+        capability: "nativeChat",
+        observationEffect: "inference-canary",
+        totalDeadlineMs: 1_500,
+        authorizationTtlMs: 2_000,
+      }));
+
+      const outcome = await deadline(invokeRuntime({
+        ...runtime.invocation,
+        generation: lmStudioGeneration(false),
+        totalDeadlineMs: 500,
+        capabilityAuthorizations: [probe.authorization!],
+      }));
+
+      expect(outcome, testCase.name).toMatchObject({
+        status: "failed",
+        output: null,
+        persistence: {
+          finalUsage: "missing",
+          finishReason: null,
+          resolvedModel: null,
+          terminalOutputIdentity: null,
+          error: { category: "invalid-response" },
+        },
+      });
+      expect(JSON.stringify(outcome.persistence), testCase.name)
+        .not.toContain("-secret");
+      expect(server.contacts(), testCase.name).toBe(2);
+    }
   });
 
   it("invokes exact Ollama native-generate JSON and NDJSON contracts", async () => {
@@ -1438,6 +1904,20 @@ describe("runtime invocation foundation", () => {
       ...conditional.invocation,
       totalDeadlineMs: 500,
     };
+    const described = describeRuntimeInvocation(authorizedInvocation);
+    expect(described).toMatchObject({
+      schemaVersion: "tasc-runtime-invocation-description-v1",
+      route: "chatCompletions",
+      requestedModel: MODEL,
+    });
+    expect(server.contacts()).toBe(0);
+    await expect(dispatchPreparedRuntimeInvocation(
+      described as unknown as PreparedRuntimeInvocation,
+    )).rejects.toMatchObject({
+      code: "PREPARED_INVOCATION_REJECTED",
+    });
+    expect(server.contacts()).toBe(0);
+
     const probe = await deadline(probeRuntimeCapability({
       policy: conditional.policy,
       endpointAlias: authorizedInvocation.endpointAlias,
@@ -1455,6 +1935,10 @@ describe("runtime invocation foundation", () => {
       ...authorizedInvocation,
       capabilityAuthorizations: [authorization],
     });
+    expect({
+      ...prepared,
+      schemaVersion: described.schemaVersion,
+    }).toEqual(described);
 
     expect(server.contacts()).toBe(1);
     const outcome = await deadline(

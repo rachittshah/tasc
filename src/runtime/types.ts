@@ -321,7 +321,16 @@ export interface EndpointDescriptor {
       readonly authenticationReference?: string;
     }
     | {
-      readonly kind: "skypilot" | "skyserve";
+      readonly kind: "skypilot";
+      readonly build: string;
+      readonly configurationDigest: string;
+      readonly locator: {
+        readonly clusterName: string;
+      };
+      readonly authenticationReference?: string;
+    }
+    | {
+      readonly kind: "skyserve";
       readonly build: string;
       readonly configurationDigest: string;
       readonly locator: {
@@ -347,14 +356,24 @@ export interface RayServeEndpointDescriptorInput {
   readonly authenticationReference?: string;
 }
 
-export interface SkyPilotEndpointDescriptorInput {
+interface SkyPilotEndpointDescriptorInputBase {
   readonly origin: string;
   readonly routePrefix: string;
   readonly runtimeProfileId: RuntimeProfileId;
   readonly runtimeBuild: string;
   readonly skyPilotBuild: string;
   readonly configurationDigest: string;
-  readonly mode: "skypilot" | "skyserve";
-  readonly serviceName: string;
   readonly authenticationReference?: string;
 }
+
+export type SkyPilotEndpointDescriptorInput =
+  | SkyPilotEndpointDescriptorInputBase & {
+    readonly mode: "skypilot";
+    readonly clusterName: string;
+    readonly serviceName?: never;
+  }
+  | SkyPilotEndpointDescriptorInputBase & {
+    readonly mode: "skyserve";
+    readonly serviceName: string;
+    readonly clusterName?: never;
+  };

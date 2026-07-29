@@ -13,7 +13,7 @@ import {
   resolveRuntimeCapabilities,
   type RuntimeInstanceIdentity,
   type RuntimeCapabilityProbeEvidence,
-} from "../src/index.js";
+} from "../src/runtime/index.js";
 
 const DIGEST = `sha256:${"a".repeat(64)}`;
 const UNVERIFIED_IDENTITY = Object.freeze({
@@ -163,6 +163,36 @@ describe("build-pinned runtime registry", () => {
     const sglang = getRuntimeProfile("sglang");
     expect(sglang.endpoints.models.info?.path).toBe("/model_info");
     expect(sglang.endpoints.version?.path).toBe("/server_info");
+    expect(sglang.endpoints.health.liveness).toMatchObject({
+      path: "/health",
+      observationEffect: "inference-canary",
+    });
+    expect(sglang.capabilities.liveness).toMatchObject({
+      state: "conditional",
+      configuration: {
+        status: "conditional",
+      },
+    });
+  });
+
+  it("binds route claims to tagged upstream source files", () => {
+    expect(getRuntimeProfile("tensorrt-llm").documentation[0]?.url).toBe(
+      "https://github.com/NVIDIA/TensorRT-LLM/blob/v1.2.1/tensorrt_llm/serve/openai_server.py",
+    );
+    expect(getRuntimeProfile("mlx-lm").documentation[0]?.url).toBe(
+      "https://github.com/ml-explore/mlx-lm/blob/v0.31.3/mlx_lm/server.py",
+    );
+    expect(getRuntimeProfile("ollama").documentation[0]?.url).toBe(
+      "https://github.com/ollama/ollama/blob/v0.32.5/server/routes.go",
+    );
+    expect(getRuntimeProfile("tgi").documentation[0]?.url).toBe(
+      "https://github.com/huggingface/text-generation-inference/blob/v3.3.7/router/src/server.rs",
+    );
+    expect(getRuntimeProfile("mlx-lm").capabilities.structuredOutput)
+      .toMatchObject({
+        state: "unsupported",
+        note: expect.stringContaining("response_format"),
+      });
   });
 
   it("represents every static capability with scoped evidence, not a generic compatibility claim", () => {
@@ -506,7 +536,7 @@ describe("declarative orchestration descriptors", () => {
       skyPilotBuild: "0.13.1rc1",
       configurationDigest: DIGEST,
       mode: "skypilot",
-      serviceName: "legacy-tgi",
+      clusterName: "legacy-tgi",
       authenticationReference: "sky-shadow-token",
     });
     const skyServe = createSkyPilotEndpointDescriptor({
@@ -523,7 +553,7 @@ describe("declarative orchestration descriptors", () => {
 
     expect(skyPilot.orchestration).toMatchObject({
       kind: "skypilot",
-      locator: { serviceName: "legacy-tgi" },
+      locator: { clusterName: "legacy-tgi" },
     });
     expect(skyServe.orchestration).toMatchObject({
       kind: "skyserve",
@@ -533,6 +563,79 @@ describe("declarative orchestration descriptors", () => {
       profileId: "sglang",
       build: "0.5.16",
     });
+    expect(fingerprintEndpointDescriptor({
+      ...skyPilot,
+      orchestration: {
+        ...skyPilot.orchestration,
+        locator: { clusterName: "different-cluster" },
+      },
+    })).not.toBe(fingerprintEndpointDescriptor(skyPilot));
+  });
+
+  it("rejects the ambiguous pre-release SkyPilot service locator shape", () => {
+    const base = {
+      schemaVersion: "tasc-endpoint-descriptor-v1",
+      origin: "https://sky.internal.example",
+      basePath: "/",
+      runtime: {
+        profileId: "tgi",
+        build: "3.3.7",
+      },
+      authority: {
+        deployment: "none",
+        network: "unverified",
+      },
+    } as const;
+    expect(() =>
+      parseEndpointDescriptor({
+        ...base,
+        orchestration: {
+          kind: "skypilot",
+          build: "0.13.1rc1",
+          configurationDigest: DIGEST,
+          locator: { serviceName: "legacy-tgi" },
+        },
+      })
+    ).toThrow(/SkyPilot locator.*unknown field/i);
+    expect(() =>
+      createSkyPilotEndpointDescriptor({
+        origin: "https://sky.internal.example",
+        routePrefix: "/",
+        runtimeProfileId: "tgi",
+        runtimeBuild: "3.3.7",
+        skyPilotBuild: "0.13.1rc1",
+        configurationDigest: DIGEST,
+        mode: "skypilot",
+        serviceName: "legacy-tgi",
+      } as never)
+    ).toThrow("requires clusterName and cannot contain serviceName");
+    expect(() =>
+      createSkyPilotEndpointDescriptor({
+        origin: "https://skyserve.internal.example",
+        routePrefix: "/",
+        runtimeProfileId: "sglang",
+        runtimeBuild: "0.5.16",
+        skyPilotBuild: "0.13.1rc1",
+        configurationDigest: DIGEST,
+        mode: "skyserve",
+        serviceName: "sglang-shadow",
+        clusterName: "ambiguous-cluster",
+      } as never)
+    ).toThrow("requires serviceName and cannot contain clusterName");
+    expect(() =>
+      createSkyPilotEndpointDescriptor({
+        origin: "https://sky.internal.example",
+        routePrefix: "/",
+        runtimeProfileId: "tgi",
+        runtimeBuild: "3.3.7",
+        skyPilotBuild: "0.13.1rc1",
+        configurationDigest: DIGEST,
+        mode: "skypilot",
+        clusterName: "not a cluster",
+      })
+    ).toThrow(
+      "SkyPilot cluster name must be an opaque orchestration identifier",
+    );
   });
 
   it("rejects executable hooks, deployment actions, and fake runtime profiles", () => {

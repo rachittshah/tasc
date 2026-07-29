@@ -48,9 +48,11 @@ import {
 import {
   DEFAULT_SSE_LIMITS,
   parseBoundedJsonSse,
+  parseBoundedSse,
   type JsonSseParseResult,
   type RuntimeStreamIdentity,
   type RuntimeStreamTiming,
+  type SseParseResult,
 } from "./sse.js";
 import type {
   EndpointDescriptor,
@@ -65,6 +67,8 @@ export const RUNTIME_INVOCATION_VERSION =
   "tasc-runtime-invocation-v1" as const;
 export const PREPARED_RUNTIME_INVOCATION_VERSION =
   "tasc-prepared-runtime-invocation-v1" as const;
+export const RUNTIME_INVOCATION_DESCRIPTION_VERSION =
+  "tasc-runtime-invocation-description-v1" as const;
 
 export type RuntimeInvocationRoute =
   | "chatCompletions"
@@ -120,6 +124,25 @@ export interface RuntimeInvocationInput {
  */
 export interface PreparedRuntimeInvocation {
   readonly schemaVersion: typeof PREPARED_RUNTIME_INVOCATION_VERSION;
+  readonly endpointBindingDigest: string;
+  readonly profile: {
+    readonly id: RuntimeProfileId;
+    readonly build: string;
+  };
+  readonly route: RuntimeInvocationRoute;
+  readonly requestedModel: RuntimeRequestedModel;
+  readonly requestIdentity: KeyedPayloadIdentity;
+  readonly requestByteCount: number;
+}
+
+/**
+ * Exact payload-free request metadata with no dispatch authority.
+ *
+ * This is safe for whole-run work admission, including for a conditional
+ * route whose live capability authorization has not been minted.
+ */
+export interface RuntimeInvocationDescription {
+  readonly schemaVersion: typeof RUNTIME_INVOCATION_DESCRIPTION_VERSION;
   readonly endpointBindingDigest: string;
   readonly profile: {
     readonly id: RuntimeProfileId;
@@ -738,6 +761,56 @@ function requireRouteInputShape(
   }
 }
 
+function buildLmStudioNativeChatRequest(
+  generation: RuntimeGenerationRequest,
+): unknown {
+  if (
+    generation.seed !== undefined
+    || generation.stop !== undefined
+    || (
+      generation.temperature !== undefined
+      && generation.temperature > 1
+    )
+  ) {
+    inputFail();
+  }
+  const messages = generation.messages;
+  if (messages === undefined) inputFail();
+  let systemPrompt: string | undefined;
+  const input: { readonly type: "message"; readonly content: string }[] = [];
+  for (const message of messages) {
+    if (message.role === "system") {
+      if (systemPrompt !== undefined || input.length > 0) inputFail();
+      systemPrompt = message.content;
+      continue;
+    }
+    if (message.role !== "user") inputFail();
+    input.push(Object.freeze({
+      type: "message",
+      content: message.content,
+    }));
+  }
+  if (input.length < 1) inputFail();
+  return {
+    model: generation.model.id,
+    input,
+    ...(systemPrompt === undefined
+      ? {}
+      : { system_prompt: systemPrompt }),
+    stream: generation.stream,
+    ...(generation.temperature === undefined
+      ? {}
+      : { temperature: generation.temperature }),
+    ...(generation.topP === undefined
+      ? {}
+      : { top_p: generation.topP }),
+    max_output_tokens: generation.maxTokens,
+    // The native API defaults this to true. The inference adapter is
+    // intentionally stateless and must never create server-side chat state.
+    store: false,
+  };
+}
+
 function buildRequestBody(
   route: RuntimeInferenceRoute,
   generation: RuntimeGenerationRequest,
@@ -827,7 +900,7 @@ function buildRequestBody(
           : {}),
       };
     case "lm-studio-native-chat":
-      inputFail("UNSUPPORTED_ROUTE");
+      return buildLmStudioNativeChatRequest(generation);
   }
 }
 
@@ -847,6 +920,7 @@ function routeFraming(
     route.wireProtocol === "openai-chat-completions"
     || route.wireProtocol === "openai-completions"
     || route.wireProtocol === "openai-responses"
+    || route.wireProtocol === "lm-studio-native-chat"
   ) {
     framing = "sse";
   } else {
@@ -866,7 +940,10 @@ function prefixedRuntimePath(
   return `${basePath}${routePath}`;
 }
 
-function normalizeInvocation(input: RuntimeInvocationInput): NormalizedInvocation {
+function normalizeInvocation(
+  input: RuntimeInvocationInput,
+  allowUnauthorisedConditionalDescription = false,
+): NormalizedInvocation {
   const snapshot = snapshotRecord(input, INPUT_KEYS);
   for (const required of [
     "policy",
@@ -923,9 +1000,6 @@ function normalizeInvocation(input: RuntimeInvocationInput): NormalizedInvocatio
   }
   const route = profile.endpoints.inference[routeKey];
   if (route === undefined) inputFail("UNSUPPORTED_ROUTE");
-  if (route.wireProtocol === "lm-studio-native-chat") {
-    inputFail("UNSUPPORTED_ROUTE");
-  }
   const staticCapability = profile.capabilities[route.capability];
   if (
     staticCapability.state === "unsupported"
@@ -940,10 +1014,13 @@ function normalizeInvocation(input: RuntimeInvocationInput): NormalizedInvocatio
       16,
     );
   if (staticCapability.state === "conditional") {
-    if (authorizations.length === 0) {
+    if (
+      authorizations.length === 0
+      && !allowUnauthorisedConditionalDescription
+    ) {
       inputFail("CONDITIONAL_CAPABILITY_REQUIRES_AUTHORIZATION");
     }
-    if (authorizations.length !== 1) {
+    if (authorizations.length > 1) {
       inputFail("CAPABILITY_AUTHORIZATION_REJECTED");
     }
   } else if (authorizations.length !== 0) {
@@ -1013,6 +1090,7 @@ function normalizeInvocation(input: RuntimeInvocationInput): NormalizedInvocatio
     routeKey,
     route,
     ...(staticCapability.state === "conditional"
+        && authorizations[0] !== undefined
       ? {
         capabilityAuthorization:
           authorizations[0] as RuntimeCapabilityAuthorization,
@@ -1302,6 +1380,449 @@ function normalizeResponsesJson(
     terminal: "complete",
     finalUsage: usage === null ? "missing" : "present",
     streamTiming: null,
+  });
+}
+
+interface LmStudioNativeOutput {
+  readonly text: string;
+  readonly reasoning: string;
+}
+
+const LM_STUDIO_ERROR_TYPES = new Set([
+  "invalid_request",
+  "unknown",
+  "mcp_connection_error",
+  "plugin_connection_error",
+  "not_implemented",
+  "model_not_found",
+  "job_not_found",
+  "internal_error",
+]);
+
+function boundedProviderNumber(
+  value: unknown,
+  maximum: number,
+): number {
+  if (
+    typeof value !== "number"
+    || !Number.isFinite(value)
+    || value < 0
+    || value > maximum
+  ) {
+    throw new InvalidRuntimeResponse();
+  }
+  return value;
+}
+
+function boundedProviderText(
+  value: unknown,
+  maximum = MAX_TEXT_LENGTH,
+): string {
+  if (typeof value !== "string" || value.length > maximum) {
+    throw new InvalidRuntimeResponse();
+  }
+  return value;
+}
+
+function validateLmStudioError(value: unknown): void {
+  const error = record(value);
+  if (
+    error === null
+    || typeof error.type !== "string"
+    || !LM_STUDIO_ERROR_TYPES.has(error.type)
+    || typeof error.message !== "string"
+    || error.message.length < 1
+    || error.message.length > 4_096
+  ) {
+    throw new InvalidRuntimeResponse();
+  }
+  for (const key of ["code", "param"]) {
+    if (
+      Object.hasOwn(error, key)
+      && (
+        typeof error[key] !== "string"
+        || (error[key] as string).length < 1
+        || (error[key] as string).length > 512
+      )
+    ) {
+      throw new InvalidRuntimeResponse();
+    }
+  }
+}
+
+function parseLmStudioOutput(value: unknown): LmStudioNativeOutput {
+  if (
+    !Array.isArray(value)
+    || value.length < 1
+    || value.length > MAX_MESSAGES
+  ) {
+    throw new InvalidRuntimeResponse();
+  }
+  let text = "";
+  let reasoning = "";
+  let messageCount = 0;
+  for (const outputItem of value) {
+    const item = record(outputItem);
+    if (item === null) throw new InvalidRuntimeResponse();
+    if (item.type === "message") {
+      messageCount += 1;
+      if (messageCount > 1) throw new InvalidRuntimeResponse();
+      text = boundedProviderText(item.content);
+    } else if (item.type === "reasoning") {
+      reasoning += boundedProviderText(item.content);
+      if (reasoning.length > MAX_TEXT_LENGTH) {
+        throw new InvalidRuntimeResponse();
+      }
+    } else {
+      // No integrations are sent by this adapter. Tool calls, invalid tool
+      // calls, and unknown output types are therefore ambiguous evidence.
+      throw new InvalidRuntimeResponse();
+    }
+  }
+  if (messageCount !== 1) throw new InvalidRuntimeResponse();
+  return Object.freeze({ text, reasoning });
+}
+
+function parseLmStudioUsage(value: unknown): RuntimeProviderUsage {
+  const stats = record(value);
+  if (stats === null) throw new InvalidRuntimeResponse();
+  const inputTokens = tokenCount(stats.input_tokens);
+  const outputTokens = tokenCount(stats.total_output_tokens);
+  const reasoningTokens = tokenCount(stats.reasoning_output_tokens);
+  if (reasoningTokens > outputTokens) throw new InvalidRuntimeResponse();
+  boundedProviderNumber(stats.tokens_per_second, 1_000_000_000);
+  boundedProviderNumber(
+    stats.time_to_first_token_seconds,
+    MAX_PROVIDER_DURATION_NS / 1_000_000_000,
+  );
+  if (Object.hasOwn(stats, "model_load_time_seconds")) {
+    boundedProviderNumber(
+      stats.model_load_time_seconds,
+      MAX_PROVIDER_DURATION_NS / 1_000_000_000,
+    );
+  }
+  const totalTokens = inputTokens + outputTokens;
+  if (!Number.isSafeInteger(totalTokens)) {
+    throw new InvalidRuntimeResponse();
+  }
+  return Object.freeze({ inputTokens, outputTokens, totalTokens });
+}
+
+function normalizeLmStudioJson(
+  value: unknown,
+  requestedModel: string,
+  options?: {
+    readonly expectedText: string;
+    readonly expectedReasoning: string;
+    readonly streamTiming: RuntimeStreamTiming;
+  },
+): NormalizedProviderResult {
+  const json = record(value);
+  if (json === null) throw new InvalidRuntimeResponse();
+  if (Object.hasOwn(json, "error")) {
+    validateLmStudioError(json.error);
+    if (options !== undefined) throw new InvalidRuntimeResponse();
+    return Object.freeze({
+      text: "",
+      resolvedModelId: null,
+      finishReason: null,
+      usage: null,
+      providerTiming: Object.freeze({}),
+      logprobsObserved: false,
+      terminal: "provider-error",
+      finalUsage: "missing",
+      streamTiming: null,
+    });
+  }
+  // `store: false` must not produce a stateful response identifier.
+  if (Object.hasOwn(json, "response_id")) {
+    throw new InvalidRuntimeResponse();
+  }
+  const resolvedModelId = validateResolvedModel(
+    json.model_instance_id,
+    requestedModel,
+  );
+  if (resolvedModelId === null) throw new InvalidRuntimeResponse();
+  const output = parseLmStudioOutput(json.output);
+  if (
+    options !== undefined
+    && (
+      output.text !== options.expectedText
+      || output.reasoning !== options.expectedReasoning
+    )
+  ) {
+    throw new InvalidRuntimeResponse();
+  }
+  const usage = parseLmStudioUsage(json.stats);
+  return Object.freeze({
+    text: output.text,
+    resolvedModelId,
+    finishReason: "completed",
+    usage,
+    providerTiming: Object.freeze({}),
+    logprobsObserved: false,
+    terminal: "complete",
+    finalUsage: "present",
+    streamTiming: options?.streamTiming ?? null,
+  });
+}
+
+type LmStudioLifecycle = "not-started" | "started" | "ended";
+
+function lmStudioStreamTiming(
+  parsed: SseParseResult,
+  firstMeaningfulAtMs: number | null,
+): RuntimeStreamTiming {
+  const timing = parsed.summary.timing;
+  return Object.freeze({
+    ...timing,
+    firstMeaningfulAtMs,
+    timeToFirstMeaningfulMs: firstMeaningfulAtMs === null
+      ? null
+      : firstMeaningfulAtMs - timing.startedAtMs,
+  });
+}
+
+function requireLmStudioStreamModel(
+  json: Readonly<Record<string, unknown>>,
+  requestedModel: string,
+): void {
+  if (
+    validateResolvedModel(json.model_instance_id, requestedModel) === null
+  ) {
+    throw new InvalidRuntimeResponse();
+  }
+}
+
+function normalizeLmStudioSse(
+  parsed: SseParseResult,
+  requestedModel: string,
+): NormalizedProviderResult {
+  let chatStarted = false;
+  let chatEnded = false;
+  let providerError = false;
+  let modelLoad: LmStudioLifecycle = "not-started";
+  let promptProcessing: LmStudioLifecycle = "not-started";
+  let reasoningLifecycle: LmStudioLifecycle = "not-started";
+  let messageLifecycle: LmStudioLifecycle = "not-started";
+  let modelLoadProgress = 0;
+  let promptProgress = 0;
+  let reasoning = "";
+  let text = "";
+  let firstMeaningfulAtMs: number | null = null;
+  let terminal: NormalizedProviderResult | null = null;
+
+  for (const event of parsed.events) {
+    if (event.kind !== "event" || chatEnded) {
+      throw new InvalidRuntimeResponse();
+    }
+    const json = record(parseBoundedJson(
+      new TextEncoder().encode(event.data),
+      STREAM_EVENT_JSON_LIMITS,
+    ));
+    if (
+      json === null
+      || typeof json.type !== "string"
+      || event.event !== json.type
+      || (providerError && json.type !== "chat.end")
+    ) {
+      throw new InvalidRuntimeResponse();
+    }
+
+    switch (json.type) {
+      case "chat.start":
+        if (event.index !== 0 || chatStarted) {
+          throw new InvalidRuntimeResponse();
+        }
+        requireLmStudioStreamModel(json, requestedModel);
+        chatStarted = true;
+        break;
+      case "model_load.start":
+        if (
+          !chatStarted
+          || modelLoad !== "not-started"
+          || promptProcessing !== "not-started"
+          || reasoningLifecycle !== "not-started"
+          || messageLifecycle !== "not-started"
+        ) {
+          throw new InvalidRuntimeResponse();
+        }
+        requireLmStudioStreamModel(json, requestedModel);
+        modelLoad = "started";
+        break;
+      case "model_load.progress": {
+        if (modelLoad !== "started") throw new InvalidRuntimeResponse();
+        requireLmStudioStreamModel(json, requestedModel);
+        const progress = boundedProviderNumber(json.progress, 1);
+        if (progress < modelLoadProgress) throw new InvalidRuntimeResponse();
+        modelLoadProgress = progress;
+        break;
+      }
+      case "model_load.end":
+        if (modelLoad !== "started") throw new InvalidRuntimeResponse();
+        requireLmStudioStreamModel(json, requestedModel);
+        boundedProviderNumber(
+          json.load_time_seconds,
+          MAX_PROVIDER_DURATION_NS / 1_000_000_000,
+        );
+        modelLoad = "ended";
+        break;
+      case "prompt_processing.start":
+        if (
+          !chatStarted
+          || modelLoad === "started"
+          || promptProcessing !== "not-started"
+          || reasoningLifecycle !== "not-started"
+          || messageLifecycle !== "not-started"
+        ) {
+          throw new InvalidRuntimeResponse();
+        }
+        promptProcessing = "started";
+        break;
+      case "prompt_processing.progress": {
+        if (promptProcessing !== "started") {
+          throw new InvalidRuntimeResponse();
+        }
+        const progress = boundedProviderNumber(json.progress, 1);
+        if (progress < promptProgress) throw new InvalidRuntimeResponse();
+        promptProgress = progress;
+        break;
+      }
+      case "prompt_processing.end":
+        if (promptProcessing !== "started") {
+          throw new InvalidRuntimeResponse();
+        }
+        promptProcessing = "ended";
+        break;
+      case "reasoning.start":
+        if (
+          !chatStarted
+          || modelLoad === "started"
+          || promptProcessing === "started"
+          || reasoningLifecycle !== "not-started"
+          || messageLifecycle !== "not-started"
+        ) {
+          throw new InvalidRuntimeResponse();
+        }
+        reasoningLifecycle = "started";
+        break;
+      case "reasoning.delta":
+        if (reasoningLifecycle !== "started") {
+          throw new InvalidRuntimeResponse();
+        }
+        reasoning += boundedProviderText(json.content);
+        if (reasoning.length > MAX_TEXT_LENGTH) {
+          throw new InvalidRuntimeResponse();
+        }
+        break;
+      case "reasoning.end":
+        if (reasoningLifecycle !== "started") {
+          throw new InvalidRuntimeResponse();
+        }
+        reasoningLifecycle = "ended";
+        break;
+      case "message.start":
+        if (
+          !chatStarted
+          || modelLoad === "started"
+          || promptProcessing === "started"
+          || reasoningLifecycle === "started"
+          || messageLifecycle !== "not-started"
+        ) {
+          throw new InvalidRuntimeResponse();
+        }
+        messageLifecycle = "started";
+        break;
+      case "message.delta": {
+        if (messageLifecycle !== "started") {
+          throw new InvalidRuntimeResponse();
+        }
+        const content = boundedProviderText(json.content);
+        text += content;
+        if (text.length > MAX_TEXT_LENGTH) {
+          throw new InvalidRuntimeResponse();
+        }
+        if (content.length > 0 && firstMeaningfulAtMs === null) {
+          firstMeaningfulAtMs = event.observedAtMs;
+        }
+        break;
+      }
+      case "message.end":
+        if (messageLifecycle !== "started") {
+          throw new InvalidRuntimeResponse();
+        }
+        messageLifecycle = "ended";
+        break;
+      case "error":
+        if (!chatStarted || providerError) {
+          throw new InvalidRuntimeResponse();
+        }
+        validateLmStudioError(json.error);
+        providerError = true;
+        break;
+      case "chat.end": {
+        if (
+          !chatStarted
+          || event.index !== parsed.events.length - 1
+          || (!providerError && (
+            modelLoad === "started"
+            || promptProcessing === "started"
+            || reasoningLifecycle === "started"
+            || messageLifecycle !== "ended"
+          ))
+        ) {
+          throw new InvalidRuntimeResponse();
+        }
+        const streamTiming = lmStudioStreamTiming(
+          parsed,
+          firstMeaningfulAtMs,
+        );
+        terminal = normalizeLmStudioJson(
+          json.result,
+          requestedModel,
+          {
+            expectedText: text,
+            expectedReasoning: reasoning,
+            streamTiming,
+          },
+        );
+        chatEnded = true;
+        break;
+      }
+      default:
+        throw new InvalidRuntimeResponse();
+    }
+  }
+
+  const streamTiming = lmStudioStreamTiming(
+    parsed,
+    firstMeaningfulAtMs,
+  );
+  if (
+    terminal !== null
+    && parsed.summary.trailingIncompleteEvent === false
+  ) {
+    if (!providerError) return terminal;
+    return Object.freeze({
+      ...terminal,
+      finishReason: null,
+      terminal: "provider-error",
+      streamTiming,
+    });
+  }
+  if (terminal !== null || parsed.summary.trailingIncompleteEvent) {
+    throw new InvalidRuntimeResponse();
+  }
+  return Object.freeze({
+    text,
+    resolvedModelId: chatStarted ? requestedModel : null,
+    finishReason: null,
+    usage: null,
+    providerTiming: Object.freeze({}),
+    logprobsObserved: false,
+    terminal: providerError ? "provider-error" : "truncated",
+    finalUsage: "missing",
+    streamTiming,
   });
 }
 
@@ -2028,28 +2549,43 @@ async function decodeResponse(
           );
           break;
         case "lm-studio-native-chat":
-          throw new InvalidRuntimeResponse();
+          normalized = normalizeLmStudioJson(
+            json,
+            invocation.generation.model.id,
+          );
+          break;
       }
     } else if (invocation.framing === "sse") {
-      const parsed = await parseBoundedJsonSse(capture.source, {
-        limits: DEFAULT_SSE_LIMITS,
-        identity: invocation.identity,
-        jsonLimits: STREAM_EVENT_JSON_LIMITS,
-        protocol: invocation.route.wireProtocol === "openai-responses"
-          ? "openai-responses"
-          : "openai-chat-completions",
-      });
-      if (invocation.route.wireProtocol === "openai-responses") {
-        normalized = normalizeResponsesSse(
+      if (invocation.route.wireProtocol === "lm-studio-native-chat") {
+        const parsed = await parseBoundedSse(capture.source, {
+          limits: DEFAULT_SSE_LIMITS,
+          identity: invocation.identity,
+        });
+        normalized = normalizeLmStudioSse(
           parsed,
           invocation.generation.model.id,
         );
       } else {
-        normalized = normalizeOpenAiSse(
-          parsed,
-          invocation.routeKey,
-          invocation.generation.model.id,
-        );
+        const parsed = await parseBoundedJsonSse(capture.source, {
+          limits: DEFAULT_SSE_LIMITS,
+          identity: invocation.identity,
+          jsonLimits: STREAM_EVENT_JSON_LIMITS,
+          protocol: invocation.route.wireProtocol === "openai-responses"
+            ? "openai-responses"
+            : "openai-chat-completions",
+        });
+        if (invocation.route.wireProtocol === "openai-responses") {
+          normalized = normalizeResponsesSse(
+            parsed,
+            invocation.generation.model.id,
+          );
+        } else {
+          normalized = normalizeOpenAiSse(
+            parsed,
+            invocation.routeKey,
+            invocation.generation.model.id,
+          );
+        }
       }
     } else {
       const parsed = await parseBoundedNdjsonStream(capture.source, {
@@ -2255,6 +2791,30 @@ function endpointBindingIsAuthentic(
   } catch {
     return false;
   }
+}
+
+/**
+ * Describe the exact canonical wire request without minting dispatch power.
+ *
+ * Conditional capability leases are deliberately not required here: the
+ * returned immutable object cannot be consumed by the dispatcher.
+ */
+export function describeRuntimeInvocation(
+  input: RuntimeInvocationInput,
+): RuntimeInvocationDescription {
+  const invocation = normalizeInvocation(input, true);
+  return deepFreeze({
+    schemaVersion: RUNTIME_INVOCATION_DESCRIPTION_VERSION,
+    endpointBindingDigest: invocation.endpointBindingDigest,
+    profile: {
+      id: invocation.profileId,
+      build: invocation.profileBuild,
+    },
+    route: invocation.routeKey,
+    requestedModel: invocation.generation.model,
+    requestIdentity: invocation.requestIdentity,
+    requestByteCount: invocation.requestBytes.byteLength,
+  });
 }
 
 /**

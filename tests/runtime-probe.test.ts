@@ -274,22 +274,49 @@ describe("runtime capability probes", () => {
     },
   );
 
-  it("rejects ambiguous SGLang liveness before contact without authentic launch configuration", async () => {
+  it("requires explicit inference-canary authority for ambiguous SGLang liveness", async () => {
     const server = await startServer((_request, response) => {
       response.statusCode = 200;
       response.end();
     });
-    const { probe } = fixture({
+    const { probe: passiveProbe } = fixture({
       server,
       profileId: "sglang",
       capability: "liveness",
       observationEffect: "non-mutating",
     });
 
-    await expect(probeRuntimeCapability(probe)).rejects.toMatchObject({
+    await expect(probeRuntimeCapability(passiveProbe)).rejects.toMatchObject({
       code: "UNSUPPORTED_PROBE",
     });
     expect(server.contacts()).toBe(0);
+
+    const { probe: canaryProbe } = fixture({
+      server,
+      profileId: "sglang",
+      capability: "liveness",
+      observationEffect: "inference-canary",
+    });
+    const result = await deadline(probeRuntimeCapability(canaryProbe));
+
+    expect(server.contacts()).toBe(1);
+    expect(server.requests()).toMatchObject([{
+      method: "GET",
+      path: "/health",
+      accept: "application/json",
+    }]);
+    expect(result).toMatchObject({
+      evidence: {
+        capability: "liveness",
+        state: "supported",
+      },
+      observation: {
+        effect: "inference-canary",
+        dispatchState: "completed",
+        statusCode: 200,
+        error: null,
+      },
+    });
   });
 
   it.each([

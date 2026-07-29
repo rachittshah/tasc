@@ -653,15 +653,6 @@ function normalizeProbe(input: RuntimeCapabilityProbeInput): NormalizedProbe {
     accept = "application/json";
   } else if (capability === "liveness" || capability === "readiness") {
     if (snapshot.selectedMetricNames !== undefined) fail();
-    /*
-     * SGLang v0.5.16 can wire /health to a generation health check via
-     * SGLANG_ENABLE_HEALTH_ENDPOINT_GENERATION. The pinned profile does not
-     * carry authentic launch configuration, so a passive classification would
-     * misrepresent a potentially billable call.
-     */
-    if (capability === "liveness" && profile.id === "sglang") {
-      fail("UNSUPPORTED_PROBE");
-    }
     const route = profile.endpoints.health[capability];
     if (route === undefined) fail("UNSUPPORTED_PROBE");
     const expectation = profile.capabilities[capability];
