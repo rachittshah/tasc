@@ -96,6 +96,7 @@ function safeEnvironment(configDirectory, cacheDirectory) {
     npm_config_loglevel: "error",
     npm_config_provenance: "false",
     npm_config_update_notifier: "false",
+    npm_config_globalconfig: join(configDirectory, "global-npmrc"),
     npm_config_userconfig: join(configDirectory, ".npmrc"),
   };
   for (const name of [

@@ -404,9 +404,7 @@ function persistence(
   override: Partial<RuntimeInvocationPersistence> = {},
 ): RuntimeInvocationPersistence {
   const terminalOutputIdentity = createStudyPayloadIdentity(
-    prepared.requestIdentity.keyId === "shadow-key"
-      ? "support-routing-study"
-      : "support-routing-study",
+    "support-routing-study",
     "shadow-key",
     createSecretKey(Buffer.alloc(32, 0x53)),
     Buffer.from(`output-${prepared.requestedModel.id}`),

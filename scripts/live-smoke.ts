@@ -323,11 +323,21 @@ function generation(
   route: RuntimeInvocationRoute,
   stream: boolean,
 ): RuntimeGenerationRequest {
+  const chatRoute = route === "chatCompletions" || route === "nativeChat";
   return Object.freeze({
     model: MODEL,
     stream,
     n: 1,
-    prompt: "fixture prompt",
+    ...(chatRoute
+      ? {
+        messages: Object.freeze([
+          Object.freeze({
+            role: "user" as const,
+            content: "fixture prompt",
+          }),
+        ]),
+      }
+      : { prompt: "fixture prompt" }),
     maxTokens: 8,
     temperature: 0,
     seed: 20260728,

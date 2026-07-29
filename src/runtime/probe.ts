@@ -582,6 +582,11 @@ function canaryBody(
         max_output_tokens: 1,
       };
       break;
+    default: {
+      const unsupportedProtocol: never = route.wireProtocol;
+      void unsupportedProtocol;
+      fail("UNSUPPORTED_PROBE");
+    }
   }
   const bytes = Buffer.from(JSON.stringify(body), "utf8");
   parseBoundedJson(bytes, RESPONSE_JSON_LIMITS);
