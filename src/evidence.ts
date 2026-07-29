@@ -275,17 +275,14 @@ const requiredTraceCapabilitySchema = z.enum([
   "final-usage",
 ]);
 
-const dispatchAuthoritySchema = z.object({
+const authoritySchema = z.object({
   keyId: contractSlugSchema,
   algorithm: z.literal("ed25519"),
   publicKeySpki: canonicalBase64UrlSchema,
 }).strict();
 
-const collectorAuthoritySchema = z.object({
-  keyId: contractSlugSchema,
-  algorithm: z.literal("ed25519"),
-  publicKeySpki: canonicalBase64UrlSchema,
-}).strict();
+const dispatchAuthoritySchema = authoritySchema;
+const collectorAuthoritySchema = authoritySchema;
 
 export const experimentProtocolSchema = z.object({
   version: z.literal("tasc-experiment-protocol-v2"),
@@ -640,7 +637,30 @@ export function collectorAttestationSigningBytes(input: unknown): Buffer {
   }
   const attestation = binding as Record<string, unknown>;
   const payload = collectorAttestationPayloadSchema.parse({
-    ...trace,
+    version: trace.version,
+    studyId: trace.studyId,
+    protocolDigest: trace.protocolDigest,
+    traceId: trace.traceId,
+    caseId: trace.caseId,
+    groupId: trace.groupId,
+    replicateId: trace.replicateId,
+    split: trace.split,
+    collectionWindowId: trace.collectionWindowId,
+    collectionWindowMembershipDigest:
+      trace.collectionWindowMembershipDigest,
+    sourceMode: trace.sourceMode,
+    collectionBinding: trace.collectionBinding,
+    profileId: trace.profileId,
+    executionProfileDigest: trace.executionProfileDigest,
+    policyDigest: trace.policyDigest,
+    observedRoute: trace.observedRoute,
+    workload: trace.workload,
+    slices: trace.slices,
+    routeSignal: trace.routeSignal,
+    dispatchIntent: trace.dispatchIntent,
+    attempts: trace.attempts,
+    terminalOutputId: trace.terminalOutputId,
+    collectorVersion: trace.collectorVersion,
     collectorAttestation: {
       version: attestation.version,
       collectedAt: attestation.collectedAt,

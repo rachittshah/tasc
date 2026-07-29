@@ -4,6 +4,8 @@ import * as runtime from "../src/runtime/index.js";
 import type {
   ArtifactReadPayload,
   ArtifactReadResult,
+  ArtifactFileHandle,
+  ArtifactFilesystem,
   ArtifactWriteOrVerifyResult,
   AuthorizedControlledReference,
   BoundedInputErrorCode,
@@ -71,13 +73,15 @@ type ControllerPublicTypes = [
 const controllerPublicTypeCount: ControllerPublicTypes["length"] = 2;
 
 type ArtifactResumePublicTypes = [
+  ArtifactFileHandle,
+  ArtifactFilesystem,
   ArtifactReadPayload,
   ArtifactReadResult,
   ArtifactWriteOrVerifyResult,
 ];
 
 const artifactResumePublicTypeCount:
-  ArtifactResumePublicTypes["length"] = 3;
+  ArtifactResumePublicTypes["length"] = 5;
 
 type RuntimeTransportPublicTypes = [
   CollectorTrustPolicy,
@@ -150,6 +154,10 @@ describe("standalone public API", () => {
       verifyArtifactPacket: expect.any(Function),
       readArtifactPacketIfPresent: expect.any(Function),
       writeArtifactPacketOrVerifyIdentical: expect.any(Function),
+      nodeArtifactFilesystem: expect.objectContaining({
+        open: expect.any(Function),
+        realpath: expect.any(Function),
+      }),
       createController: expect.any(Function),
       registerController: expect.any(Function),
       replayController: expect.any(Function),
@@ -205,7 +213,7 @@ describe("standalone public API", () => {
     expect(runtime).not.toHaveProperty("consumePinnedCollectorRequest");
     expect(taskEightPublicTypeCount).toBe(11);
     expect(controllerPublicTypeCount).toBe(2);
-    expect(artifactResumePublicTypeCount).toBe(3);
+    expect(artifactResumePublicTypeCount).toBe(5);
     expect(runtimeTransportPublicTypeCount).toBe(10);
     expect(runtimeCallPublicTypeCount).toBe(8);
     expect(shadowRunnerPublicTypeCount).toBe(7);

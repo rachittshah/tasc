@@ -110,22 +110,30 @@ export interface ExperimentNextCommand {
   readonly out: string;
 }
 
+const RUNTIME_PROBE_CAPABILITY_VALUES = Object.freeze([
+  "modelDiscovery",
+  "liveness",
+  "readiness",
+  "prometheusMetrics",
+  "jsonMetrics",
+  "chatCompletions",
+  "completions",
+  "responses",
+  "nativeChat",
+  "nativeGenerate",
+] as const);
+
+const RUNTIME_PROBE_EFFECT_VALUES = Object.freeze([
+  "non-mutating",
+  "inference-canary",
+  "consumptive",
+] as const);
+
 export type RuntimeProbeCapability =
-  | "modelDiscovery"
-  | "liveness"
-  | "readiness"
-  | "prometheusMetrics"
-  | "jsonMetrics"
-  | "chatCompletions"
-  | "completions"
-  | "responses"
-  | "nativeChat"
-  | "nativeGenerate";
+  typeof RUNTIME_PROBE_CAPABILITY_VALUES[number];
 
 export type RuntimeProbeObservationEffect =
-  | "non-mutating"
-  | "inference-canary"
-  | "consumptive";
+  typeof RUNTIME_PROBE_EFFECT_VALUES[number];
 
 export interface RuntimeProbeCommand {
   readonly kind: "runtime-probe";
@@ -421,24 +429,25 @@ function requiredOption(options: ParsedOptions, option: string): string {
   return value;
 }
 
-const RUNTIME_PROBE_CAPABILITIES: ReadonlySet<string> = new Set([
-  "modelDiscovery",
-  "liveness",
-  "readiness",
-  "prometheusMetrics",
-  "jsonMetrics",
-  "chatCompletions",
-  "completions",
-  "responses",
-  "nativeChat",
-  "nativeGenerate",
-]);
+const RUNTIME_PROBE_CAPABILITIES: ReadonlySet<string> = new Set(
+  RUNTIME_PROBE_CAPABILITY_VALUES,
+);
 
-const RUNTIME_PROBE_EFFECTS: ReadonlySet<string> = new Set([
-  "non-mutating",
-  "inference-canary",
-  "consumptive",
-]);
+const RUNTIME_PROBE_EFFECTS: ReadonlySet<string> = new Set(
+  RUNTIME_PROBE_EFFECT_VALUES,
+);
+
+function isRuntimeProbeCapability(
+  value: string,
+): value is RuntimeProbeCapability {
+  return RUNTIME_PROBE_CAPABILITIES.has(value);
+}
+
+function isRuntimeProbeObservationEffect(
+  value: string,
+): value is RuntimeProbeObservationEffect {
+  return RUNTIME_PROBE_EFFECTS.has(value);
+}
 
 function boundedPositiveDecimal(
   value: string,
@@ -578,10 +587,10 @@ function parseRuntimeCommand(argv: readonly string[]): RuntimeProbeCommand {
   const options = parseOptions(argv, 2, RUNTIME_PROBE_OPTIONS);
   const capability = requiredOption(options, "--capability");
   const observationEffect = requiredOption(options, "--effect");
-  if (!RUNTIME_PROBE_CAPABILITIES.has(capability)) {
+  if (!isRuntimeProbeCapability(capability)) {
     fail("invalid-option-value");
   }
-  if (!RUNTIME_PROBE_EFFECTS.has(observationEffect)) {
+  if (!isRuntimeProbeObservationEffect(observationEffect)) {
     fail("invalid-option-value");
   }
   return Object.freeze({
@@ -589,9 +598,8 @@ function parseRuntimeCommand(argv: readonly string[]): RuntimeProbeCommand {
     endpoint: requiredOption(options, "--endpoint"),
     runtime: requiredOption(options, "--runtime"),
     trust: requiredOption(options, "--trust"),
-    capability: capability as RuntimeProbeCapability,
-    observationEffect:
-      observationEffect as RuntimeProbeObservationEffect,
+    capability,
+    observationEffect,
     deadlineMs: boundedPositiveDecimal(
       requiredOption(options, "--deadline-ms"),
       300_000,

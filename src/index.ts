@@ -1,4 +1,9 @@
-export * from "./determinism.js";
+export {
+  CANONICAL_JSON_VERSION,
+  canonicalJson,
+  canonicalJsonBytes,
+  compareCodeUnits,
+} from "./determinism.js";
 export {
   fingerprintAssessmentContext,
   parseAssessmentContext,
@@ -48,6 +53,7 @@ export {
   MAX_ARTIFACT_TOTAL_BYTES,
   NO_DEPLOYMENT_AUTHORITY,
   PURE_NODE_NAMESPACE_LIMITATION,
+  nodeArtifactFilesystem,
   readArtifactPacketIfPresent,
   verifyArtifactPacket,
   writeArtifactPacket,
@@ -56,6 +62,8 @@ export {
 export type {
   ArtifactDurability,
   ArtifactDurabilityLimitation,
+  ArtifactFileHandle,
+  ArtifactFilesystem,
   ArtifactManifest,
   ArtifactManifestFile,
   ArtifactPacketDescriptor,
@@ -249,7 +257,10 @@ export type {
   PolicyEvaluation,
   PolicyMetrics,
 } from "./evaluate.js";
-export * from "./integrity.js";
+export {
+  sha256,
+  stableJson,
+} from "./integrity.js";
 export {
   assertPolicyBundleMatchesProtocol,
   championPolicy,
@@ -269,7 +280,17 @@ export type {
   ProtocolPolicySpace,
   ReplayedRow,
 } from "./policy.js";
-export * from "./report.js";
+export {
+  buildConfirmationReport,
+  buildDevelopmentReport,
+  proposeNextExperiment,
+} from "./report.js";
+export type {
+  DevelopmentReportOptions,
+  ExperimentContext,
+  NextExperiment,
+  ReportEvidenceOptions,
+} from "./report.js";
 export {
   assertInferenceSpecSemantics,
   assertMeasurementMatrix,
@@ -372,4 +393,12 @@ export type {
   ShadowRunPlanWindowInput,
   ShadowRunPlanWorkBudget,
 } from "./shadow-plan.js";
-export * from "./work-budget.js";
+export {
+  assertWithinWorkBudget,
+  estimateAssessmentWork,
+} from "./work-budget.js";
+export type {
+  AssessmentWorkEstimate,
+  AssessmentWorkInput,
+  WorkBudget,
+} from "./work-budget.js";
