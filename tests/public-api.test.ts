@@ -137,6 +137,8 @@ describe("standalone public API", () => {
       buildDevelopmentReport: expect.any(Function),
       buildConfirmationReport: expect.any(Function),
       proposeNextExperiment: expect.any(Function),
+      writeDevelopmentArtifacts: expect.any(Function),
+      writeConfirmationArtifacts: expect.any(Function),
       parseExperimentProtocol: expect.any(Function),
       parseExperimentProtocolJson: expect.any(Function),
       parseTraceEnvelope: expect.any(Function),

@@ -540,7 +540,7 @@ async function validateInstalledPackage(
     "if (typeof value.nodeArtifactFilesystem?.open !== 'function' || typeof value.nodeArtifactFilesystem?.realpath !== 'function') {",
     "  throw new Error('root artifact filesystem export is unavailable');",
     "}",
-    "for (const name of ['buildShadowRunPlan', 'fingerprintRuntimeInvocationHttpLimits', 'parseShadowRunPlan', 'verifyTraceDispatchAuthorization']) {",
+    "for (const name of ['buildShadowRunPlan', 'fingerprintRuntimeInvocationHttpLimits', 'parseShadowRunPlan', 'verifyTraceDispatchAuthorization', 'writeConfirmationArtifacts', 'writeDevelopmentArtifacts']) {",
     "  if (typeof value[name] !== 'function') {",
     "    throw new Error(`root control-plane export ${name} is unavailable`);",
     "  }",

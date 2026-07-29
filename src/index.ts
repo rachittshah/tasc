@@ -284,6 +284,8 @@ export {
   buildConfirmationReport,
   buildDevelopmentReport,
   proposeNextExperiment,
+  writeConfirmationArtifacts,
+  writeDevelopmentArtifacts,
 } from "./report.js";
 export type {
   DevelopmentReportOptions,
