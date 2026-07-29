@@ -1474,10 +1474,11 @@ export async function withBoundedHttpResponse<T>(
         bodyTaken = true;
         try {
           for await (const chunk of response.body) {
-            resetBodyTimer();
             if (chunk.byteLength === 0) {
+              resetBodyTimer();
               continue;
             }
+            bodyTimer = clearPhaseTimer(bodyTimer);
             if (timing.firstByteMs === undefined) {
               timing.firstByteMs = elapsedMs(timing);
             }
@@ -1500,6 +1501,7 @@ export async function withBoundedHttpResponse<T>(
               );
             }
             yield chunk;
+            resetBodyTimer();
           }
           bodyTimer = clearPhaseTimer(bodyTimer);
           state.responseComplete = true;

@@ -769,6 +769,34 @@ describe("bounded runtime HTTP lifecycle", () => {
       });
     });
 
+    await withLoopbackServer(async (_request, response) => {
+      response.flushHeaders();
+      response.write("first");
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      response.end("second");
+    }, async (server) => {
+      const value = await withBoundedHttpResponse(
+        await mintPin({ origin: server.origin }),
+        {
+          limits: {
+            bodyTimeoutMs: 25,
+            deadlineMs: 500,
+          },
+        },
+        async (response) => {
+          const chunks: Buffer[] = [];
+          for await (const chunk of response.body) {
+            chunks.push(Buffer.from(chunk));
+            if (chunks.length === 1) {
+              await new Promise((resolve) => setTimeout(resolve, 75));
+            }
+          }
+          return Buffer.concat(chunks).toString("utf8");
+        },
+      );
+      expect(value.value).toBe("firstsecond");
+    });
+
     await withLoopbackServer((_request, response) => {
       response.end("must not be contacted");
     }, async (server) => {
